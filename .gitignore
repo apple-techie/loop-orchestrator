@@ -1,0 +1,8 @@
+# Local orchestrator + harness state (session ids, todos, mailbox, absolute paths)
+.loop/
+.pi/
+.demo/
+
+# OS / editor cruft
+.DS_Store
+*.swp

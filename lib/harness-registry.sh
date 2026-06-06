@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+# scripts/lib/harness-registry.sh
+#
+# Per-harness contract registry for multi-harness orchestration (M002).
+#
+# Contract fields:
+#   launch_cmd            How to invoke the harness in tmux (full command line)
+#   model_flag            How to pass a model: "-m" | "--model" | "config" | "skip"
+#   expected_process      Pane process-name regex for lane-status / readiness checks
+#   auto_approve_flag     Per-harness analog of claude's --dangerously-skip-permissions ("" if N/A)
+#   paste_enter_delay     Seconds to wait between paste and Enter (loop-dispatch.sh PASTE_ENTER_DELAY)
+#   skill_dir             Where each harness loads project skills from (relative to repo root)
+#   non_interactive_flag  Flag for one-shot subprocess dispatch ("-p", "exec", "run", "")
+#
+# Source this file from any script that needs to resolve harness behavior:
+#   source "$PROJECT_ROOT/scripts/lib/harness-registry.sh"
+#   harness_field pi launch_cmd        # -> "pi"
+#   harness_field claude auto_approve_flag  # -> "--dangerously-skip-permissions"
+#
+# CLI mode (when invoked directly):
+#   harness-registry.sh list                          # list known harnesses
+#   harness-registry.sh fields <name>                 # print all fields for one harness
+#   harness-registry.sh field <name> <field>          # print one field
+#   harness-registry.sh probe <name>                  # verify binary exists, print resolved launch
+#
+# This file MUST be POSIX-bash compatible (no zsh-isms) so it sources cleanly
+# under tmux-spawned shells.
+
+# Guard against double-sourcing.
+[[ -n "${HARNESS_REGISTRY_LOADED:-}" ]] && return 0
+HARNESS_REGISTRY_LOADED=1
+
+# ─── Registry data ───────────────────────────────────────────────────────
+# Each harness gets one block of variables. Naming convention:
+#   HARNESS_<NAME>_<FIELD>
+# Use uppercase for the harness key in variable names, even though the
+# external interface uses lowercase ("pi", "claude", etc.).
+
+# pi / gsd-pi — TypeScript agent harness with extension system, GSD lifecycle.
+HARNESS_PI_LAUNCH_CMD="pi"
+HARNESS_PI_MODEL_FLAG="--model"
+HARNESS_PI_EXPECTED_PROCESS="pi"
+HARNESS_PI_AUTO_APPROVE_FLAG=""
+HARNESS_PI_PASTE_ENTER_DELAY="2.0"
+HARNESS_PI_SKILL_DIR=".pi/skills"
+HARNESS_PI_NON_INTERACTIVE_FLAG=""
+
+# claude — Anthropic's Claude Code CLI. Anthropic-only models.
+# launch_cmd is the bare invocation; consumers append auto_approve_flag
+# when they want non-interactive lane behavior.
+HARNESS_CLAUDE_LAUNCH_CMD="claude"
+HARNESS_CLAUDE_MODEL_FLAG="config"
+HARNESS_CLAUDE_EXPECTED_PROCESS="claude"
+HARNESS_CLAUDE_AUTO_APPROVE_FLAG="--dangerously-skip-permissions"
+HARNESS_CLAUDE_PASTE_ENTER_DELAY="2.0"
+HARNESS_CLAUDE_SKILL_DIR=".claude/skills"
+HARNESS_CLAUDE_NON_INTERACTIVE_FLAG="-p"
+
+# opencode — OpenCode Go TUI. Models via opencode-go provider (mimo/glm/kimi/qwen).
+# May spawn as "node" or "opencode" depending on launch path; regex covers both.
+HARNESS_OPENCODE_LAUNCH_CMD="opencode"
+HARNESS_OPENCODE_MODEL_FLAG="config"
+HARNESS_OPENCODE_EXPECTED_PROCESS="opencode|node"
+HARNESS_OPENCODE_AUTO_APPROVE_FLAG=""
+HARNESS_OPENCODE_PASTE_ENTER_DELAY="2.5"
+HARNESS_OPENCODE_SKILL_DIR=".config/opencode"
+HARNESS_OPENCODE_NON_INTERACTIVE_FLAG="run"
+
+# codex — Codex CLI. Models via --config model=<id> override.
+HARNESS_CODEX_LAUNCH_CMD="codex"
+HARNESS_CODEX_MODEL_FLAG="--config"
+HARNESS_CODEX_EXPECTED_PROCESS="codex|node"
+HARNESS_CODEX_AUTO_APPROVE_FLAG="--full-auto"
+HARNESS_CODEX_PASTE_ENTER_DELAY="2.0"
+HARNESS_CODEX_SKILL_DIR=".codex"
+HARNESS_CODEX_NON_INTERACTIVE_FLAG="exec"
+
+# cursor-agent — Cursor Agent CLI. Models via --model flag.
+HARNESS_CURSOR_AGENT_LAUNCH_CMD="cursor-agent"
+HARNESS_CURSOR_AGENT_MODEL_FLAG="--model"
+HARNESS_CURSOR_AGENT_EXPECTED_PROCESS="cursor-agent|node"
+HARNESS_CURSOR_AGENT_AUTO_APPROVE_FLAG=""
+HARNESS_CURSOR_AGENT_PASTE_ENTER_DELAY="2.0"
+HARNESS_CURSOR_AGENT_SKILL_DIR=""
+HARNESS_CURSOR_AGENT_NON_INTERACTIVE_FLAG="-p"
+
+# hermes — Hermes Agent (NousResearch fork). Python argparse CLI.
+# Interactive: `hermes chat --tui` (accepts -m/--model and --yolo).
+# One-shot: `hermes -z <prompt>` (a top-level flag).
+HARNESS_HERMES_LAUNCH_CMD="hermes chat --tui"
+HARNESS_HERMES_MODEL_FLAG="--model"
+HARNESS_HERMES_EXPECTED_PROCESS="hermes|python"
+HARNESS_HERMES_AUTO_APPROVE_FLAG="--yolo"
+HARNESS_HERMES_PASTE_ENTER_DELAY="2.0"
+HARNESS_HERMES_SKILL_DIR=".hermes/skills"
+HARNESS_HERMES_NON_INTERACTIVE_FLAG="-z"
+
+# droid — Factory's coding agent. Interactive `droid`; model + autonomy
+# (--auto low|medium|high) are exec-only flags, so the interactive lane reads
+# them from droid settings (model_flag=config). One-shot is `droid exec`.
+HARNESS_DROID_LAUNCH_CMD="droid"
+HARNESS_DROID_MODEL_FLAG="config"
+HARNESS_DROID_EXPECTED_PROCESS="droid|node"
+HARNESS_DROID_AUTO_APPROVE_FLAG=""
+HARNESS_DROID_PASTE_ENTER_DELAY="2.0"
+HARNESS_DROID_SKILL_DIR=""
+HARNESS_DROID_NON_INTERACTIVE_FLAG="exec"
+
+# forge — Forge agent CLI (Rust). Interactive by default; model/agent selected
+# via `forge config`/agent (model_flag=config). One-shot is `forge -p <prompt>`.
+HARNESS_FORGE_LAUNCH_CMD="forge"
+HARNESS_FORGE_MODEL_FLAG="config"
+HARNESS_FORGE_EXPECTED_PROCESS="forge"
+HARNESS_FORGE_AUTO_APPROVE_FLAG=""
+HARNESS_FORGE_PASTE_ENTER_DELAY="2.0"
+HARNESS_FORGE_SKILL_DIR=""
+HARNESS_FORGE_NON_INTERACTIVE_FLAG="-p"
+
+# amp — Sourcegraph Amp. Auto-selects models via --mode (no model id), so
+# model_flag=skip. Auto-approve is --dangerously-allow-all; one-shot is `amp -x`.
+HARNESS_AMP_LAUNCH_CMD="amp"
+HARNESS_AMP_MODEL_FLAG="skip"
+HARNESS_AMP_EXPECTED_PROCESS="amp|node"
+HARNESS_AMP_AUTO_APPROVE_FLAG="--dangerously-allow-all"
+HARNESS_AMP_PASTE_ENTER_DELAY="2.0"
+HARNESS_AMP_SKILL_DIR=""
+HARNESS_AMP_NON_INTERACTIVE_FLAG="-x"
+
+# openclaw — OpenClaw gateway runtime. The interactive entrypoint is
+# `openclaw tui` (a terminal UI to the running Gateway). Model + approvals are
+# gateway/agent config, not CLI flags. One-shot is `openclaw agent --message`.
+HARNESS_OPENCLAW_LAUNCH_CMD="openclaw tui"
+HARNESS_OPENCLAW_MODEL_FLAG="config"
+HARNESS_OPENCLAW_EXPECTED_PROCESS="openclaw|node"
+HARNESS_OPENCLAW_AUTO_APPROVE_FLAG=""
+HARNESS_OPENCLAW_PASTE_ENTER_DELAY="2.5"
+HARNESS_OPENCLAW_SKILL_DIR=""
+HARNESS_OPENCLAW_NON_INTERACTIVE_FLAG="agent"
+
+# mprocs — process-group dashboard. Not an LLM harness, but lanes can run it.
+HARNESS_MPROCS_LAUNCH_CMD="mprocs"
+HARNESS_MPROCS_MODEL_FLAG="skip"
+HARNESS_MPROCS_EXPECTED_PROCESS="mprocs"
+HARNESS_MPROCS_AUTO_APPROVE_FLAG=""
+HARNESS_MPROCS_PASTE_ENTER_DELAY="0"
+HARNESS_MPROCS_SKILL_DIR=""
+HARNESS_MPROCS_NON_INTERACTIVE_FLAG=""
+
+# shell — bare shell lane (e.g. ops-top runs a watch command). No harness invocation.
+HARNESS_SHELL_LAUNCH_CMD=""
+HARNESS_SHELL_MODEL_FLAG="skip"
+HARNESS_SHELL_EXPECTED_PROCESS="zsh|bash|sh|watch|ssh"
+HARNESS_SHELL_AUTO_APPROVE_FLAG=""
+HARNESS_SHELL_PASTE_ENTER_DELAY="0"
+HARNESS_SHELL_SKILL_DIR=""
+HARNESS_SHELL_NON_INTERACTIVE_FLAG=""
+
+# Ordered list — order matters for `list` output.
+HARNESS_REGISTRY_NAMES=(pi claude opencode codex cursor-agent hermes droid forge amp openclaw mprocs shell)
+HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag)
+
+# ─── Lookup helpers ──────────────────────────────────────────────────────
+
+# Lowercase a harness name and convert hyphens to underscores for variable
+# lookup. "cursor-agent" -> "CURSOR_AGENT".
+_harness_var_key() {
+  local name="$1"
+  echo "${name//-/_}" | tr '[:lower:]' '[:upper:]'
+}
+
+# harness_known <name> — exit 0 if registered, 1 otherwise.
+harness_known() {
+  local name="$1"
+  local n
+  for n in "${HARNESS_REGISTRY_NAMES[@]}"; do
+    [[ "$n" == "$name" ]] && return 0
+  done
+  return 1
+}
+
+# harness_field <name> <field> — print the field value, or empty + exit 1 if unknown.
+harness_field() {
+  local name="$1"
+  local field="$2"
+  if ! harness_known "$name"; then
+    echo "harness-registry: unknown harness '$name'" >&2
+    return 1
+  fi
+  local field_uc
+  field_uc="$(echo "$field" | tr '[:lower:]' '[:upper:]')"
+  local var
+  var="HARNESS_$(_harness_var_key "$name")_${field_uc}"
+  # Validate the field name itself
+  local f found=0
+  for f in "${HARNESS_REGISTRY_FIELDS[@]}"; do
+    [[ "$f" == "$field" ]] && found=1 && break
+  done
+  if (( found == 0 )); then
+    echo "harness-registry: unknown field '$field' (valid: ${HARNESS_REGISTRY_FIELDS[*]})" >&2
+    return 1
+  fi
+  printf '%s' "${!var-}"
+}
+
+# harness_binary_path <name> — print the path to the harness binary, exit 1 if missing.
+# Resolves the first token of launch_cmd via `command -v`.
+harness_binary_path() {
+  local name="$1"
+  local launch
+  launch="$(harness_field "$name" launch_cmd)" || return 1
+  if [[ -z "$launch" ]]; then
+    # shell harness has empty launch by design.
+    echo ""
+    return 0
+  fi
+  # First whitespace-delimited token.
+  local bin="${launch%% *}"
+  command -v "$bin" 2>/dev/null
+}
+
+# harness_is_bare_shell_process <process_name> — exit 0 if the process name
+# represents a bare login shell (i.e. an AI harness has exited and tmux fell
+# back to the user's shell). Used by lane-health auto-restart and by
+# normalize_audit_lanes' settle loop. Distinct from the shell harness's
+# expected_process regex which intentionally also matches `watch|ssh`
+# (legitimate shell-driven lanes like ops-top). The "fell back" set is
+# narrower: only the interactive shells.
+harness_is_bare_shell_process() {
+  case "$1" in
+    zsh|bash|sh|fish|"") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# harness_resolve_launch <name> [model] — print the full launch command with
+# model selection applied (where applicable). Empty model -> launch_cmd as-is.
+harness_resolve_launch() {
+  local name="$1"
+  local model="${2:-}"
+  local launch
+  launch="$(harness_field "$name" launch_cmd)" || return 1
+  local model_flag
+  model_flag="$(harness_field "$name" model_flag)" || return 1
+
+  if [[ -z "$model" || "$model_flag" == "skip" || "$model_flag" == "config" ]]; then
+    # No CLI model selection needed (skip = harness has no model concept;
+    # config = harness reads model from its own config file at startup).
+    printf '%s' "$launch"
+    return 0
+  fi
+
+  case "$model_flag" in
+    -m|--model)
+      printf '%s %s %s' "$launch" "$model_flag" "$model"
+      ;;
+    --config)
+      # codex pattern: codex --config model=<id>
+      printf '%s %s model=%s' "$launch" "$model_flag" "$model"
+      ;;
+    *)
+      # Unknown flag style — append literally.
+      printf '%s %s %s' "$launch" "$model_flag" "$model"
+      ;;
+  esac
+}
+
+# ─── CLI mode ────────────────────────────────────────────────────────────
+# When invoked directly (not sourced), expose a small CLI for inspection.
+
+_harness_registry_cli() {
+  local cmd="${1:-list}"
+  shift || true
+  case "$cmd" in
+    list)
+      printf '%s\n' "${HARNESS_REGISTRY_NAMES[@]}"
+      ;;
+    fields)
+      local name="${1:?usage: fields <name>}"
+      harness_known "$name" || { echo "unknown harness: $name" >&2; return 1; }
+      local f
+      for f in "${HARNESS_REGISTRY_FIELDS[@]}"; do
+        printf '%-22s %s\n' "$f" "$(harness_field "$name" "$f")"
+      done
+      ;;
+    field)
+      local name="${1:?usage: field <name> <field>}"
+      local field="${2:?usage: field <name> <field>}"
+      harness_field "$name" "$field"
+      printf '\n'
+      ;;
+    probe)
+      local name="${1:?usage: probe <name>}"
+      local model="${2:-}"
+      if ! harness_known "$name"; then
+        echo "unknown harness: $name" >&2
+        echo "known: ${HARNESS_REGISTRY_NAMES[*]}" >&2
+        return 1
+      fi
+      local launch
+      launch="$(harness_resolve_launch "$name" "$model")"
+      local bin_path
+      bin_path="$(harness_binary_path "$name" 2>/dev/null || true)"
+      printf 'harness:           %s\n' "$name"
+      printf 'launch_cmd:        %s\n' "$launch"
+      if [[ -n "$model" ]]; then
+        printf 'model:             %s\n' "$model"
+      fi
+      printf 'expected_process:  %s\n' "$(harness_field "$name" expected_process)"
+      printf 'auto_approve_flag: %s\n' "$(harness_field "$name" auto_approve_flag)"
+      printf 'paste_enter_delay: %s\n' "$(harness_field "$name" paste_enter_delay)"
+      printf 'skill_dir:         %s\n' "$(harness_field "$name" skill_dir)"
+      printf 'non_interactive:   %s\n' "$(harness_field "$name" non_interactive_flag)"
+      if [[ -z "$launch" ]]; then
+        printf 'binary:            (no launch — bare shell lane)\n'
+        return 0
+      fi
+      if [[ -n "$bin_path" ]]; then
+        printf 'binary:            %s\n' "$bin_path"
+        return 0
+      fi
+      printf 'binary:            NOT FOUND on PATH\n' >&2
+      return 1
+      ;;
+    -h|--help|help|"")
+      cat <<'EOF'
+harness-registry — per-harness contract lookup
+
+Usage:
+  harness-registry.sh list
+  harness-registry.sh fields <name>
+  harness-registry.sh field  <name> <field>
+  harness-registry.sh probe  <name> [model]
+
+Known harnesses (see HARNESS_REGISTRY_NAMES): pi, claude, opencode, codex, cursor-agent, hermes, droid, forge, amp, openclaw, mprocs, shell
+Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag
+
+When sourced from another script, exposes:
+  harness_known <name>
+  harness_field <name> <field>
+  harness_binary_path <name>
+  harness_resolve_launch <name> [model]
+EOF
+      ;;
+    *)
+      echo "unknown command: $cmd" >&2
+      _harness_registry_cli help >&2
+      return 1
+      ;;
+  esac
+}
+
+# Detect direct execution (BASH_SOURCE[0] == $0) and run CLI.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  _harness_registry_cli "$@"
+fi

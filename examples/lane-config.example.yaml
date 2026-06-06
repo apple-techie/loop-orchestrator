@@ -1,0 +1,75 @@
+# Example lane-config for a two-repo project (web + infra).
+#
+# Schema:
+#   lanes:
+#     <lane-name>:                       # one of: coord, web, infra,
+#                                        #         validate-left, validate-right,
+#                                        #         ops-top, ops-bottom, docs
+#       harness: <harness-name>          # pi | claude | opencode | codex |
+#                                        # cursor-agent | hermes | droid | forge |
+#                                        # amp | openclaw | mprocs | shell
+#       model:   <model-id>              # optional; harness-specific format
+#       repo:    <free-form-label>       # advisory only; loop-tmux uses
+#                                        # --project-root / --infra-root /
+#                                        # --worktree-* for actual paths
+#       role:    <free-form>             # documentation only
+#       cmd:     <literal command>       # required for shell lanes that should
+#                                        # auto-run something (e.g. a watcher);
+#                                        # optional override for mprocs lanes.
+#                                        # Relative paths that start with
+#                                        # `scripts/` are resolved against the
+#                                        # caller's --project-root.
+#
+# Host overrides:
+#   If a file `lane-config.<short-hostname>.yaml` exists beside this file,
+#   it's auto-merged on top (lane-level replace). Useful for per-machine
+#   tweaks (different paths on a remote build box, etc.).
+#
+# Lane-to-AUTO mapping inside loop-tmux:
+#   web              -> AUTO_WEB_CMD            (window 'web', pane 1)
+#   infra            -> AUTO_INFRA_CMD          (window 'infra', pane 1)
+#   validate-left    -> AUTO_VALIDATE_LEFT_CMD  (window 'validate', pane 1)
+#   validate-right   -> AUTO_VALIDATE_RIGHT_CMD (window 'validate', pane 2)
+#   ops-top          -> AUTO_OPS_TOP_CMD        (window 'ops', pane 1)
+#   ops-bottom       -> AUTO_OPS_BOTTOM_CMD     (window 'ops', pane 2)
+#   docs             -> AUTO_DOCS_CMD           (window 'docs', pane 1)
+#   coord            -> ignored (preset / --coord-cmd owns the coord lane)
+
+lanes:
+  coord:
+    harness: shell
+    role: dispatcher
+
+  web:
+    harness: pi
+    model: ""
+    role: product-reasoning
+
+  infra:
+    harness: claude
+    model: ""
+    role: infra-worker
+
+  validate-left:
+    harness: shell
+    role: test-watcher
+    cmd: scripts/dev-watch.sh
+
+  validate-right:
+    harness: shell
+    role: human-proving
+
+  ops-top:
+    harness: shell
+    role: health-probe
+    cmd: |-
+      watch -n 10 "curl -sf https://example.invalid/healthz || echo DOWN"
+
+  ops-bottom:
+    harness: shell
+    role: log-tail
+    cmd: tail -F /tmp/example.log
+
+  docs:
+    harness: pi
+    role: synthesis

@@ -1,0 +1,54 @@
+# MADR decision-loop lane profile — for evaluating a lasting / irreversible
+# decision (new queue, auth model, deploy architecture, vendor swap, prod risk).
+#
+# Two ways to use it:
+#   1. Static — launch the whole decision layout at once:
+#        loop-tmux --project auth-decision --project-root "$PWD" \
+#          --lane-config examples/madr-decision.lane-config.yaml --boot-check
+#
+#   2. Dynamic — from a normal session, spin the review lanes up on demand and
+#      retire them once the ADR is drafted (the recommended path):
+#        loop-tmux add-lane --window opt-app   --harness pi     --role option-auditor-app-code
+#        loop-tmux add-lane --window opt-infra --harness claude --role option-auditor-infra-risk --auto-approve
+#        loop-tmux add-lane --window madr      --harness pi     --role madr-drafter
+#        loop-tmux drop-lane --window opt-app          # clean up when done
+#
+# Flow: agents explore -> validate proves -> ops confirms reality -> docs drafts
+# the MADR -> a human/coord accepts (`loop-adr accept`). Agent lanes never accept.
+
+lanes:
+  coord:
+    harness: shell
+    role: decision-owner
+
+  web:
+    harness: pi
+    role: option-auditor-app-code
+
+  infra:
+    harness: claude
+    role: option-auditor-infra-risk
+
+  validate-left:
+    harness: shell
+    role: proof-runner
+    cmd: scripts/verify.sh
+
+  validate-right:
+    harness: shell
+    role: adr-ledger
+    cmd: loop-adr list
+
+  ops-top:
+    harness: shell
+    role: live-risk-check
+    cmd: scripts/check-prod-health.sh
+
+  ops-bottom:
+    harness: shell
+    role: evidence-log
+    cmd: tail -F .loop/sessions/decision/events.jsonl
+
+  docs:
+    harness: pi
+    role: madr-drafter
