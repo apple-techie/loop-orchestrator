@@ -1,5 +1,7 @@
 # loop-orchestrator
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Project-agnostic shell scripts for spinning up a loop-aware tmux session: a
 coordinator pane, AI implementation lanes, a validation lane, an ops/health
 lane, and a docs lane — wired together with a small mailbox + state-file
