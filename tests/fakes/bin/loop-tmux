@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Fake loop-tmux (CONTRACT.md surface). Canned lanes JSON; never touches tmux.
+# Logs "name args..." to $FAKE_CALL_LOG when set. drop-lane --force exits 7 so
+# tests catch any Python caller that ever passes it.
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+cmd="${1:-}"
+
+session=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--session" ]; then session="$a"; fi
+  prev="$a"
+done
+
+case "$cmd" in
+  list-lanes)
+    cat <<EOF
+{
+  "contract_version": 1,
+  "session": "$session",
+  "generated_at": "2026-06-10T00:00:00Z",
+  "lanes": [
+    {"window": "coord", "harness": "claude", "model": null, "role": "coordinator", "cmd": null, "base": true},
+    {"window": "web", "harness": "claude", "model": null, "role": "impl", "cmd": null, "base": true},
+    {"window": "docs", "harness": "claude", "model": null, "role": "docs", "cmd": null, "base": true},
+    {"window": "helper", "harness": "claude", "model": null, "role": "impl", "cmd": "claude", "base": false}
+  ]
+}
+EOF
+    ;;
+  add-lane)
+    echo "ok"
+    ;;
+  drop-lane)
+    for a in "$@"; do
+      if [ "$a" = "--force" ]; then
+        echo "fake loop-tmux: automation must never pass --force" >&2
+        exit 7
+      fi
+    done
+    echo "ok"
+    ;;
+  *)
+    echo "fake loop-tmux: unknown subcommand '$cmd'" >&2
+    exit 2
+    ;;
+esac

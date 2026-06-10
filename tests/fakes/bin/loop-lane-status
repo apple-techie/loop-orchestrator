@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Fake loop-lane-status (CONTRACT.md surface). All lanes idle unless
+# FAKE_LANE_STATUS_OVERRIDE='lane=status,...' says otherwise.
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+status_for() {
+  local lane="$1" pair
+  local IFS=','
+  for pair in ${FAKE_LANE_STATUS_OVERRIDE:-}; do
+    if [ "${pair%%=*}" = "$lane" ]; then
+      printf '%s' "${pair#*=}"
+      return 0
+    fi
+  done
+  printf 'idle'
+}
+
+case "${1:-}" in
+  --json)
+    if [ "${2:-}" != "--all" ]; then
+      echo "fake loop-lane-status: only --json --all is canned" >&2
+      exit 2
+    fi
+    session="${3:-}"
+    cat <<EOF
+{
+  "contract_version": 1,
+  "session": "$session",
+  "generated_at": "2026-06-10T00:00:00Z",
+  "lanes": {
+    "coord": {"status": "$(status_for coord)", "target": "$session:coord.1", "kind": "fixed"},
+    "web": {"status": "$(status_for web)", "target": "$session:web.1", "kind": "fixed"},
+    "docs": {"status": "$(status_for docs)", "target": "$session:docs.1", "kind": "fixed"},
+    "helper": {"status": "$(status_for helper)", "target": "%7", "kind": "dynamic"}
+  }
+}
+EOF
+    ;;
+  --print-target)
+    printf '%s:%s.1\n' "${2:-}" "${3:-}"
+    ;;
+  *)
+    printf '%s\n' "$(status_for "${2:-}")"
+    ;;
+esac

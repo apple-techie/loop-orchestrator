@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fake loop-dispatch (CONTRACT.md surface). Exit 0 = delivered; the call log is
+# the only observable effect. FAKE_DISPATCH_FAIL=1 simulates a tmux failure.
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+if [ "${FAKE_DISPATCH_FAIL:-}" = "1" ]; then
+  echo "fake loop-dispatch: pane vanished mid-paste" >&2
+  exit 1
+fi
+exit 0

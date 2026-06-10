@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Fake harness-registry CLI (CONTRACT.md surface). Knows 'claude' one-shot;
+# 'pi' has no one-shot mode (exit 1 + empty stdout, per contract).
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+case "${1:-}" in
+  field)
+    if [ "${2:-}" = "claude" ] && [ "${3:-}" = "oneshot_template" ]; then
+      echo 'claude -p {prompt}'
+    else
+      exit 1
+    fi
+    ;;
+  oneshot)
+    case "${2:-}" in
+      claude) echo 'claude -p {prompt}' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac

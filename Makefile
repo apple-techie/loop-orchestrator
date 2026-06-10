@@ -14,13 +14,16 @@ SCRIPTS := loop-tmux loop-dispatch loop-digest loop-lane-status loop-adr
 LIBS := lib/harness-registry.sh lib/lane-config-resolver.sh lib/lane-health.sh
 REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
-.PHONY: install uninstall check print-paths help
+.PHONY: install uninstall check print-paths help install-python check-python check-all
 
 help:
 	@echo "Targets:"
 	@echo "  install        Symlink scripts into BIN (default: $(BIN))"
 	@echo "  uninstall      Remove the symlinks from BIN"
 	@echo "  check          bash -n syntax-check all scripts + lib helpers"
+	@echo "  install-python Install the optional Python layer (loop-engine/loop-deck/loop-pm)"
+	@echo "  check-python   ruff + pytest for the Python layer (needs uv)"
+	@echo "  check-all      check + check-python"
 	@echo "  print-paths    Print resolved install paths and exit"
 	@echo ""
 	@echo "Override BIN: make install BIN=/usr/local/bin"
@@ -60,6 +63,35 @@ check:
 		src="$(REPO_DIR)/$$l"; \
 		bash -n "$$src" && echo "ok  $$src" || exit 1; \
 	done
+	@for h in $(REPO_DIR)/scripts/*.sh; do \
+		[ -e "$$h" ] || continue; \
+		bash -n "$$h" && echo "ok  $$h" || exit 1; \
+	done
+
+# ── optional Python layer ────────────────────────────────────────────────
+# The bash substrate above must keep working with NONE of this installed;
+# the plain `check` target runs on a Python-extras-free environment in CI
+# to enforce exactly that.
+
+install-python:
+	@if command -v uv >/dev/null 2>&1; then \
+		uv tool install --force --from "$(REPO_DIR)" loop-orchestrator; \
+	else \
+		echo "uv not found; falling back to pip --user (needs Python >= 3.10)"; \
+		python3 -m pip install --user "$(REPO_DIR)"; \
+	fi
+
+check-python:
+	@command -v uv >/dev/null 2>&1 || { echo "check-python requires uv" >&2; exit 1; }
+	@# macOS + iCloud-synced repos: UF_HIDDEN gets set on .venv dotfiles and
+	@# CPython >= 3.13 skips hidden .pth files, breaking the editable install.
+	@# Best-effort unhide right before use; no-op on Linux.
+	@command -v chflags >/dev/null 2>&1 && chflags nohidden "$(REPO_DIR)"/.venv/lib/python*/site-packages/*.pth 2>/dev/null || true
+	@cd "$(REPO_DIR)" && uv run --no-sync --group dev ruff check src tests
+	@cd "$(REPO_DIR)" && uv run --no-sync --group dev ruff format --check src tests
+	@cd "$(REPO_DIR)" && uv run --no-sync --group dev pytest -q
+
+check-all: check check-python
 
 print-paths:
 	@echo "REPO_DIR = $(REPO_DIR)"

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Fake one-shot brain. Default: preamble + ONE valid ```decision fence.
+# FAKE_BRAIN_MODE: garbage (no fence) | invalid (version 99) | two-fences
+# (bogus fence first, valid fence last — last-fence-wins). Drains stdin and
+# ignores argv so any oneshot template shape works.
+set -u
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+if [ ! -t 0 ]; then cat >/dev/null || true; fi
+
+print_valid_fence() {
+  cat <<'EOF'
+```decision
+version: 1
+critique: fleet is healthy; web should prove the dispatch path end-to-end
+actions:
+  - kind: dispatch
+    lane: web
+    payload: echo brain-decision-ok
+    rationale: demo
+```
+EOF
+}
+
+case "${FAKE_BRAIN_MODE:-valid}" in
+  garbage)
+    cat <<'EOF'
+Looked things over. Lanes seem fine, nothing structured to report today.
+EOF
+    ;;
+  invalid)
+    cat <<'EOF'
+Preamble before an invalid decision.
+
+```decision
+version: 99
+critique: from the future
+actions: []
+```
+EOF
+    ;;
+  two-fences)
+    cat <<'EOF'
+First, a bogus draft I abandoned:
+
+```decision
+version: 99
+critique: bogus draft, ignore
+actions: []
+```
+
+Final answer:
+EOF
+    print_valid_fence
+    ;;
+  *)
+    cat <<'EOF'
+Observations: all lanes idle, one mailbox message pending, no escalations.
+
+EOF
+    print_valid_fence
+    ;;
+esac
+exit 0

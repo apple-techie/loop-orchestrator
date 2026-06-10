@@ -73,3 +73,31 @@ lanes:
   docs:
     harness: pi
     role: synthesis
+
+# Optional Python-layer engine config (loop-engine). The bash resolver reads
+# ONLY the `lanes:` key, so this section is invisible to the substrate
+# (CONTRACT.md). Host overrides replace engine top-level keys wholesale.
+# All keys optional; defaults shown.
+#
+# engine:
+#   approval_mode: manual          # manual | auto | full
+#   checkpoint_interval_s: 900
+#   poll_interval_s: 10
+#   min_cycle_interval_s: 120
+#   brain:
+#     harness: claude              # any registry harness with a oneshot_template
+#     model: ""
+#     timeout_s: 300
+#     max_retries: 1
+#     max_calls_per_hour: 12
+#     extra_args: []
+#   ingest:
+#     mode: lane                   # lane (nudge the docs lane) | headless
+#     lane: docs
+#     timeout_s: 600
+#   destructive:
+#     max_dispatches_per_cycle: 4
+#     max_lanes: 12
+#     payload_patterns: ["git push --force", "rm -rf", "reset --hard"]
+#   pm:
+#     adapters: []                 # e.g. [jira] once an adapter is installed

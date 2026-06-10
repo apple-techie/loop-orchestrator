@@ -6,3 +6,14 @@
 # OS / editor cruft
 .DS_Store
 *.swp
+
+# Python layer
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# ops-wiki lint scratchpad (T0005)
+ops-wiki/.lint-scratchpad.md

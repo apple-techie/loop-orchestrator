@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Fake loop-checkpoint --print (CONTRACT.md surface). --header-file replaces
+# the default header line; the body is byte-identical either way. Size report
+# goes to stderr like the real script.
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+header_file=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--header-file" ]; then header_file="$a"; fi
+  prev="$a"
+done
+
+if [ -n "$header_file" ]; then
+  cat "$header_file"
+else
+  echo "## Coordinator checkpoint (fake default header)"
+fi
+cat <<'EOF'
+compiled state follows
+loops: loop-demo implement
+mailbox: 1 pending
+tasks: T0001 open
+EOF
+echo "prompt size: 96 bytes (~24 tokens, bytes/4)" >&2

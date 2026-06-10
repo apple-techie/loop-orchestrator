@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fake loop-wiki-pending (CONTRACT.md surface). --quiet contract: bare integer.
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+echo "2"
