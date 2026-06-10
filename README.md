@@ -448,6 +448,40 @@ Per-lane flags (e.g. `--web-cmd`, `--ops-top-cmd`) override the preset
 defaults. Unset lanes stay empty — the window/pane is still created, just
 idle.
 
+## Optional Python layer: loop-engine + loop-deck
+
+The bash scripts above are the substrate and need nothing but bash ≥ 3.2,
+tmux ≥ 3.3, and python3 — that never changes (CI runs `make check` with no
+Python packages installed to prove it). On top of them, an optional Python
+package adds:
+
+- **`loop-engine`** — a deterministic orchestration loop: observe lanes →
+  nudge ingest → assemble the compiled checkpoint prompt
+  (`scripts/loop-checkpoint.sh --print`) → call a swappable headless LLM
+  brain (`claude -p`, `codex exec`, … via the harness registry's
+  `oneshot_template`) → parse a structured ` ```decision ` block → gate
+  actions (safe / destructive / blocked; ADR acceptance is never automatable)
+  → dispatch through `loop-dispatch`. Decisions queue in
+  `.loop/sessions/<s>/engine/pending-decision.json` until a human approves:
+  `loop-engine once --approval manual`, then `loop-engine approve <id>`.
+- **`loop-deck`** — an interactive Textual flight deck: fleet table (lanes,
+  harness, role, live status), loops, mailbox, pending-decision queue with
+  `y`/`N` approve/reject, ADR ledger with human-gated accept, steer (`s`) /
+  add-lane (`n`) / drop-lane (`x`, typed-name confirm for base lanes) /
+  jump-to-tmux (`g`). The deck is a non-writer: every mutation shells the
+  same CLIs a human would. Run it in the coord pane:
+  `loop-tmux up … --coord-cmd 'loop-deck --project-root . --session <s>'`.
+- **`loop-pm`** — PM adapters behind the `loop_orchestrator.pm_adapters`
+  entry-point group. `tasks/` files are the source of truth (file wins on
+  conflict); Jira/Linear/etc. are optional sync targets, not requirements.
+
+Install: `make install-python` (uv tool install, pip fallback; needs
+Python ≥ 3.10). Develop: `uv sync --group dev && make check-python`. The
+exact bash surfaces the Python layer may depend on are pinned in
+[CONTRACT.md](CONTRACT.md); engine behavior is configured in an optional
+`engine:` section of `lane-config.yaml` (invisible to the bash resolver —
+see `examples/lane-config.example.yaml`).
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
