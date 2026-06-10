@@ -11,6 +11,14 @@
 #   paste_enter_delay     Seconds to wait between paste and Enter (loop-dispatch.sh PASTE_ENTER_DELAY)
 #   skill_dir             Where each harness loads project skills from (relative to repo root)
 #   non_interactive_flag  Flag for one-shot subprocess dispatch ("-p", "exec", "run", "")
+#   oneshot_template      Full one-shot command template with a {prompt}
+#                         placeholder ("" = harness cannot run one-shot).
+#                         Unlike non_interactive_flag, this is a complete
+#                         runnable shape: e.g. hermes' interactive launch is
+#                         `hermes chat --tui` but its one-shot is `hermes -z
+#                         {prompt}` — not derivable from launch_cmd + flag.
+#                         Callers shlex-split the template and substitute the
+#                         {prompt} token as ONE argument (never shell-interp).
 #
 # Source this file from any script that needs to resolve harness behavior:
 #   source "$PROJECT_ROOT/scripts/lib/harness-registry.sh"
@@ -21,6 +29,7 @@
 #   harness-registry.sh list                          # list known harnesses
 #   harness-registry.sh fields <name>                 # print all fields for one harness
 #   harness-registry.sh field <name> <field>          # print one field
+#   harness-registry.sh oneshot <name>                # print one-shot command template
 #   harness-registry.sh probe <name>                  # verify binary exists, print resolved launch
 #
 # This file MUST be POSIX-bash compatible (no zsh-isms) so it sources cleanly
@@ -44,6 +53,7 @@ HARNESS_PI_AUTO_APPROVE_FLAG=""
 HARNESS_PI_PASTE_ENTER_DELAY="2.0"
 HARNESS_PI_SKILL_DIR=".pi/skills"
 HARNESS_PI_NON_INTERACTIVE_FLAG=""
+HARNESS_PI_ONESHOT_TEMPLATE=""
 
 # claude — Anthropic's Claude Code CLI. Anthropic-only models.
 # launch_cmd is the bare invocation; consumers append auto_approve_flag
@@ -55,6 +65,7 @@ HARNESS_CLAUDE_AUTO_APPROVE_FLAG="--dangerously-skip-permissions"
 HARNESS_CLAUDE_PASTE_ENTER_DELAY="2.0"
 HARNESS_CLAUDE_SKILL_DIR=".claude/skills"
 HARNESS_CLAUDE_NON_INTERACTIVE_FLAG="-p"
+HARNESS_CLAUDE_ONESHOT_TEMPLATE="claude -p {prompt}"
 
 # opencode — OpenCode Go TUI. Models via opencode-go provider (mimo/glm/kimi/qwen).
 # May spawn as "node" or "opencode" depending on launch path; regex covers both.
@@ -65,6 +76,7 @@ HARNESS_OPENCODE_AUTO_APPROVE_FLAG=""
 HARNESS_OPENCODE_PASTE_ENTER_DELAY="2.5"
 HARNESS_OPENCODE_SKILL_DIR=".config/opencode"
 HARNESS_OPENCODE_NON_INTERACTIVE_FLAG="run"
+HARNESS_OPENCODE_ONESHOT_TEMPLATE="opencode run {prompt}"
 
 # codex — Codex CLI. Models via --config model=<id> override.
 HARNESS_CODEX_LAUNCH_CMD="codex"
@@ -74,6 +86,7 @@ HARNESS_CODEX_AUTO_APPROVE_FLAG="--full-auto"
 HARNESS_CODEX_PASTE_ENTER_DELAY="2.0"
 HARNESS_CODEX_SKILL_DIR=".codex"
 HARNESS_CODEX_NON_INTERACTIVE_FLAG="exec"
+HARNESS_CODEX_ONESHOT_TEMPLATE="codex exec {prompt}"
 
 # cursor-agent — Cursor Agent CLI. Models via --model flag.
 HARNESS_CURSOR_AGENT_LAUNCH_CMD="cursor-agent"
@@ -83,6 +96,7 @@ HARNESS_CURSOR_AGENT_AUTO_APPROVE_FLAG=""
 HARNESS_CURSOR_AGENT_PASTE_ENTER_DELAY="2.0"
 HARNESS_CURSOR_AGENT_SKILL_DIR=""
 HARNESS_CURSOR_AGENT_NON_INTERACTIVE_FLAG="-p"
+HARNESS_CURSOR_AGENT_ONESHOT_TEMPLATE="cursor-agent -p {prompt}"
 
 # hermes — Hermes Agent (NousResearch fork). Python argparse CLI.
 # Interactive: `hermes chat --tui` (accepts -m/--model and --yolo).
@@ -94,6 +108,7 @@ HARNESS_HERMES_AUTO_APPROVE_FLAG="--yolo"
 HARNESS_HERMES_PASTE_ENTER_DELAY="2.0"
 HARNESS_HERMES_SKILL_DIR=".hermes/skills"
 HARNESS_HERMES_NON_INTERACTIVE_FLAG="-z"
+HARNESS_HERMES_ONESHOT_TEMPLATE="hermes -z {prompt}"
 
 # droid — Factory's coding agent. Interactive `droid`; model + autonomy
 # (--auto low|medium|high) are exec-only flags, so the interactive lane reads
@@ -105,6 +120,7 @@ HARNESS_DROID_AUTO_APPROVE_FLAG=""
 HARNESS_DROID_PASTE_ENTER_DELAY="2.0"
 HARNESS_DROID_SKILL_DIR=""
 HARNESS_DROID_NON_INTERACTIVE_FLAG="exec"
+HARNESS_DROID_ONESHOT_TEMPLATE="droid exec {prompt}"
 
 # forge — Forge agent CLI (Rust). Interactive by default; model/agent selected
 # via `forge config`/agent (model_flag=config). One-shot is `forge -p <prompt>`.
@@ -115,6 +131,7 @@ HARNESS_FORGE_AUTO_APPROVE_FLAG=""
 HARNESS_FORGE_PASTE_ENTER_DELAY="2.0"
 HARNESS_FORGE_SKILL_DIR=""
 HARNESS_FORGE_NON_INTERACTIVE_FLAG="-p"
+HARNESS_FORGE_ONESHOT_TEMPLATE="forge -p {prompt}"
 
 # amp — Sourcegraph Amp. Auto-selects models via --mode (no model id), so
 # model_flag=skip. Auto-approve is --dangerously-allow-all; one-shot is `amp -x`.
@@ -125,6 +142,7 @@ HARNESS_AMP_AUTO_APPROVE_FLAG="--dangerously-allow-all"
 HARNESS_AMP_PASTE_ENTER_DELAY="2.0"
 HARNESS_AMP_SKILL_DIR=""
 HARNESS_AMP_NON_INTERACTIVE_FLAG="-x"
+HARNESS_AMP_ONESHOT_TEMPLATE="amp -x {prompt}"
 
 # openclaw — OpenClaw gateway runtime. The interactive entrypoint is
 # `openclaw tui` (a terminal UI to the running Gateway). Model + approvals are
@@ -136,6 +154,7 @@ HARNESS_OPENCLAW_AUTO_APPROVE_FLAG=""
 HARNESS_OPENCLAW_PASTE_ENTER_DELAY="2.5"
 HARNESS_OPENCLAW_SKILL_DIR=""
 HARNESS_OPENCLAW_NON_INTERACTIVE_FLAG="agent"
+HARNESS_OPENCLAW_ONESHOT_TEMPLATE="openclaw agent --message {prompt}"
 
 # mprocs — process-group dashboard. Not an LLM harness, but lanes can run it.
 HARNESS_MPROCS_LAUNCH_CMD="mprocs"
@@ -145,6 +164,7 @@ HARNESS_MPROCS_AUTO_APPROVE_FLAG=""
 HARNESS_MPROCS_PASTE_ENTER_DELAY="0"
 HARNESS_MPROCS_SKILL_DIR=""
 HARNESS_MPROCS_NON_INTERACTIVE_FLAG=""
+HARNESS_MPROCS_ONESHOT_TEMPLATE=""
 
 # shell — bare shell lane (e.g. ops-top runs a watch command). No harness invocation.
 HARNESS_SHELL_LAUNCH_CMD=""
@@ -154,10 +174,11 @@ HARNESS_SHELL_AUTO_APPROVE_FLAG=""
 HARNESS_SHELL_PASTE_ENTER_DELAY="0"
 HARNESS_SHELL_SKILL_DIR=""
 HARNESS_SHELL_NON_INTERACTIVE_FLAG=""
+HARNESS_SHELL_ONESHOT_TEMPLATE=""
 
 # Ordered list — order matters for `list` output.
 HARNESS_REGISTRY_NAMES=(pi claude opencode codex cursor-agent hermes droid forge amp openclaw mprocs shell)
-HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag)
+HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template)
 
 # ─── Lookup helpers ──────────────────────────────────────────────────────
 
@@ -288,6 +309,19 @@ _harness_registry_cli() {
       harness_field "$name" "$field"
       printf '\n'
       ;;
+    oneshot)
+      # Sugar for `field <name> oneshot_template`: print the one-shot command
+      # template ({prompt} placeholder intact). Empty output + exit 1 means
+      # the harness cannot run one-shot, so callers can gate on the exit code.
+      local name="${1:?usage: oneshot <name>}"
+      local tpl
+      tpl="$(harness_field "$name" oneshot_template)" || return 1
+      if [[ -z "$tpl" ]]; then
+        echo "harness-registry: harness '$name' has no one-shot mode" >&2
+        return 1
+      fi
+      printf '%s\n' "$tpl"
+      ;;
     probe)
       local name="${1:?usage: probe <name>}"
       local model="${2:-}"
@@ -310,6 +344,7 @@ _harness_registry_cli() {
       printf 'paste_enter_delay: %s\n' "$(harness_field "$name" paste_enter_delay)"
       printf 'skill_dir:         %s\n' "$(harness_field "$name" skill_dir)"
       printf 'non_interactive:   %s\n' "$(harness_field "$name" non_interactive_flag)"
+      printf 'oneshot_template:  %s\n' "$(harness_field "$name" oneshot_template)"
       if [[ -z "$launch" ]]; then
         printf 'binary:            (no launch — bare shell lane)\n'
         return 0
@@ -329,10 +364,11 @@ Usage:
   harness-registry.sh list
   harness-registry.sh fields <name>
   harness-registry.sh field  <name> <field>
+  harness-registry.sh oneshot <name>
   harness-registry.sh probe  <name> [model]
 
 Known harnesses (see HARNESS_REGISTRY_NAMES): pi, claude, opencode, codex, cursor-agent, hermes, droid, forge, amp, openclaw, mprocs, shell
-Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag
+Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template
 
 When sourced from another script, exposes:
   harness_known <name>

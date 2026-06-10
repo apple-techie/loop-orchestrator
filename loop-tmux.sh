@@ -377,10 +377,11 @@ _lane_subcommand_drop() {
 }
 
 _lane_subcommand_list() {
-  local session=""
+  local session="" json=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --session) session="${2:?list-lanes: --session requires a value}"; shift 2 ;;
+      --json)    json=1; shift ;;
       -h|--help) _lane_usage; return 0 ;;
       *) echo "list-lanes: unknown arg: $1" >&2; return 1 ;;
     esac
@@ -389,17 +390,56 @@ _lane_subcommand_list() {
   [[ -z "$session" ]] && { echo "list-lanes: --session <name> required (or run inside tmux)" >&2; return 1; }
   command -v tmux >/dev/null 2>&1 || { echo "list-lanes: tmux not installed or not on PATH" >&2; return 1; }
   tmux has-session -t "$session" 2>/dev/null || { echo "list-lanes: session '$session' does not exist" >&2; return 1; }
-  printf '%-16s %-4s %-12s %-14s %s\n' WINDOW DYN HARNESS ROLE CMD
-  local wid wname dyn harness role cmd
+  [[ "$json" -eq 0 ]] && printf '%-16s %-4s %-12s %-14s %s\n' WINDOW DYN HARNESS ROLE CMD
+  local wid wname dyn harness model role cmd
   # Read by window id so option lookups can't prefix-collide between windows.
-  while IFS=' ' read -r wid wname; do
-    [[ -z "$wid" ]] && continue
-    dyn="$(tmux show-options -wqv -t "$wid" @loop_lane 2>/dev/null || true)"
-    harness="$(tmux show-options -wqv -t "$wid" @loop_lane_harness 2>/dev/null || true)"
-    role="$(tmux show-options -wqv -t "$wid" @loop_lane_role 2>/dev/null || true)"
-    cmd="$(tmux show-options -wqv -t "$wid" @loop_lane_cmd 2>/dev/null || true)"
-    printf '%-16s %-4s %-12s %-14s %s\n' "$wname" "$([[ "$dyn" == "1" ]] && echo yes || echo '-')" "${harness:--}" "${role:--}" "${cmd:--}"
-  done < <(tmux list-windows -t "$session" -F '#{window_id} #{window_name}' 2>/dev/null)
+  # --json: emit unit-separator records and let python3 do the escaping —
+  # the %-16s table is for humans and breaks on long names / cmds with spaces.
+  {
+    while IFS=' ' read -r wid wname; do
+      [[ -z "$wid" ]] && continue
+      dyn="$(tmux show-options -wqv -t "$wid" @loop_lane 2>/dev/null || true)"
+      harness="$(tmux show-options -wqv -t "$wid" @loop_lane_harness 2>/dev/null || true)"
+      model="$(tmux show-options -wqv -t "$wid" @loop_lane_model 2>/dev/null || true)"
+      role="$(tmux show-options -wqv -t "$wid" @loop_lane_role 2>/dev/null || true)"
+      cmd="$(tmux show-options -wqv -t "$wid" @loop_lane_cmd 2>/dev/null || true)"
+      if [[ "$json" -eq 1 ]]; then
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$wname" "$dyn" "$harness" "$model" "$role" "$cmd"
+      else
+        printf '%-16s %-4s %-12s %-14s %s\n' "$wname" "$([[ "$dyn" == "1" ]] && echo yes || echo '-')" "${harness:--}" "${role:--}" "${cmd:--}"
+      fi
+    done < <(tmux list-windows -t "$session" -F '#{window_id} #{window_name}' 2>/dev/null)
+  } | {
+    if [[ "$json" -eq 1 ]]; then
+      SESSION="$session" python3 -c '
+import datetime, json, os, sys
+
+lanes = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    wname, dyn, harness, model, role, cmd = line.split("\x1f")
+    lanes.append({
+        "window": wname,
+        "harness": harness or None,
+        "model": model or None,
+        "role": role or None,
+        "cmd": cmd or None,
+        "base": dyn != "1",
+    })
+
+print(json.dumps({
+    "contract_version": 1,
+    "session": os.environ["SESSION"],
+    "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "lanes": lanes,
+}, indent=2))
+'
+    else
+      cat
+    fi
+  }
 }
 
 case "${1:-}" in

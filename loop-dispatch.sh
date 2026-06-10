@@ -29,6 +29,7 @@ TARGET=""
 PAYLOAD=""
 WAIT_READY=0
 READY_TIMEOUT="${LOOP_DISPATCH_READY_TIMEOUT:-20}"
+INTERRUPT=0
 LANE_NAME=""
 
 # Resolve this script's real directory (symlink-aware) so --wait-ready can find
@@ -73,6 +74,10 @@ Options:
                       slow-booting TUI like Claude Code's welcome screen
   --ready-timeout <s> Max secs to wait for readiness (default: 20;
                       env: LOOP_DISPATCH_READY_TIMEOUT)
+  --interrupt         Send Escape to the target first (cancels in-flight
+                      generation in Claude/Pi composers), wait 1s, then
+                      dispatch — for steering a busy lane onto a new course
+                      instead of appending mid-turn guidance
   -h, --help          Show this help
 
 Env vars:
@@ -104,6 +109,7 @@ while [[ $# -gt 0 ]]; do
     --verify)       VERIFY=1; shift ;;
     --wait-ready)   WAIT_READY=1; shift ;;
     --ready-timeout) READY_TIMEOUT="$2"; shift 2 ;;
+    --interrupt)    INTERRUPT=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     --*)
       echo "Unknown option: $1" >&2
@@ -229,6 +235,15 @@ if [[ "$WAIT_READY" -eq 1 ]]; then
     done
     [[ "$_ready" -eq 1 ]] || echo "warning: lane '$LANE_NAME' not confirmed ready within ${READY_TIMEOUT}s (dispatching anyway)" >&2
   fi
+fi
+
+# Steering interrupt: cancel any in-flight generation before the payload
+# lands. Escape (not C-c) — Claude/Pi composers treat Escape as "stop
+# generating, keep the session"; C-c can kill the harness process. The 1s
+# settle lets the TUI return to its composer before the paste arrives.
+if [[ "$INTERRUPT" -eq 1 ]]; then
+  tmux send-keys -t "$TARGET" Escape
+  sleep 1
 fi
 
 case "$MODE" in

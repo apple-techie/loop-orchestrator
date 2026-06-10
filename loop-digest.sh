@@ -16,6 +16,7 @@ ADR_DIR="${LOOP_DIGEST_ADR_DIR:-}"
 INTERVAL="${LOOP_DIGEST_INTERVAL:-30}"
 ONCE=0
 NO_CLEAR=0
+JSON=0
 EXTRA_REPOS=()
 
 usage() {
@@ -39,6 +40,8 @@ Options:
   --interval <seconds>     Refresh interval (default: 30; env: LOOP_DIGEST_INTERVAL)
   --once                   Print once and exit (no clear, no loop)
   --no-clear               Do not clear the screen between refreshes
+  --json                   Emit one machine-readable JSON document and exit
+                           (implies --once; contract_version 1, see CONTRACT.md)
   -h, --help               Show this help
 
 Examples:
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --interval)       INTERVAL="$2"; shift 2 ;;
     --once)           ONCE=1; shift ;;
     --no-clear)       NO_CLEAR=1; shift ;;
+    --json)           JSON=1; ONCE=1; shift ;;
     -h|--help)        usage; exit 0 ;;
     --*)
       echo "Unknown option: $1" >&2
@@ -242,6 +246,140 @@ render_frame() {
   echo "════ decisions (MADR) ════"
   render_adr
 }
+
+# render_json — the whole machine-readable document in one python3 pass
+# (state, mailbox, unpushed, ADRs), mirroring what the ASCII frame shows.
+# Repos are passed newline-joined; git runs via subprocess with the same
+# upstream fallback chain as render_unpushed.
+render_json() {
+  local repos=""
+  [[ -n "$PROJECT_ROOT" ]] && repos="$PROJECT_ROOT"
+  local r
+  for r in "${EXTRA_REPOS[@]+"${EXTRA_REPOS[@]}"}"; do
+    repos="${repos:+$repos$'\n'}$r"
+  done
+  STATE_FILE="$STATE_FILE" MAILBOX_DIR="${MAILBOX_DIR:-}" ADR_DIR="${ADR_DIR:-}" \
+  REPOS_NL="$repos" python3 - <<'PY'
+import datetime, json, os, pathlib, re, subprocess
+
+doc = {
+    "contract_version": 1,
+    "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "state": None,
+    "mailbox": {"pending": [], "processed_count": 0},
+    "unpushed": [],
+    "adrs": [],
+}
+
+state_file = pathlib.Path(os.environ["STATE_FILE"]) if os.environ.get("STATE_FILE") else None
+if state_file and state_file.is_file():
+    try:
+        parsed = json.loads(state_file.read_text())
+        doc["state"] = parsed if isinstance(parsed, dict) else None
+    except Exception:
+        doc["state"] = None
+
+mailbox = os.environ.get("MAILBOX_DIR", "")
+if mailbox and os.path.isdir(mailbox):
+    name_re = re.compile(r"^(\d{8}-\d{6})-(.+)-to-(.+)\.md$")
+    pending = []
+    for f in sorted(os.listdir(mailbox)):
+        if not f.endswith(".md") or "readme" in f.lower():
+            continue
+        path = os.path.join(mailbox, f)
+        if not os.path.isfile(path):
+            continue
+        m = name_re.match(f)
+        subject = ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("subject:"):
+                        subject = line[len("subject:"):].strip()
+                        break
+        except OSError:
+            pass
+        pending.append({
+            "file": f,
+            "from": m.group(2) if m else None,
+            "to": m.group(3) if m else None,
+            "subject": subject,
+            "mtime": int(os.path.getmtime(path)),
+        })
+    doc["mailbox"]["pending"] = pending
+    processed = os.path.join(mailbox, "processed")
+    if os.path.isdir(processed):
+        doc["mailbox"]["processed_count"] = sum(
+            1 for f in os.listdir(processed)
+            if f.endswith(".md") and "readme" not in f.lower()
+        )
+
+def git(repo, *args):
+    out = subprocess.run(
+        ["git", "-C", repo, *args],
+        capture_output=True, text=True,
+    )
+    return out.returncode, out.stdout.strip()
+
+repos = [r for r in os.environ.get("REPOS_NL", "").split("\n") if r]
+for repo in repos:
+    if not os.path.isdir(os.path.join(repo, ".git")):
+        continue
+    rc, branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    branch = branch if rc == 0 else "?"
+    upstream = None
+    for cand in (f"origin/{branch}", "origin/main", "origin/master"):
+        rc, _ = git(repo, "rev-parse", "--verify", "--quiet", cand)
+        if rc == 0:
+            upstream = cand
+            break
+    count = None
+    if upstream:
+        rc, log = git(repo, "log", "--oneline", f"{upstream}..HEAD")
+        if rc == 0:
+            count = len([l for l in log.split("\n") if l])
+    doc["unpushed"].append({
+        "repo": os.path.basename(os.path.abspath(repo)),
+        "path": repo,
+        "branch": branch,
+        "upstream": upstream,
+        "count": count,
+    })
+
+adr_dir = os.environ.get("ADR_DIR", "")
+if adr_dir and os.path.isdir(adr_dir):
+    adr_re = re.compile(r"^(\d{4})-.*\.md$")
+    for f in sorted(os.listdir(adr_dir), reverse=True):
+        m = adr_re.match(f)
+        if not m:
+            continue
+        path = os.path.join(adr_dir, f)
+        status, title = "?", ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("status:") and status == "?":
+                        status = line[len("status:"):].strip()
+                    tm = re.match(r"^# \d+\. (.*)", line)
+                    if tm and not title:
+                        title = tm.group(1).strip()
+        except OSError:
+            pass
+        doc["adrs"].append({
+            "id": m.group(1),
+            "status": status,
+            "title": title or f,
+            "path": path,
+        })
+
+print(json.dumps(doc, indent=2))
+PY
+}
+
+if [[ "$JSON" -eq 1 ]]; then
+  render_json
+  exit 0
+fi
 
 if [[ "$ONCE" -eq 1 ]]; then
   render_frame
