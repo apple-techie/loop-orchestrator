@@ -170,6 +170,14 @@ def record_sync(log_md: Path, issue_key: str) -> str:
     return line
 
 
+def record_created(log_md: Path, issue_key: str, task_id: str) -> str:
+    """'## [YYYY-MM-DD] sync | <key> created from <task-id>' — push created a
+    remote issue for a local task that had no jira: key."""
+    line = f"## [{_today()}] sync | {issue_key} created from {task_id}"
+    append_log(log_md, line)
+    return line
+
+
 def record_conflict(log_md: Path, issue_key: str, detail: str) -> str:
     """File-wins conflict entry; the divergent file is never modified."""
     line = f"## [{_today()}] sync | {issue_key} conflict: file wins ({detail})"

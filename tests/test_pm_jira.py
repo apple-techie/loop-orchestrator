@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from loop_orchestrator.pm import taskfiles
-from loop_orchestrator.pm.jira import JiraAdapter
+from loop_orchestrator.pm.jira import JiraAdapter, JiraError
 
 ADF_DESCRIPTION = {
     "type": "doc",
@@ -90,6 +90,8 @@ def jira_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("JIRA_BASE_URL", "https://example.atlassian.net/")
     monkeypatch.setenv("JIRA_EMAIL", "dev@example.com")
     monkeypatch.setenv("JIRA_API_TOKEN", "token")
+    monkeypatch.delenv("JIRA_PROJECT_KEY", raising=False)
+    monkeypatch.delenv("JIRA_BOARD_ID", raising=False)
 
 
 @pytest.fixture
@@ -286,3 +288,304 @@ def test_pull_search_failure_is_error(jira_env, project: Path):
 
     assert result.created == []
     assert len(result.errors) == 1 and "HTTP 404" in result.errors[0]
+    assert "no fixture for this call" in result.errors[0]  # errorMessages surfaced
+
+
+# ── scrum: epics / sprints / comments ────────────────────────────────────────
+
+EPIC_SEARCH_RESPONSE = {
+    "issues": [
+        {"key": "PROJ-100", "fields": {"summary": "Sprint Goals v2"}},
+        {"key": "PROJ-42", "fields": {"summary": "Sprint Goals"}},
+    ]
+}
+
+CREATED_RESPONSE = {"id": "10001", "key": "PROJ-77"}
+
+ACTIVE_SPRINT_RESPONSE = {"values": [{"id": 7, "name": "Sprint 12", "state": "active"}]}
+
+TASK_NO_JIRA = """\
+---
+id: T0002
+title: Build the Sync
+status: open
+depends_on: []
+scope: local-only work, not yet mirrored
+---
+
+# T0002 — Build the Sync
+
+## Objective
+Mirror loop work into Jira.
+
+## Context you need
+hand-written content the sync must never touch
+"""
+
+
+class ParentRejectingTransport(FakeTransport):
+    """POST /issue with a 'parent' field -> 400 (company-managed project);
+    without it -> created. Everything else falls through to fixtures."""
+
+    def __call__(self, method, url, headers, body):
+        if method == "POST" and url.endswith("/rest/api/3/issue"):
+            self.calls.append((method, url, body))
+            if "parent" in (json.loads(body).get("fields") or {}):
+                detail = {"errors": {"parent": "Field 'parent' cannot be set on this project."}}
+                return 400, json.dumps(detail).encode("utf-8")
+            return 201, json.dumps(CREATED_RESPONSE).encode("utf-8")
+        return super().__call__(method, url, headers, body)
+
+
+def _jql_of(url: str) -> str:
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(url).query)["jql"][0]
+
+
+def test_find_epic_exact_match(jira_env):
+    transport = FakeTransport([("GET", "/rest/api/3/search/jql?", EPIC_SEARCH_RESPONSE)])
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.find_epic("Sprint Goals", "PROJ") == "PROJ-42"  # not the fuzzy 'v2' hit
+    jql = _jql_of(transport.calls[0][1])
+    assert jql == 'project = PROJ AND issuetype = Epic AND summary ~ "Sprint Goals"'
+
+
+def test_find_epic_miss_returns_none(jira_env):
+    transport = FakeTransport([("GET", "/rest/api/3/search/jql?", EPIC_SEARCH_RESPONSE)])
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.find_epic("Unrelated Epic", "PROJ") is None
+    assert transport.writes() == []
+
+
+def test_create_epic(jira_env):
+    transport = FakeTransport([("POST", "/rest/api/3/issue", CREATED_RESPONSE)])
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.create_epic("Sprint Goals", "PROJ") == "PROJ-77"
+    method, url, body = transport.writes()[0]
+    assert url.endswith("/rest/api/3/issue")
+    fields = json.loads(body)["fields"]
+    assert fields["project"] == {"key": "PROJ"}
+    assert fields["issuetype"] == {"name": "Epic"}
+    assert fields["summary"] == "Sprint Goals"
+
+
+def test_create_issue_with_parent_and_adf_description(jira_env):
+    transport = FakeTransport([("POST", "/rest/api/3/issue", CREATED_RESPONSE)])
+    adapter = JiraAdapter(transport=transport)
+
+    key, warning = adapter.create_issue("Do thing", "line one\nline two", "PROJ", "PROJ-42")
+
+    assert (key, warning) == ("PROJ-77", None)
+    fields = json.loads(transport.writes()[0][2])["fields"]
+    assert fields["parent"] == {"key": "PROJ-42"}
+    assert fields["issuetype"] == {"name": "Task"}
+    assert fields["description"] == {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "line one"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "line two"}]},
+        ],
+    }
+
+
+def test_create_issue_parent_rejected_retries_without_and_warns(jira_env):
+    transport = ParentRejectingTransport([])
+    adapter = JiraAdapter(transport=transport)
+
+    key, warning = adapter.create_issue("Do thing", "desc", "PROJ", epic_key="PROJ-42")
+
+    assert key == "PROJ-77"
+    assert warning is not None and "PROJ-42" in warning and "epic link" in warning
+    first, second = transport.writes()
+    assert "parent" in json.loads(first[2])["fields"]
+    assert "parent" not in json.loads(second[2])["fields"]
+
+
+def test_create_issue_non_parent_400_raises(jira_env):
+    transport = FakeTransport([])  # 404 with errorMessages
+    adapter = JiraAdapter(transport=transport)
+
+    with pytest.raises(JiraError, match="no fixture"):
+        adapter.create_issue("Do thing", "desc", "PROJ", epic_key="PROJ-42")
+    assert len(transport.writes()) == 1  # no blind retry on non-parent errors
+
+
+def test_active_sprint(jira_env):
+    transport = FakeTransport([("GET", "/rest/agile/1.0/board/5/sprint", ACTIVE_SPRINT_RESPONSE)])
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.active_sprint("5") == {"id": 7, "name": "Sprint 12"}
+    method, url, _ = transport.calls[0]
+    assert method == "GET" and url.endswith("/rest/agile/1.0/board/5/sprint?state=active")
+
+
+def test_active_sprint_none(jira_env):
+    transport = FakeTransport([("GET", "/rest/agile/1.0/board/5/sprint", {"values": []})])
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.active_sprint("5") is None
+
+
+def test_move_to_sprint_payload(jira_env):
+    transport = FakeTransport([("POST", "/rest/agile/1.0/sprint/7/issue", {})])
+    adapter = JiraAdapter(transport=transport)
+
+    adapter.move_to_sprint(7, ["PROJ-1", "PROJ-2"])
+
+    method, url, body = transport.writes()[0]
+    assert url.endswith("/rest/agile/1.0/sprint/7/issue")
+    assert json.loads(body) == {"issues": ["PROJ-1", "PROJ-2"]}
+
+
+def test_add_comment_minimal_adf(jira_env):
+    transport = FakeTransport([("POST", "/comment", {})])
+    adapter = JiraAdapter(transport=transport)
+
+    adapter.add_comment("PROJ-1", "went well\n\nimprove X")
+
+    method, url, body = transport.writes()[0]
+    assert url.endswith("/rest/api/3/issue/PROJ-1/comment")
+    assert json.loads(body) == {
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "went well"}]},
+                {"type": "paragraph", "content": []},
+                {"type": "paragraph", "content": [{"type": "text", "text": "improve X"}]},
+            ],
+        }
+    }
+
+
+# ── push: creation of local-only tasks ───────────────────────────────────────
+
+
+def test_push_creates_issue_and_writes_key_back(jira_env, project: Path, monkeypatch):
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_NO_JIRA, encoding="utf-8")
+    body_before = taskfiles.split_task(path)[1]
+    transport = FakeTransport([("POST", "/rest/api/3/issue", CREATED_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks")
+
+    assert result.created == ["PROJ-77 from T0002"]
+    assert result.errors == [] and result.warnings == []
+    frontmatter, body_after = taskfiles.split_task(path)
+    assert frontmatter["jira"] == "PROJ-77"
+    assert frontmatter["title"] == "Build the Sync" and frontmatter["status"] == "open"
+    assert body_after == body_before  # body untouched, byte-for-byte
+    assert "sync | PROJ-77 created from T0002" in _log_text(project)
+    fields = json.loads(transport.writes()[0][2])["fields"]
+    assert fields["summary"] == "Build the Sync"
+    assert fields["project"] == {"key": "PROJ"}
+    assert "parent" not in fields  # no --epic given
+    # description = the Objective section text
+    assert fields["description"]["content"][0]["content"][0]["text"] == (
+        "Mirror loop work into Jira."
+    )
+
+
+def test_push_create_under_epic_with_parent_fallback_warning(jira_env, project: Path):
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_NO_JIRA, encoding="utf-8")
+    transport = ParentRejectingTransport([])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks", project="PROJ", epic="PROJ-42")
+
+    assert result.created == ["PROJ-77 from T0002"]
+    assert len(result.warnings) == 1 and "PROJ-42" in result.warnings[0]
+    assert result.errors == []
+    assert taskfiles.parse_frontmatter(path)["jira"] == "PROJ-77"  # created despite no link
+
+
+def test_push_create_dry_run_writes_nothing(jira_env, project: Path, monkeypatch):
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_NO_JIRA, encoding="utf-8")
+    before = path.read_bytes()
+    transport = FakeTransport([])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks", dry_run=True)
+
+    assert result.dry_run is True
+    assert result.created == ["would-create T0002: Build the Sync (project PROJ)"]
+    assert path.read_bytes() == before
+    assert transport.calls == []  # not even a GET is needed to plan creation
+    assert _log_text(project) == ""
+
+
+def test_push_create_without_project_key_is_warning_not_error(jira_env, project: Path):
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_NO_JIRA, encoding="utf-8")
+    before = path.read_bytes()
+    transport = FakeTransport([])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks")
+
+    assert result.created == [] and result.errors == []
+    assert len(result.warnings) == 1 and "JIRA_PROJECT_KEY" in result.warnings[0]
+    assert transport.calls == [] and path.read_bytes() == before
+
+
+def test_push_done_local_task_without_key_is_not_created(jira_env, project: Path, monkeypatch):
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
+    (project / "tasks" / "archive" / "T0002-build-the-sync.md").write_text(
+        TASK_NO_JIRA.replace("status: open", "status: done"), encoding="utf-8"
+    )
+    transport = FakeTransport([])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks")
+
+    assert result.created == [] and result.warnings == [] and result.errors == []
+    assert transport.calls == []
+
+
+def test_push_created_issues_move_to_sprint(jira_env, project: Path):
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_NO_JIRA, encoding="utf-8")
+    transport = FakeTransport(
+        [
+            ("POST", "/rest/api/3/issue", CREATED_RESPONSE),
+            ("POST", "/rest/agile/1.0/sprint/7/issue", {}),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks", project="PROJ", sprint="7")
+
+    assert result.created == ["PROJ-77 from T0002"]
+    assert result.updated == ["PROJ-77 -> sprint 7"]
+    move = transport.writes()[1]
+    assert move[1].endswith("/rest/agile/1.0/sprint/7/issue")
+    assert json.loads(move[2]) == {"issues": ["PROJ-77"]}
+
+
+def test_push_sprint_active_resolves_via_board(jira_env, project: Path, monkeypatch):
+    monkeypatch.setenv("JIRA_BOARD_ID", "5")
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_NO_JIRA, encoding="utf-8")
+    transport = FakeTransport(
+        [
+            ("POST", "/rest/api/3/issue", CREATED_RESPONSE),
+            ("GET", "/rest/agile/1.0/board/5/sprint", ACTIVE_SPRINT_RESPONSE),
+            ("POST", "/rest/agile/1.0/sprint/7/issue", {}),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks", project="PROJ", sprint="active")
+
+    assert result.updated == ["PROJ-77 -> sprint 7"]
+    assert result.errors == []

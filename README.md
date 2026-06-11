@@ -56,7 +56,7 @@ loop-orchestrator/
 │   ├── loop-metrics.sh        #   coordinator-efficiency metrics
 │   └── loop-wiki-lint.sh      #   nightly ops-wiki lint prompt
 ├── src/loop_orchestrator/ # the Python layer (engine / deck / pm)
-├── tests/                 # 216 tests; fakes-on-PATH harness, no tmux needed
+├── tests/                 # 248 tests; fakes-on-PATH harness, no tmux needed
 ├── ops-wiki/              # compiled coordinator memory (see AGENTS.md)
 ├── tasks/                 # tasks-as-files (+ archive/)
 ├── examples/
@@ -588,21 +588,38 @@ Adapters are discovered via the `loop_orchestrator.pm_adapters` entry-point
 group, so third parties ship them as pip packages. `tasks/` files are the
 source of truth with a strict **file-wins** conflict rule; the PM tool is a
 sync target, never the brain. Jira ships in-repo as the reference adapter
-(REST v3, env-only credentials: `JIRA_BASE_URL`, `JIRA_EMAIL`,
-`JIRA_API_TOKEN`). With zero adapters configured the engine behaves
+(REST v3 + Agile 1.0, env-only credentials: `JIRA_BASE_URL`, `JIRA_EMAIL`,
+`JIRA_API_TOKEN`; optional scrum context: `JIRA_PROJECT_KEY` for issue
+creation/epic search, `JIRA_BOARD_ID` for sprint lookups — `--project` /
+`--board` override). With zero adapters configured the engine behaves
 identically — PM integration is optional by construction.
 
 ```bash
 loop-pm list-adapters
 loop-pm sync --adapter jira pull --dry-run
+loop-pm sync --adapter jira push [--project K] [--epic KEY] [--sprint ID|active] [--board B]
+loop-pm jira ensure-epic --name N [--project K]            # prints the epic key (found or created)
+loop-pm jira sprint-status [--board B]                     # active sprint id/name, or 'no active sprint'
+loop-pm jira move-to-sprint (--sprint ID | --active) KEY...
+loop-pm jira retro --epic KEY [--title T] (--body-file F | --body TEXT) [--as-issue]
 ```
+
+`sync push` also CREATES issues: open/in-progress tasks without a `jira:`
+key become issues in `JIRA_PROJECT_KEY` (under `--epic` if given); the new
+key is written back into the task frontmatter — the one sanctioned file
+write — and `## [date] sync | <key> created from <task-id>` is appended to
+ops-wiki/log.md. `retro` posts an ADF comment on the epic by default;
+`--as-issue` creates a Task labeled `retrospective` instead. Epic linking
+uses the team-managed `parent` field; company-managed projects reject it,
+in which case the issue is created without the link and a warning is
+surfaced (the epic-link customfield id varies per site — never guessed).
 
 ### Install / develop
 
 ```bash
 make install-python      # uv tool install (pip --user fallback; Python >= 3.10)
 uv sync --group dev      # development
-make check-python        # ruff + pytest (216 tests)
+make check-python        # ruff + pytest (248 tests)
 make check-all           # bash substrate + python layer
 make install-skill       # link skills/loop-orchestrator into ~/.claude/skills
                          # (other harnesses: SKILLS_DIR=~/proj/.pi/skills etc.)

@@ -121,11 +121,27 @@ Engine off → read-only OBSERVE MODE dashboard.
 ```bash
 loop-pm list-adapters
 loop-pm sync --adapter jira (pull|push|both) [--dry-run] [--tasks-dir D] [--project-root P]
+                            [--project K] [--epic KEY] [--sprint ID|active] [--board B]
+loop-pm jira ensure-epic --name N [--project K]          # prints epic key (found or created)
+loop-pm jira sprint-status [--board B]                   # active sprint id/name | 'no active sprint'
+loop-pm jira move-to-sprint (--sprint ID | --active) KEY...
+loop-pm jira retro --epic KEY [--title T] (--body-file F | --body TEXT) [--as-issue]
 ```
 
 Adapters discovered via the `loop_orchestrator.pm_adapters` entry-point
 group. `tasks/` files win every conflict (divergence is logged to the wiki,
-file untouched). Jira reference adapter: REST v3, env-only creds
-(`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`); status mapping open↔To Do,
-in-progress↔In Progress, done↔Done. Exit 64 = adapter unknown/unavailable.
-Zero adapters = the engine's PM steps are no-ops.
+file untouched). Jira reference adapter: REST v3 + Agile 1.0, env-only creds
+(`JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`; optional `JIRA_PROJECT_KEY`
+for creation/search and `JIRA_BOARD_ID` for sprints — flags override); status
+mapping open↔To Do, in-progress↔In Progress, done↔Done. `sync push` also
+creates issues for open/in-progress tasks without a `jira:` key (in
+`JIRA_PROJECT_KEY`, under `--epic` if given), writes the new key back into
+the task frontmatter and logs `sync | <key> created from <task-id>` to the
+wiki. `retro` posts an ADF comment on the epic; `--as-issue` creates a Task
+labeled `retrospective` instead. Epic links use the team-managed `parent`
+field — company-managed projects reject it, the issue is then created
+unlinked with a warning (per-site epic-link customfield ids are never
+guessed). Exit 64 = adapter unknown/unavailable or required env missing
+(creds always; `JIRA_PROJECT_KEY`/`JIRA_BOARD_ID` only for verbs that need
+them), 1 = API errors (response error messages surfaced). Zero adapters =
+the engine's PM steps are no-ops.

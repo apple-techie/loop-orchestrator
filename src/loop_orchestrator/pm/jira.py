@@ -1,15 +1,26 @@
-"""Jira reference adapter — REST v3 over urllib.request, no extra deps.
+"""Jira reference adapter — REST v3 + Agile 1.0 over urllib.request, no
+extra deps.
 
 Env (basic auth, environment only — never the repo): JIRA_BASE_URL,
-JIRA_EMAIL, JIRA_API_TOKEN. The transport is injectable so tests run against
-recorded fixtures instead of the network.
+JIRA_EMAIL, JIRA_API_TOKEN. Optional scrum context: JIRA_PROJECT_KEY (default
+project for issue creation/epic search) and JIRA_BOARD_ID (sprint lookups) —
+absence only affects the verbs that need them. The transport is injectable so
+tests run against recorded fixtures instead of the network.
 
 pull: assigned not-Done issues -> new task files; an existing file with a
 matching `jira:` key is NEVER modified — any status divergence is a file-wins
 conflict (logged to ops-wiki/log.md). push: task-file status drives issue
 transitions (open->'To Do', in-progress->'In Progress', done->'Done';
-'dropped' has no remote mapping and is logged as a conflict). dry_run plans
-everything, performs no HTTP writes and no file/log writes (GETs allowed).
+'dropped' has no remote mapping and is logged as a conflict); open or
+in-progress tasks WITHOUT a jira: key are created remotely and the new key is
+written back into the task frontmatter (the one sanctioned file write).
+dry_run plans everything, performs no HTTP writes and no file/log writes
+(GETs allowed).
+
+Epic linking: new issues link to an epic via the team-managed 'parent' field.
+Company-managed projects reject that with a 400 — the issue is then created
+WITHOUT the link and a warning is surfaced (the epic-link customfield id
+varies per site; we never guess field ids).
 """
 
 from __future__ import annotations
@@ -17,6 +28,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,6 +39,8 @@ from . import taskfiles
 from .base import PMAdapter, PMSyncResult
 
 ENV_VARS = ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
+ENV_PROJECT = "JIRA_PROJECT_KEY"
+ENV_BOARD = "JIRA_BOARD_ID"
 
 JQL = "assignee = currentUser() AND statusCategory != Done"
 SEARCH_FIELDS = "summary,description,status"
@@ -43,6 +57,10 @@ Transport = Callable[[str, str, dict[str, str], "bytes | None"], "tuple[int, byt
 class JiraError(RuntimeError):
     """An HTTP call failed or returned an unusable payload."""
 
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 def _urllib_transport(
     method: str, url: str, headers: dict[str, str], body: bytes | None
@@ -53,6 +71,45 @@ def _urllib_transport(
             return response.status, response.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
+
+
+def _adf_doc(text: str) -> dict:
+    """Minimal Atlassian Document Format doc: one paragraph per input line."""
+    paragraphs = []
+    for line in text.splitlines() or [""]:
+        content = [{"type": "text", "text": line}] if line else []
+        paragraphs.append({"type": "paragraph", "content": content})
+    return {"type": "doc", "version": 1, "content": paragraphs}
+
+
+def _jql_quote(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _error_detail(raw: bytes) -> str:
+    """Human-readable error from a Jira error body (errorMessages/errors when
+    the body is JSON, the raw text otherwise)."""
+    text = raw.decode("utf-8", "replace")
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError:
+        return text[:200]
+    if isinstance(doc, dict):
+        messages = [str(item) for item in doc.get("errorMessages") or []]
+        errors = doc.get("errors")
+        if isinstance(errors, dict):
+            messages += [f"{field}: {detail}" for field, detail in errors.items()]
+        if messages:
+            return "; ".join(messages)[:300]
+    return text[:200]
+
+
+def _objective_text(body: str) -> str | None:
+    """Text of the task body's '## Objective' section, or None."""
+    match = re.search(r"^## Objective\s*\n(.*?)(?=^## |\Z)", body, re.M | re.S)
+    if match is None:
+        return None
+    return match.group(1).strip() or None
 
 
 def _adf_text(node: object) -> str:
@@ -121,8 +178,7 @@ class JiraAdapter(PMAdapter):
         except OSError as exc:  # urllib.error.URLError subclasses OSError
             raise JiraError(f"{method} {path}: {exc}") from exc
         if status >= 400:
-            detail = raw.decode("utf-8", "replace")[:200]
-            raise JiraError(f"{method} {path} -> HTTP {status}: {detail}")
+            raise JiraError(f"{method} {path} -> HTTP {status}: {_error_detail(raw)}", status)
         if not raw:
             return {}
         try:
@@ -130,6 +186,97 @@ class JiraAdapter(PMAdapter):
         except json.JSONDecodeError as exc:
             raise JiraError(f"{method} {path}: response is not JSON: {exc}") from exc
         return parsed if isinstance(parsed, dict) else {}
+
+    # ── scrum: epics / sprints / comments ─────────────────────────────────
+
+    def find_epic(self, name: str, project: str) -> str | None:
+        """Key of the epic in `project` whose summary EXACTLY equals `name`
+        (JQL `~` is fuzzy, so the summary is re-checked client-side)."""
+        jql = f"project = {project} AND issuetype = Epic AND summary ~ {_jql_quote(name)}"
+        query = urllib.parse.urlencode({"jql": jql, "fields": "summary", "maxResults": 50})
+        doc = self._request("GET", f"/rest/api/3/search/jql?{query}")
+        for issue in doc.get("issues") or []:
+            fields = issue.get("fields") or {}
+            if (fields.get("summary") or "").strip() == name.strip() and issue.get("key"):
+                return issue["key"]
+        return None
+
+    def create_epic(self, name: str, project: str, description: str | None = None) -> str:
+        fields: dict = {
+            "project": {"key": project},
+            "issuetype": {"name": "Epic"},
+            "summary": name,
+        }
+        if description:
+            fields["description"] = _adf_doc(description)
+        doc = self._request("POST", "/rest/api/3/issue", body={"fields": fields})
+        key = doc.get("key")
+        if not key:
+            raise JiraError("POST /rest/api/3/issue: response carries no issue key")
+        return key
+
+    def create_issue(
+        self,
+        summary: str,
+        description_text: str,
+        project: str,
+        epic_key: str | None = None,
+        issue_type: str = "Task",
+        labels: list[str] | None = None,
+    ) -> tuple[str, str | None]:
+        """Create an issue; returns (key, warning|None). The epic link uses
+        the team-managed 'parent' field; when the site rejects it (HTTP 400 —
+        company-managed projects need a per-site epic-link customfield we
+        refuse to guess) the issue is created WITHOUT the link and the
+        limitation is returned as the warning."""
+        fields: dict = {
+            "project": {"key": project},
+            "issuetype": {"name": issue_type},
+            "summary": summary,
+        }
+        if description_text:
+            fields["description"] = _adf_doc(description_text)
+        if labels:
+            fields["labels"] = list(labels)
+        if epic_key:
+            fields["parent"] = {"key": epic_key}
+        try:
+            doc = self._request("POST", "/rest/api/3/issue", body={"fields": fields})
+        except JiraError as exc:
+            if not (epic_key and exc.status == 400 and "parent" in str(exc).lower()):
+                raise
+            del fields["parent"]
+            doc = self._request("POST", "/rest/api/3/issue", body={"fields": fields})
+            key = doc.get("key")
+            if not key:
+                raise JiraError("POST /rest/api/3/issue: response carries no issue key") from exc
+            warning = (
+                f"{key}: created without epic link to {epic_key} — this project rejects the "
+                "'parent' field (company-managed sites use a site-specific epic-link "
+                "customfield; link the issue manually or from the board)"
+            )
+            return key, warning
+        key = doc.get("key")
+        if not key:
+            raise JiraError("POST /rest/api/3/issue: response carries no issue key")
+        return key, None
+
+    def active_sprint(self, board_id: str | int) -> dict | None:
+        """{'id': ..., 'name': ...} of the board's active sprint, or None."""
+        doc = self._request("GET", f"/rest/agile/1.0/board/{board_id}/sprint?state=active")
+        values = doc.get("values") or []
+        if not values:
+            return None
+        sprint = values[0]
+        return {"id": sprint.get("id"), "name": sprint.get("name")}
+
+    def move_to_sprint(self, sprint_id: str | int, keys: list[str]) -> None:
+        self._request("POST", f"/rest/agile/1.0/sprint/{sprint_id}/issue", body={"issues": keys})
+
+    def add_comment(self, issue_key: str, text: str) -> None:
+        self._request(
+            "POST", f"/rest/api/3/issue/{issue_key}/comment", body={"body": _adf_doc(text)}
+        )
 
     # ── pull ──────────────────────────────────────────────────────────────
 
@@ -203,9 +350,21 @@ class JiraAdapter(PMAdapter):
 
     # ── push ──────────────────────────────────────────────────────────────
 
-    def push(self, tasks_dir: Path, dry_run: bool = False) -> PMSyncResult:
+    def push(
+        self,
+        tasks_dir: Path,
+        dry_run: bool = False,
+        *,
+        project: str | None = None,
+        epic: str | None = None,
+        sprint: str | None = None,
+        board: str | None = None,
+    ) -> PMSyncResult:
         result = PMSyncResult(dry_run=dry_run)
         log_md = taskfiles.log_path(self.project_root)
+        project = project or os.environ.get(ENV_PROJECT)
+        skipped_creations = 0
+        created_keys: list[str] = []
         for path in taskfiles.list_tasks(tasks_dir):
             try:
                 frontmatter = taskfiles.parse_frontmatter(path)
@@ -213,9 +372,23 @@ class JiraAdapter(PMAdapter):
                 result.errors.append(str(exc))
                 continue
             key = frontmatter.get("jira")
-            if not key:
-                continue
             status = frontmatter.get("status")
+            if not key:
+                if status not in ("open", "in-progress"):
+                    continue
+                if not project:
+                    skipped_creations += 1
+                    continue
+                try:
+                    created = self._create_from_task(
+                        path, frontmatter, project, epic, result, log_md, dry_run
+                    )
+                except JiraError as exc:
+                    result.errors.append(f"{path.name}: {exc}")
+                    continue
+                if created:
+                    created_keys.append(created)
+                continue
             if status == "dropped":
                 detail = "status 'dropped' has no remote mapping"
                 result.conflicts.append(f"{key}: {detail}")
@@ -230,7 +403,73 @@ class JiraAdapter(PMAdapter):
                 self._push_one(key, status, target, result, log_md, dry_run)
             except JiraError as exc:
                 result.errors.append(f"{key}: {exc}")
+        if skipped_creations:
+            result.warnings.append(
+                f"skipped creating {skipped_creations} task(s) without a jira key: "
+                f"{ENV_PROJECT} is not set (set it or pass --project)"
+            )
+        if sprint and created_keys:
+            self._move_created(sprint, board, created_keys, result)
         return result
+
+    def _create_from_task(
+        self,
+        path: Path,
+        frontmatter: dict,
+        project: str,
+        epic: str | None,
+        result: PMSyncResult,
+        log_md: Path,
+        dry_run: bool,
+    ) -> str | None:
+        """Create a remote issue for a local task with no jira: key; write the
+        new key back into the frontmatter (the one sanctioned file write)."""
+        task_id = str(frontmatter.get("id") or path.stem)
+        summary = str(frontmatter.get("title") or task_id)
+        if dry_run:
+            result.created.append(f"would-create {task_id}: {summary} (project {project})")
+            return None
+        try:
+            body = taskfiles.split_task(path)[1]
+        except ValueError:
+            body = ""
+        description = _objective_text(body) or summary
+        key, warning = self.create_issue(summary, description, project, epic_key=epic)
+        if warning:
+            result.warnings.append(warning)
+        result.created.append(f"{key} from {task_id}")
+        taskfiles.update_frontmatter(path, jira=key)
+        taskfiles.record_created(log_md, key, task_id)
+        return key
+
+    def _move_created(
+        self, sprint: str, board: str | None, keys: list[str], result: PMSyncResult
+    ) -> None:
+        sprint_id: str | int = sprint
+        if sprint == "active":
+            board = board or os.environ.get(ENV_BOARD)
+            if not board:
+                result.errors.append(
+                    f"--sprint active needs a board: {ENV_BOARD} is not set (or pass --board)"
+                )
+                return
+            try:
+                active = self.active_sprint(board)
+            except JiraError as exc:
+                result.errors.append(str(exc))
+                return
+            if active is None:
+                result.warnings.append(
+                    f"board {board} has no active sprint — created issue(s) not moved"
+                )
+                return
+            sprint_id = active["id"]
+        try:
+            self.move_to_sprint(sprint_id, keys)
+        except JiraError as exc:
+            result.errors.append(str(exc))
+            return
+        result.updated.extend(f"{key} -> sprint {sprint_id}" for key in keys)
 
     def _push_one(
         self,
