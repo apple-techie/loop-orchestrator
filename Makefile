@@ -11,6 +11,11 @@
 
 BIN ?= $(HOME)/.local/bin
 SCRIPTS := loop-tmux loop-dispatch loop-digest loop-lane-status loop-adr
+# Compiled-coordinator helpers; installed on PATH so the Python engine can
+# resolve them from ANY project root (its lookup is PATH before
+# repo-relative). They all take --project-root, so the symlink location
+# never decides which project they operate on.
+HELPERS := loop-wiki-pending loop-checkpoint loop-task-lint loop-jira-sync loop-metrics loop-wiki-lint
 LIBS := lib/harness-registry.sh lib/lane-config-resolver.sh lib/lane-health.sh
 REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
@@ -40,11 +45,21 @@ install:
 		ln -sf "$$src" "$$dst"; \
 		echo "linked $$dst -> $$src"; \
 	done
+	@for h in $(HELPERS); do \
+		src="$(REPO_DIR)/scripts/$$h.sh"; \
+		dst="$(BIN)/$$h"; \
+		if [ ! -x "$$src" ]; then \
+			echo "skip: $$src is missing or not executable" >&2; \
+			continue; \
+		fi; \
+		ln -sf "$$src" "$$dst"; \
+		echo "linked $$dst -> $$src"; \
+	done
 	@echo ""
 	@echo "Done. Ensure $(BIN) is on your PATH."
 
 uninstall:
-	@for s in $(SCRIPTS); do \
+	@for s in $(SCRIPTS) $(HELPERS); do \
 		dst="$(BIN)/$$s"; \
 		if [ -L "$$dst" ]; then \
 			rm "$$dst"; \
