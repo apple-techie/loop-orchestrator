@@ -86,3 +86,48 @@ checkpoint.md marker.
 Interactive non-writer deck: fleet/loops/mailbox/decision-queue/ADR views,
 approve/reject, steer/add/drop lanes, jump-to-tmux. 132 tests green across
 the Python layer. README + CONTRACT.md updated.
+
+## [2026-06-10] schema | lint protocol added
+T0005: AGENTS.md gains "### Lint protocol" — batched (5 pages/run-batch),
+shuffled-per-run wiki lint with a persistent gitignored scratchpad
+(ops-wiki/.lint-scratchpad.md), five finding headings (CONTRADICTION / STALE /
+ORPHAN / MISSING-LINK / SUSPECT-INSTRUCTION), auto-fix limited to
+MISSING-LINK/ORPHAN, CONTRADICTION + SUSPECT-INSTRUCTION queued in the
+checkpoint.md lint review queue above the coord-decisions marker, and a
+documented (not installed) nightly crontab line. Prompt assembled/dispatched
+by scripts/loop-wiki-lint.sh.
+
+## [2026-06-10] lint | 9 pages, 2 findings
+Trial run per T0005 against the seeded wiki (shuffled order, 2 batches of <=5,
+scratchpad at ops-wiki/.lint-scratchpad.md). Two CONTRADICTION findings queued
+in the checkpoint.md lint review queue (lanes/coord.md and lanes/docs.md
+sole-writer claims vs the T0002/T0003 partition amendments in log.md); no
+STALE, ORPHAN, MISSING-LINK, or SUSPECT-INSTRUCTION findings.
+
+## [2026-06-10] task | T0005 done
+scripts/loop-wiki-lint.sh added (--print / --dispatch [--lane <name>],
+shuffled-per-run page list, protocol header + scratchpad in the prompt,
+dynamic lint window left for operator drop-lane) plus AGENTS.md
+"### Lint protocol"; scratchpad gitignore entry verified; trial lint run
+produced the lint log entry and 2 review-queue items; T0005 archived.
+
+## [2026-06-10] schema | experiment protocol added
+T0006: AGENTS.md gains "### Experiment protocol" — every change to AGENTS.md
+rules, the ingest protocol, or checkpoint assembly is an experiment logged
+`## [date] experiment | <change>`, run for >= 3 checkpoint cycles, kept only
+if checkpoint_tokens and restarts have not regressed and pending_messages
+does not trend up (else reverted + logged). Experiments may modify only
+AGENTS.md protocol sections, the engine checkpoint header, and the engine:
+config section — never the substrate scripts. Numbers come from
+scripts/loop-metrics.sh (--log appends a metrics entry here).
+
+## [2026-06-10] metrics | tokens=1022 pending=0 restarts24h=0 giveups24h=0 ingests7d=4 lints7d=1 checkpoints7d=0 experiments=0
+
+## [2026-06-10] task | T0006 done
+scripts/loop-metrics.sh added (checkpoint_tokens via loop-checkpoint --print
+bytes/4, pending via loop-wiki-pending --quiet, restarts_24h/giveups_24h from
+lane-restarts.jsonl with the no-event-field restart convention, 7d log.md
+prefix counts, python3 date math for BSD/GNU portability, missing inputs
+degrade to 0/n-a with notes, --log appends one metrics entry) plus AGENTS.md
+"### Experiment protocol" with the 3-cycle keep/discard gate; verified
+against the live repo and a fixture jsonl; T0006 archived.

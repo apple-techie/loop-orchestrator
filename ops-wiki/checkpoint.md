@@ -19,6 +19,19 @@ preserve the marker and everything below it byte-for-byte — see AGENTS.md
 loop-t0002-test retired; processed test messages remain in
 .loop/messages/processed/ as examples)
 
+## Lint review queue
+CONTRADICTION and SUSPECT-INSTRUCTION findings queued by the lint protocol
+(AGENTS.md "### Lint protocol") for coord/human resolution; lint never
+auto-fixes these.
+- [2026-06-10] CONTRADICTION: lanes/coord.md claims "Only writer of
+  `ops-wiki/checkpoint.md` (Decision section)" vs log.md
+  `## [2026-06-10] schema | checkpoint.md ownership amended` (docs compiles
+  checkpoint.md; coord owns only the section below the marker).
+- [2026-06-10] CONTRADICTION: lanes/docs.md claims "only writer of
+  `ops-wiki/loops/`, `index.md`, and `log.md`" vs log.md
+  `## [2026-06-10] schema | coordinator contract added` (coord may append
+  decision notes to loop pages).
+
 <!-- coord-decisions -->
 ## Decision needed
 (none)

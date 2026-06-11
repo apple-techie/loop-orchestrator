@@ -1,7 +1,7 @@
 ---
 id: T0006
 title: Metrics + keep/discard gate in log.md
-status: open
+status: done
 depends_on: [T0002, T0003]
 scope: one metrics script + AGENTS.md experiment protocol
 ---

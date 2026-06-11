@@ -1,7 +1,7 @@
 ---
 id: T0005
 title: Nightly lint lane — batched, bias-aware, injection-aware
-status: open
+status: done
 depends_on: [T0002]
 scope: AGENTS.md lint protocol + one dispatch wrapper script
 ---

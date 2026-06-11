@@ -97,6 +97,17 @@ section in this file.
 - `loop-jira-sync.sh (pull|push|both) [--dry-run] [--tasks-dir d]` — exit 64 =
   not implemented / implementation unavailable (stable even after the real
   implementation lands, for the no-Python case).
+- `loop-metrics.sh [--session s] [--project-root p] [--log]` — coordinator
+  metrics summary block on stdout; missing inputs degrade to 0/n-a with notes,
+  exit 0. `--log` appends exactly one `## [YYYY-MM-DD] metrics | <summary>`
+  entry to ops-wiki/log.md. The Python engine invokes this via its substrate
+  wrapper (`loop-metrics` repo-relative entry).
+- `loop-wiki-lint.sh (--print | --dispatch [--lane <name>]) [--session s]
+  [--project-root p]` — assembles the wiki-lint prompt; `--print` emits it on
+  stdout (size report on stderr), `--dispatch` creates/reuses a lint lane and
+  pastes it (exit 0 = delivered; the lint window is never auto-dropped). The
+  Python engine invokes this via its substrate wrapper (`loop-wiki-lint`
+  repo-relative entry).
 
 ## File conventions (read-only to higher layers unless stated)
 
