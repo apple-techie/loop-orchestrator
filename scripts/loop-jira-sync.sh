@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-# loop-jira-sync.sh — bidirectional sync between tasks/ files and Jira. STUB.
+# loop-jira-sync.sh — bidirectional sync between tasks/ files and Jira. SHIM.
 #
 # Task files are the source of truth (AGENTS.md "Task files"); Jira is a thin
-# sync target, not the brain. This stub carries the complete CLI surface and
-# contract so a later task can fill in the API calls without changing the
-# interface. Every mode body currently exits 64 with "TODO: implement".
+# sync target, not the brain. The implementation lives in the optional Python
+# layer (`loop-pm sync --adapter jira`); this script keeps the stable bash CLI
+# surface and execs into it. When loop-pm is not on PATH, it exits 64
+# ("implementation unavailable" — the stable no-Python contract, CONTRACT.md).
 #
-# Contract (binding on the future implementation):
-#   pull — for each Jira issue assigned to this project, create or update the
-#          matching tasks/T<NNNN>-<slug>.md: issue key -> frontmatter `jira:`,
-#          issue status -> frontmatter `status:` (open|in-progress|done|
-#          dropped), summary -> `title:`. Issues with no matching file get a
-#          new task file with the required body sections stubbed for a
-#          human/agent to complete. Files moved by the status<->location
-#          invariant (done/dropped -> tasks/archive/) follow loop-task-lint.sh
-#          rules.
+# Contract (implemented by the Python jira adapter):
+#   pull — for each Jira issue assigned to this project, create the matching
+#          tasks/T<NNNN>-<slug>.md: issue key -> frontmatter `jira:`,
+#          summary -> `title:`. Issues with no matching file get a new task
+#          file with the required body sections stubbed for a human/agent to
+#          complete. Files moved by the status<->location invariant
+#          (done/dropped -> tasks/archive/) follow loop-task-lint.sh rules.
 #   push — for each task file with a `jira:` key, transition the Jira issue
-#          so its status matches the file's frontmatter `status:`, and update
-#          the issue summary from `title:` if they differ.
+#          so its status matches the file's frontmatter `status:`.
 #   both — pull, then push, in that order.
 #
 # Conflict rule: when file and Jira disagree on any synced field, the FILE
@@ -29,9 +27,9 @@
 # to ops-wiki/log.md (append-only log; one entry per issue per run).
 #
 # Credentials: NEVER stored in this repo, this script, or task files. The
-# implementation must read endpoint + auth from the environment only (e.g.
-# JIRA_BASE_URL, JIRA_USER, JIRA_API_TOKEN) and fail fast with a clear error
-# when they are unset.
+# implementation reads endpoint + auth from the environment only
+# (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN) and fails fast with a clear
+# error when they are unset.
 #
 # --dry-run must print the planned file writes / Jira transitions without
 # performing any of them (no task-file writes, no Jira calls that mutate,
@@ -82,11 +80,12 @@ Contract:
   never overwrites a divergent local field — the divergence is pushed back
   on the next push). Every synced issue is logged to ops-wiki/log.md as
   '## [YYYY-MM-DD] sync | <issue key>'. Credentials come from the
-  environment only (JIRA_BASE_URL, JIRA_USER, JIRA_API_TOKEN) — never from
+  environment only (JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN) — never from
   this repo or task files.
 
-Status: STUB. Flags and contract are final; mode bodies exit 64 with
-'TODO: implement' until a later task fills them in.
+Status: shim. Delegates to 'loop-pm sync --adapter jira' (the optional
+Python layer). When loop-pm is not on PATH this script exits 64
+(implementation unavailable; install with: make install-python).
 EOF
 }
 
@@ -121,21 +120,25 @@ if [[ -z "$MODE" ]]; then
   exit 1
 fi
 
+REPO_ROOT="$(cd "$(_jira_sync_script_dir)/.." && pwd)"
 if [[ -z "$TASKS_DIR" ]]; then
-  TASKS_DIR="$(cd "$(_jira_sync_script_dir)/.." && pwd)/tasks"
+  TASKS_DIR="$REPO_ROOT/tasks"
 fi
 if [[ ! -d "$TASKS_DIR" ]]; then
   echo "error: tasks dir not found: $TASKS_DIR" >&2
   exit 1
 fi
 
-# STUB BODIES — the parsing and contract above are final; a later task
-# replaces the case arms below with real sync logic ($MODE, $DRY_RUN and
-# $TASKS_DIR are already validated and ready to use).
-case "$MODE" in
-  pull|push|both)
-    : "$DRY_RUN"  # parsed and validated; consumed by the real implementation
-    echo "TODO: implement" >&2
-    exit 64
-    ;;
-esac
+# SHIM BODY — translate this script's flags into the Python implementation.
+# No loop-pm on PATH = the stable no-Python case: actionable hint, exit 64.
+if ! command -v loop-pm >/dev/null 2>&1; then
+  echo "loop-jira-sync: implementation unavailable — 'loop-pm' is not on PATH" >&2
+  echo "install the optional Python layer to enable Jira sync: make install-python" >&2
+  exit 64
+fi
+
+PM_ARGS=(sync --adapter jira "$MODE" --tasks-dir "$TASKS_DIR" --project-root "$REPO_ROOT")
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  PM_ARGS+=(--dry-run)
+fi
+exec loop-pm "${PM_ARGS[@]}"

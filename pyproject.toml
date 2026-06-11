@@ -15,6 +15,9 @@ loop-engine = "loop_orchestrator.engine.cli:main"
 loop-deck = "loop_orchestrator.deck.cli:main"
 loop-pm = "loop_orchestrator.pm.cli:main"
 
+[project.entry-points."loop_orchestrator.pm_adapters"]
+jira = "loop_orchestrator.pm.jira:JiraAdapter"
+
 [dependency-groups]
 dev = [
     "pytest>=8",
