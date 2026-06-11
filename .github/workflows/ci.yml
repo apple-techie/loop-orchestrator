@@ -39,8 +39,10 @@ jobs:
           uv run loop-engine --help
           uv run loop-pm list-adapters
       - name: subprocess confined to substrate.py and engine/brain.py
+        # --include '*.py': pytest ran first, so __pycache__/*.pyc exists and
+        # binary bytecode matches the pattern while dodging the .py exclusions.
         run: |
-          ! grep -rln 'import subprocess' src/loop_orchestrator \
+          ! grep -rln --include='*.py' 'import subprocess' src/loop_orchestrator \
             | grep -vE 'substrate\.py|engine/brain\.py'
 
   # Keeps the fakes honest: the same JSON surfaces the Python layer consumes,
@@ -68,7 +70,13 @@ jobs:
           d = json.load(sys.stdin)
           assert any(lane["window"] == "web" for lane in d["lanes"]), d'
           ./loop-digest.sh --project-root . --json | python3 -c 'import json,sys; json.load(sys.stdin)'
-          test "$(./loop-lane-status.sh --print-target smoke web)" = "smoke:web.1"
+          # Pane index depends on the host's pane-base-index (0 on stock tmux,
+          # 1 on many dotfiles) — the contract is "a valid -t target", not its
+          # shape, so assert the prefix only.
+          case "$(./loop-lane-status.sh --print-target smoke web)" in
+            smoke:web.*) ;;
+            *) echo "unexpected print-target output" >&2; exit 1 ;;
+          esac
       - name: real dispatch lands in the pane
         run: |
           ./loop-dispatch.sh --session smoke web "echo ci-dispatch-ok"
