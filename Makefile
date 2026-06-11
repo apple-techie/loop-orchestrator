@@ -55,11 +55,16 @@ install:
 		ln -sf "$$src" "$$dst"; \
 		echo "linked $$dst -> $$src"; \
 	done
+	@# The registry doubles as a CLI (list/field/oneshot/probe); the Python
+	@# engine resolves it as 'harness-registry' PATH-first, so external
+	@# projects need it installed like the helpers.
+	@ln -sf "$(REPO_DIR)/lib/harness-registry.sh" "$(BIN)/harness-registry"
+	@echo "linked $(BIN)/harness-registry -> $(REPO_DIR)/lib/harness-registry.sh"
 	@echo ""
 	@echo "Done. Ensure $(BIN) is on your PATH."
 
 uninstall:
-	@for s in $(SCRIPTS) $(HELPERS); do \
+	@for s in $(SCRIPTS) $(HELPERS) harness-registry; do \
 		dst="$(BIN)/$$s"; \
 		if [ -L "$$dst" ]; then \
 			rm "$$dst"; \
