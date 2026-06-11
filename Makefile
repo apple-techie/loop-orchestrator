@@ -95,7 +95,7 @@ check:
 
 install-python:
 	@if command -v uv >/dev/null 2>&1; then \
-		uv tool install --force --from "$(REPO_DIR)" loop-orchestrator; \
+		uv tool install --force --reinstall --from "$(REPO_DIR)" loop-orchestrator; \
 	else \
 		echo "uv not found; falling back to pip --user (needs Python >= 3.10)"; \
 		python3 -m pip install --user "$(REPO_DIR)"; \
