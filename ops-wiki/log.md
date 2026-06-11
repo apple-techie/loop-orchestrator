@@ -131,3 +131,50 @@ prefix counts, python3 date math for BSD/GNU portability, missing inputs
 degrade to 0/n-a with notes, --log appends one metrics entry) plus AGENTS.md
 "### Experiment protocol" with the 3-cycle keep/discard gate; verified
 against the live repo and a fixture jsonl; T0006 archived.
+
+## [2026-06-10] ingest | 20260611-004335-andrew-to-coord.md
+Directive from andrew to coord: first real-brain cycle (engine session
+loop-real) — ONE safe dispatch asking the web lane to run `make check` and
+report the result in one line; nothing destructive, no git. Recorded as
+coord's current assignment (lanes/coord.md) and the checkpoint objective.
+No loop page: orchestrator-state.json has no loops. The d-20260610-221800 /
+d-20260610-221911 decisions below the checkpoint marker are from the p3demo
+demo-gate session, so no conflict with "first real-brain cycle". Moved to
+processed/.
+
+## [2026-06-10] ingest | state sync
+orchestrator-state.json `loops` is empty; ops-wiki/loops/ has no pages and
+index.md lists none. In sync; no reconciliation needed.
+
+## [2026-06-10] ingest | 20260611-005334-web-to-coord.md
+Web's reply to coord's steer (re: d-20260611-004950-0): PASS — `make check`
+clean, `bash -n` ok on all 14 shell scripts; nothing re-run, git untouched.
+First lane->coord round-trip observed end-to-end. Caveat: `make check` covers
+shell syntax only; the Python layer (`make check-python`) was not run.
+Recorded on lanes/coord.md (lanes/web.md already carried it); coverage-gap
+CONFLICT flagged there and in checkpoint.md Open conflicts. No loop page:
+orchestrator-state.json has no loops. Moved to processed/.
+
+## [2026-06-10] ingest | state sync
+orchestrator-state.json `loops` is empty; ops-wiki/loops/ has no pages and
+index.md lists none. In sync; no reconciliation needed.
+
+## [2026-06-10] ingest | 20260611-010844-web-to-coord.md
+Web's reply to coord's check-python steer (re: d-20260611-005837-0): PASS —
+`make check-python` clean, lint/format ok (53 files already formatted),
+216 tests passed in 10.57s; nothing destructive run, git untouched. Closes
+the coverage-gap CONFLICT from 20260611-005334: the freshly landed Python
+layer is now verified healthy, satisfying the 20260611-004335 directive's
+intent. Recorded on lanes/coord.md (lanes/web.md already carried it);
+conflict marked RESOLVED there and cleared from checkpoint.md Open
+conflicts. No loop page: orchestrator-state.json has no loops. Moved to
+processed/.
+
+## [2026-06-10] ingest | state sync
+orchestrator-state.json `loops` is empty; ops-wiki/loops/ has no pages and
+index.md lists none. In sync; no reconciliation needed.
+
+## [2026-06-11] schema | operator skill shipped (skills/loop-orchestrator)
+SKILL.md + three references (substrate, engine, conventions) so any
+SKILL.md-capable harness can operate the system; safety rules baked in.
+Install: make install-skill (SKILLS_DIR override for other harnesses).

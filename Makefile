@@ -14,7 +14,7 @@ SCRIPTS := loop-tmux loop-dispatch loop-digest loop-lane-status loop-adr
 LIBS := lib/harness-registry.sh lib/lane-config-resolver.sh lib/lane-health.sh
 REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
-.PHONY: install uninstall check print-paths help install-python check-python check-all
+.PHONY: install uninstall check print-paths help install-python check-python check-all install-skill
 
 help:
 	@echo "Targets:"
@@ -80,6 +80,17 @@ install-python:
 		echo "uv not found; falling back to pip --user (needs Python >= 3.10)"; \
 		python3 -m pip install --user "$(REPO_DIR)"; \
 	fi
+
+# Symlink the operator skill where SKILL.md-capable harnesses find it.
+# Default: Claude Code's user-level skills dir. For other harnesses or
+# project-level installs, override SKILLS_DIR (see harness-registry.sh
+# skill_dir per harness, e.g. SKILLS_DIR=~/myproj/.pi/skills).
+SKILLS_DIR ?= $(HOME)/.claude/skills
+
+install-skill:
+	@mkdir -p "$(SKILLS_DIR)"
+	@ln -sfn "$(REPO_DIR)/skills/loop-orchestrator" "$(SKILLS_DIR)/loop-orchestrator"
+	@echo "linked $(SKILLS_DIR)/loop-orchestrator -> $(REPO_DIR)/skills/loop-orchestrator"
 
 check-python:
 	@command -v uv >/dev/null 2>&1 || { echo "check-python requires uv" >&2; exit 1; }

@@ -62,6 +62,7 @@ loop-orchestrator/
 ├── examples/
 │   ├── lane-config.example.yaml   # incl. the engine: config section
 │   └── madr-decision.lane-config.yaml
+├── skills/loop-orchestrator/  # operator skill for agent harnesses (SKILL.md)
 ├── AGENTS.md              # agent operating rules + protocols
 ├── CONTRACT.md            # substrate contract v1 (frozen surfaces)
 ├── pyproject.toml         # loop-engine / loop-deck / loop-pm entry points
@@ -603,7 +604,17 @@ make install-python      # uv tool install (pip --user fallback; Python >= 3.10)
 uv sync --group dev      # development
 make check-python        # ruff + pytest (216 tests)
 make check-all           # bash substrate + python layer
+make install-skill       # link skills/loop-orchestrator into ~/.claude/skills
+                         # (other harnesses: SKILLS_DIR=~/proj/.pi/skills etc.)
 ```
+
+The repo ships an **operator skill** (`skills/loop-orchestrator/`) so any
+agent harness that reads `SKILL.md` knows how to drive the whole system —
+boot sessions, dispatch and steer lanes, run engine cycles, approve at the
+gate, use improve and the PM adapters — with the safety rules (never
+`--force`, never automate `loop-adr accept`, at-most-once dispatch) baked
+in. Progressive references cover the substrate CLIs, the engine contract,
+and the ops-wiki/mailbox/tasks conventions.
 
 Engine behavior is configured in an optional `engine:` section of
 `lane-config.yaml` — invisible to the bash resolver, host-overridable, all
