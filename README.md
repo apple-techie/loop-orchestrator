@@ -3,32 +3,68 @@
 [![CI](https://github.com/apple-techie/loop-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/apple-techie/loop-orchestrator/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Project-agnostic shell scripts for spinning up a loop-aware tmux session: a
-coordinator pane, AI implementation lanes, a validation lane, an ops/health
-lane, and a docs lane — wired together with a small mailbox + state-file
-convention so several coding agents can work the same objective in parallel.
+Project-agnostic tmux orchestration for agentic coding loops. The base is a
+set of shell scripts that spin up a loop-aware tmux session — a coordinator
+pane, AI implementation lanes, a validation lane, an ops/health lane, and a
+docs lane — wired together with a small mailbox + state-file convention so
+several coding agents can work the same objective in parallel. On top of
+that substrate (and strictly optional): a deterministic orchestration engine
+whose LLM "brain" is a swappable one-shot CLI call, and a TUI flight deck
+for steering the fleet.
 
 The scripts stay substrate-level: they bootstrap the tmux layout, dispatch
 prompts into lanes, classify lane readiness, and render an ASCII digest of the
 orchestrator state. They make no assumptions about your stack — any project
 whose orchestrator state file matches the schema below (v2) can use them.
 
+On top of the substrate sit two optional layers, each usable without the one
+above it:
+
+```
+┌─ loop-deck (Textual TUI) ──── interactive flight deck: fleet, loops,
+│       mailbox, decision queue, ADR ledger. Strict non-writer.
+├─ loop-engine (Python) ─────── deterministic orchestration loop with a
+│       swappable headless LLM "brain", human-gated decisions, a watch
+│       daemon, and a self-improvement loop. Owns all side effects.
+└─ bash substrate ───────────── everything below; works forever with just
+        bash ≥ 3.2 + tmux ≥ 3.3 + python3 (CI enforces this).
+```
+
+The exact bash surfaces the upper layers may depend on are pinned in
+[CONTRACT.md](CONTRACT.md) (versioned, additive-only). Orchestration
+conventions — write partitions, ingest protocol, coordinator contract,
+task files, lint and experiment protocols — live in [AGENTS.md](AGENTS.md).
+
 ## Layout
 
 ```
 loop-orchestrator/
-├── loop-tmux.sh           # 6-window tmux bootstrap
-├── loop-dispatch.sh       # paste prompts into a lane
-├── loop-digest.sh         # ASCII state + mailbox digest
-├── loop-lane-status.sh    # readiness classifier for lanes
+├── loop-tmux.sh           # 6-window tmux bootstrap + dynamic add/drop-lane
+├── loop-dispatch.sh       # paste prompts into a lane (--interrupt to steer)
+├── loop-digest.sh         # ASCII state + mailbox digest (--json for machines)
+├── loop-lane-status.sh    # readiness classifier (--json --all for the fleet)
 ├── loop-adr.sh            # MADR decision-record helper (new/list/accept)
 ├── lib/
-│   ├── harness-registry.sh    # per-harness contract (pi/claude/opencode/…)
+│   ├── harness-registry.sh    # per-harness contract incl. oneshot templates
 │   ├── lane-config-resolver.sh # YAML → resolved launch commands
 │   └── lane-health.sh         # auto-restart watchdog
+├── scripts/               # compiled-coordinator helpers (see below)
+│   ├── loop-wiki-pending.sh   #   mailbox pending count / summary
+│   ├── loop-checkpoint.sh     #   assemble the stateless coordinator prompt
+│   ├── loop-task-lint.sh      #   validate tasks/ files
+│   ├── loop-jira-sync.sh      #   PM sync shim (delegates to loop-pm)
+│   ├── loop-metrics.sh        #   coordinator-efficiency metrics
+│   └── loop-wiki-lint.sh      #   nightly ops-wiki lint prompt
+├── src/loop_orchestrator/ # the Python layer (engine / deck / pm)
+├── tests/                 # 216 tests; fakes-on-PATH harness, no tmux needed
+├── ops-wiki/              # compiled coordinator memory (see AGENTS.md)
+├── tasks/                 # tasks-as-files (+ archive/)
 ├── examples/
-│   ├── lane-config.example.yaml
+│   ├── lane-config.example.yaml   # incl. the engine: config section
 │   └── madr-decision.lane-config.yaml
+├── AGENTS.md              # agent operating rules + protocols
+├── CONTRACT.md            # substrate contract v1 (frozen surfaces)
+├── pyproject.toml         # loop-engine / loop-deck / loop-pm entry points
 ├── Makefile
 └── README.md
 ```
@@ -434,6 +470,42 @@ docs drafts the MADR → coord/human accepts → digest shows the ledger.* Don't
 ADRs mandatory for every loop, and never let an agent lane mark a decision
 Accepted.
 
+## Compiled coordinator: ops-wiki + scripts/
+
+The coordinator's memory lives on disk, not in an agent's context window.
+`ops-wiki/` is a small LLM-maintained wiki (index, append-only log, one page
+per lane and loop, a compiled `checkpoint.md`) governed by single-writer
+partitions in AGENTS.md: implementation lanes write only their own lane page
+and mailbox messages, the docs lane is the sole compiler of loops/index/log,
+and everything below the `<!-- coord-decisions -->` marker in checkpoint.md
+is coordinator-owned. Mailbox messages are acked by moving them to
+`.loop/messages/processed/`, so "pending" is always real.
+
+The `scripts/` helpers operate that convention:
+
+- `loop-wiki-pending.sh [--quiet]` — pending-mailbox summary (bare integer
+  with `--quiet`, for prompts and cron).
+- `loop-checkpoint.sh (--print | --dispatch [lane]) [--header-file p]` —
+  assembles the stateless coordinator prompt (fixed header + checkpoint.md +
+  index.md + pending summary). Prompt size is independent of session age;
+  byte/token counts go to stderr with a warning above 24k tokens.
+  `--header-file` swaps the header so an external engine can demand a
+  side-effect-free decision block instead.
+- `loop-task-lint.sh` — validates the tasks-as-files convention
+  (`tasks/T<NNNN>-<slug>.md`, frontmatter, required sections, DAG of
+  `depends_on`, status↔location).
+- `loop-metrics.sh [--log]` — checkpoint tokens, pending count, lane
+  restarts/giveups, ingest/lint/checkpoint counts; `--log` appends one
+  metrics line to the wiki log. Feeds the experiment keep/discard gate:
+  changes to the orchestration rules are kept only if these numbers do not
+  regress over three cycles (AGENTS.md "Experiment protocol").
+- `loop-wiki-lint.sh (--print | --dispatch)` — nightly wiki health pass:
+  shuffled batches, five finding categories (CONTRADICTION / STALE / ORPHAN /
+  MISSING-LINK / SUSPECT-INSTRUCTION), injection-aware quarantine; only the
+  safe categories auto-fix, the rest queue for human review.
+- `loop-jira-sync.sh (pull|push|both)` — thin shim onto `loop-pm sync
+  --adapter jira`; exits 64 with a hint when the Python layer is absent.
+
 ## Preset reference
 
 | Preset            | coord         | web   | infra  | validate-left | ops-top       | ops-bottom      |
@@ -448,39 +520,100 @@ Per-lane flags (e.g. `--web-cmd`, `--ops-top-cmd`) override the preset
 defaults. Unset lanes stay empty — the window/pane is still created, just
 idle.
 
-## Optional Python layer: loop-engine + loop-deck
+## The Python layer: loop-engine, loop-deck, loop-pm
 
 The bash scripts above are the substrate and need nothing but bash ≥ 3.2,
 tmux ≥ 3.3, and python3 — that never changes (CI runs `make check` with no
-Python packages installed to prove it). On top of them, an optional Python
-package adds:
+Python packages installed to prove it). The Python package layers
+orchestration on top; `substrate.py` is its single subprocess boundary, so
+the whole layer tests without tmux against fakes-on-PATH.
 
-- **`loop-engine`** — a deterministic orchestration loop: observe lanes →
-  nudge ingest → assemble the compiled checkpoint prompt
-  (`scripts/loop-checkpoint.sh --print`) → call a swappable headless LLM
-  brain (`claude -p`, `codex exec`, … via the harness registry's
-  `oneshot_template`) → parse a structured ` ```decision ` block → gate
-  actions (safe / destructive / blocked; ADR acceptance is never automatable)
-  → dispatch through `loop-dispatch`. Decisions queue in
-  `.loop/sessions/<s>/engine/pending-decision.json` until a human approves:
-  `loop-engine once --approval manual`, then `loop-engine approve <id>`.
-- **`loop-deck`** — an interactive Textual flight deck: fleet table (lanes,
-  harness, role, live status), loops, mailbox, pending-decision queue with
-  `y`/`N` approve/reject, ADR ledger with human-gated accept, steer (`s`) /
-  add-lane (`n`) / drop-lane (`x`, typed-name confirm for base lanes) /
-  jump-to-tmux (`g`). The deck is a non-writer: every mutation shells the
-  same CLIs a human would. Run it in the coord pane:
-  `loop-tmux up … --coord-cmd 'loop-deck --project-root . --session <s>'`.
-- **`loop-pm`** — PM adapters behind the `loop_orchestrator.pm_adapters`
-  entry-point group. `tasks/` files are the source of truth (file wins on
-  conflict); Jira/Linear/etc. are optional sync targets, not requirements.
+### `loop-engine` — the orchestration loop as a program
 
-Install: `make install-python` (uv tool install, pip fallback; needs
-Python ≥ 3.10). Develop: `uv sync --group dev && make check-python`. The
-exact bash surfaces the Python layer may depend on are pinned in
-[CONTRACT.md](CONTRACT.md); engine behavior is configured in an optional
-`engine:` section of `lane-config.yaml` (invisible to the bash resolver —
-see `examples/lane-config.example.yaml`).
+One cycle: observe lanes → ingest pending mail → assemble the compiled
+checkpoint prompt (`loop-checkpoint.sh --print --header-file …`) → call a
+**swappable headless brain** (`claude -p`, `codex exec`, `amp -x`, … via the
+registry's `oneshot_template`) → parse a fenced ` ```decision ` block
+(critique + up to 8 typed actions) → **gate** each action
+(safe / destructive / blocked — `loop-adr accept` and the coord lane are
+never automatable) → execute through `loop-dispatch` / `add-lane` /
+`drop-lane`. Decisions queue in
+`.loop/sessions/<s>/engine/pending-decision.json` until resolved:
+
+```bash
+loop-engine --session s once --approval manual   # one cycle, decision queues
+loop-engine --session s status                   # read the pending decision
+loop-engine --session s approve d-…              # human gate; executes + archives
+loop-engine --session s watch                    # the daemon
+```
+
+`watch` polls and runs cycles on triggers — checkpoint interval, new mailbox
+file, a lane finishing work (working→idle), state-file change, `cycle-now`,
+or an **ask reply**: steered lanes can be told to answer via a mailbox
+message (`subject: re:<ask-id>`), and the reply itself triggers the next
+cycle. Debounce, a single-in-flight decision invariant, a brain-calls-per-hour
+budget, pid-singleton, and pause/resume keep it boring. Ingest runs either by
+nudging the docs lane or fully headless (a one-shot agent performs the
+docs-lane protocol). Every step lands in an append-only `events.jsonl`;
+brain transcripts are kept for provenance; approved decisions are filed below
+the checkpoint marker, so the wiki accumulates the system's reasoning.
+
+`loop-engine improve` adapts *Self-Harness* (arXiv:2606.09498) to this
+stack: it mines failure clusters from the engine's own traces (brain
+failures, rejected decisions, action failures, lane instability, ask
+timeouts), has the brain propose at most three minimal edits to the
+**declared surfaces only** (the checkpoint header, append-only AGENTS.md
+experiment subsections, engine-config recommendations), and files them as
+proposals — nothing applies without `--apply N`, and applied experiments
+live or die by the `loop-metrics.sh` non-regression gate. Zero mined
+weaknesses → zero proposals, by design.
+
+### `loop-deck` — the flight deck
+
+An interactive Textual TUI over the same files and CLIs: fleet table (lane,
+harness, role, live status, restarts), loops, mailbox, the pending-decision
+queue with `y`/`N` approve/reject, ADR ledger with human-gated accept, lane
+detail with live pane tail. Actions: steer (`s`), dispatch (`d`), add-lane
+(`n`), drop-lane (`x`, typed-name confirm for base lanes), jump-to-tmux
+(`g`), run checkpoint (`c`), pause/resume the engine (`p`). The deck is a
+strict non-writer — every mutation shells the same audited CLIs a human
+would — and degrades to a live dashboard when the engine is off. Run it in
+the coord pane (`--coord-cmd 'loop-deck --project-root . --session <s>'`)
+or standalone.
+
+### `loop-pm` — PM tools as plugins
+
+Adapters are discovered via the `loop_orchestrator.pm_adapters` entry-point
+group, so third parties ship them as pip packages. `tasks/` files are the
+source of truth with a strict **file-wins** conflict rule; the PM tool is a
+sync target, never the brain. Jira ships in-repo as the reference adapter
+(REST v3, env-only credentials: `JIRA_BASE_URL`, `JIRA_EMAIL`,
+`JIRA_API_TOKEN`). With zero adapters configured the engine behaves
+identically — PM integration is optional by construction.
+
+```bash
+loop-pm list-adapters
+loop-pm sync --adapter jira pull --dry-run
+```
+
+### Install / develop
+
+```bash
+make install-python      # uv tool install (pip --user fallback; Python >= 3.10)
+uv sync --group dev      # development
+make check-python        # ruff + pytest (216 tests)
+make check-all           # bash substrate + python layer
+```
+
+Engine behavior is configured in an optional `engine:` section of
+`lane-config.yaml` — invisible to the bash resolver, host-overridable, all
+keys optional (see `examples/lane-config.example.yaml` for the annotated
+defaults: approval mode, intervals, brain harness/budget, ingest mode,
+destructive-action caps, PM adapters).
+
+CI runs three jobs: the Python-free `make check` (the degradation contract),
+ruff + pytest + boundary greps, and a real-tmux smoke that exercises the
+CONTRACT.md JSON surfaces against a live session.
 
 ## License
 
