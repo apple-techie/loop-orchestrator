@@ -289,6 +289,12 @@ def cmd_improve(args: argparse.Namespace, root: Path) -> int:
     except (BrainError, improve.ImproveError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if not filed:
+        print(
+            f"mined {len(evidence['clusters'])} weakness cluster(s); the brain proposed "
+            "no harness edits — nothing worth changing on this evidence."
+        )
+        return 0
     print(f"mined {len(evidence['clusters'])} weakness cluster(s); filed {len(filed)} proposal(s):")
     for n, (path, meta) in enumerate(filed, start=1):
         print(f"  {n}. [{meta['surface']}] {meta['title']} ({path.name})")

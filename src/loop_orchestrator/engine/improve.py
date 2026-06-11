@@ -298,6 +298,11 @@ def build_prompt(paths: SessionPaths, config: EngineConfig, evidence: dict, k: i
         "- engine-config: `edit` is RECOMMENDATION TEXT for the `engine:` section of",
         "  lane-config.yaml. It is never auto-applied; a human edits the config.",
         "",
+        "If the evidence contains no failure clusters worth a harness edit, reply",
+        "with `proposals: []` — never invent edits to have something to propose.",
+        "This is NOT a checkpoint cycle: do not emit a ```decision fence and do",
+        "not propose lane actions; only harness edits to the surfaces above.",
+        "",
         f"--- mined evidence (last {evidence.get('window_days')} days) ---",
         json.dumps(evidence, indent=2, sort_keys=True),
         "",
@@ -330,8 +335,11 @@ def parse_proposals(text: str, max_proposals: int = 3) -> list[dict]:
     if raw.get("version") != 1:
         raise ImproveError(f"unsupported proposals version {raw.get('version')!r}; expected 1")
     items = raw.get("proposals")
-    if not isinstance(items, list) or not items:
-        raise ImproveError("'proposals' must be a non-empty list")
+    if not isinstance(items, list):
+        raise ImproveError("'proposals' must be a list")
+    # An EMPTY list is a valid, honest outcome — the self-harness rule is to
+    # propose only against mined weaknesses, never to invent edits. Observed
+    # live on the first real-brain run (clean session -> proposals: []).
     out: list[dict] = []
     for idx, item in enumerate(items[:max_proposals]):
         if not isinstance(item, dict):

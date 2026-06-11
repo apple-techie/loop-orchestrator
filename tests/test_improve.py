@@ -220,8 +220,10 @@ def test_parse_proposals_garbage_and_invalid():
         improve.parse_proposals("```proposals\n{: nope\n```")
     with pytest.raises(improve.ImproveError, match="version"):
         improve.parse_proposals("```proposals\nversion: 9\nproposals: [{}]\n```")
-    with pytest.raises(improve.ImproveError, match="non-empty list"):
-        improve.parse_proposals("```proposals\nversion: 1\nproposals: []\n```")
+    with pytest.raises(improve.ImproveError, match="must be a list"):
+        improve.parse_proposals("```proposals\nversion: 1\nproposals: nope\n```")
+    # An empty list is the brain honestly declining to invent edits — valid.
+    assert improve.parse_proposals("```proposals\nversion: 1\nproposals: []\n```") == []
     with pytest.raises(improve.ImproveError, match="surface"):
         improve.parse_proposals(
             "```proposals\nversion: 1\nproposals:\n  - {surface: nope, title: t, edit: e}\n```"
