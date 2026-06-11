@@ -76,6 +76,10 @@ class SessionPaths:
         return self.engine_dir / "brain"
 
     @property
+    def proposals_dir(self) -> Path:
+        return self.engine_dir / "proposals"
+
+    @property
     def pid_path(self) -> Path:
         return self.engine_dir / "engine.pid"
 

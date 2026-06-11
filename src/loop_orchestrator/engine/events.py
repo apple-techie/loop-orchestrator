@@ -1,13 +1,17 @@
 """Append-only engine event log (events.jsonl).
 
-One JSON object per line: {ts, seq, event, ...fields}. Single writer — the
-engine process — so no lock is taken; seq survives restarts by deriving the
-next value from the last parseable line on first append.
+One JSON object per line: {ts, seq, event, ...fields}. The P5 flow has TWO
+writer processes by design (the watch daemon and the approve/reject CLI), so
+each append takes an fcntl lock on a sibling .lock file and derives seq from
+the file tail inside the critical section — seq stays unique and monotonic
+across concurrent writers and restarts.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,11 +28,10 @@ def parse_ts(ts: str) -> datetime:
 
 
 class EventLog:
-    """Append-only JSONL event log with restart-safe monotonic seq."""
+    """Append-only JSONL event log with cross-process monotonic seq."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        self._next_seq: int | None = None
 
     def _lines(self) -> list[str]:
         try:
@@ -50,6 +53,29 @@ class EventLog:
                 return obj["seq"]
         return 0
 
+    def _last_seq_tail(self) -> int:
+        """_last_seq over only the final 8KB (an event line is well under 1KB),
+        falling back to the full scan when the tail is all corruption."""
+        try:
+            with open(self.path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - 8192))
+                chunk = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return 0
+        for line in reversed(chunk.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("seq"), int):
+                return obj["seq"]
+        return self._last_seq() if size > 8192 else 0
+
     def _needs_newline(self) -> bool:
         """True when a torn last line (crash mid-write) must be terminated so
         the next record starts on its own line."""
@@ -61,14 +87,18 @@ class EventLog:
             return False
 
     def append(self, kind: str, /, **fields) -> dict:
-        if self._next_seq is None:
-            self._next_seq = self._last_seq() + 1
-        event = {"ts": utc_now(), "seq": self._next_seq, "event": kind, **fields}
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        prefix = "\n" if self._needs_newline() else ""
-        with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(prefix + json.dumps(event) + "\n")
-        self._next_seq += 1
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            event = {"ts": utc_now(), "seq": self._last_seq_tail() + 1, "event": kind, **fields}
+            prefix = "\n" if self._needs_newline() else ""
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(prefix + json.dumps(event) + "\n")
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
         return event
 
     def tail(self, n: int) -> list[dict]:

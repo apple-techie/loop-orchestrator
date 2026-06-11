@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fake loop-metrics (scripts/ surface). Canned summary block; --log is a no-op
+# here — the call log line is the observable effect. FAKE_METRICS_FAIL=1
+# simulates a broken metrics run.
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+if [ "${FAKE_METRICS_FAIL:-}" = "1" ]; then
+  echo "fake loop-metrics: forced failure" >&2
+  exit 1
+fi
+
+echo "loop-metrics — 2026-06-10 (session: demo)"
+echo "  checkpoint_tokens: 24"
+echo "  pending_messages:  2"
+exit 0

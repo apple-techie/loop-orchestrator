@@ -32,6 +32,8 @@ class IngestConfig:
     mode: str = "lane"  # lane | headless
     lane: str = "docs"
     timeout_s: int = 600
+    harness: str = ""  # headless one-shot harness ("" = use brain.harness)
+    auto_approve: bool = True  # append the registry auto-approve flag (file writes needed)
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,17 @@ class PmConfig:
 
 
 @dataclass(frozen=True)
+class MetricsConfig:
+    log_after_cycle: bool = False  # loop-metrics --log after each completed cycle
+
+
+@dataclass(frozen=True)
+class LintConfig:
+    enabled: bool = False  # dispatch loop-wiki-lint when the last lint run is stale
+    interval_h: int = 24
+
+
+@dataclass(frozen=True)
 class EngineConfig:
     brain: BrainConfig = field(default_factory=BrainConfig)
     approval_mode: str = "manual"  # manual | auto | full
@@ -58,6 +71,8 @@ class EngineConfig:
     ingest: IngestConfig = field(default_factory=IngestConfig)
     destructive: DestructiveConfig = field(default_factory=DestructiveConfig)
     pm: PmConfig = field(default_factory=PmConfig)
+    metrics: MetricsConfig = field(default_factory=MetricsConfig)
+    lint: LintConfig = field(default_factory=LintConfig)
 
 
 def _merge(cls: type, data: object):

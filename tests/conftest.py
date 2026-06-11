@@ -27,7 +27,13 @@ def fakes_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     log = tmp_path / "fake-calls.log"
     monkeypatch.setenv("LOOP_SUBSTRATE_BIN", str(FAKES_BIN))
     monkeypatch.setenv("FAKE_CALL_LOG", str(log))
-    for var in ("FAKE_LANE_STATUS_OVERRIDE", "FAKE_DISPATCH_FAIL", "FAKE_BRAIN_MODE"):
+    for var in (
+        "FAKE_LANE_STATUS_OVERRIDE",
+        "FAKE_DISPATCH_FAIL",
+        "FAKE_BRAIN_MODE",
+        "FAKE_METRICS_FAIL",
+        "FAKE_LINT_FAIL",
+    ):
         monkeypatch.delenv(var, raising=False)
     return log
 

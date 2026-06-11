@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fake loop-wiki-lint (scripts/ surface). --dispatch succeeds without tmux;
+# the call log line is the observable effect. FAKE_LINT_FAIL=1 simulates a
+# failed dispatch (e.g. add-lane could not create the lint window).
+set -eu
+
+if [ -n "${FAKE_CALL_LOG:-}" ]; then
+  line="$(basename "$0")"
+  if [ "$#" -gt 0 ]; then line="$line $*"; fi
+  printf '%s\n' "$line" >>"$FAKE_CALL_LOG"
+fi
+
+if [ "${FAKE_LINT_FAIL:-}" = "1" ]; then
+  echo "fake loop-wiki-lint: add-lane failed" >&2
+  exit 1
+fi
+
+echo "lint prompt dispatched to dynamic window 'lint' (drop-lane is the operator's call)"
+exit 0

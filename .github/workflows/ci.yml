@@ -42,3 +42,46 @@ jobs:
         run: |
           ! grep -rln 'import subprocess' src/loop_orchestrator \
             | grep -vE 'substrate\.py|engine/brain\.py'
+
+  # Keeps the fakes honest: the same JSON surfaces the Python layer consumes,
+  # exercised against a real tmux server with shell lanes (no AI binaries).
+  tmux-smoke:
+    name: real-tmux smoke (contract surfaces)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: boot shell-lane session
+        run: |
+          tmux new-session -d -s smoke -n coord
+          tmux new-window -t smoke -n web
+          tmux new-window -t smoke -n docs
+      - name: JSON surfaces parse against live session
+        run: |
+          ./loop-lane-status.sh --json --all smoke | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          assert d["contract_version"] == 1 and "web" in d["lanes"], d'
+          ./loop-tmux.sh list-lanes --session smoke --json | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          assert any(lane["window"] == "web" for lane in d["lanes"]), d'
+          ./loop-digest.sh --project-root . --json | python3 -c 'import json,sys; json.load(sys.stdin)'
+          test "$(./loop-lane-status.sh --print-target smoke web)" = "smoke:web.1"
+      - name: real dispatch lands in the pane
+        run: |
+          ./loop-dispatch.sh --session smoke web "echo ci-dispatch-ok"
+          sleep 2
+          tmux capture-pane -t smoke:web -p | grep ci-dispatch-ok
+      - name: add-lane / drop-lane round trip
+        run: |
+          ./loop-tmux.sh add-lane --session smoke --window dyn1 --cmd bash
+          ./loop-tmux.sh list-lanes --session smoke --json | python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          assert any(lane["window"] == "dyn1" and not lane["base"] for lane in d["lanes"]), d'
+          ./loop-tmux.sh drop-lane --session smoke --window dyn1
+      - name: teardown
+        if: always()
+        run: tmux kill-session -t smoke || true

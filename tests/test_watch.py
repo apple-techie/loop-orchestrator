@@ -1,0 +1,594 @@
+"""Watch daemon: pure trigger policy, tick behavior, asks, headless ingest."""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from pathlib import Path
+
+import pytest
+
+from loop_orchestrator.engine import actions, cli
+from loop_orchestrator.engine import loop as loop_mod
+from loop_orchestrator.engine import watch as watch_mod
+from loop_orchestrator.engine.config import EngineConfig, IngestConfig, LintConfig, MetricsConfig
+from loop_orchestrator.engine.events import EventLog
+from loop_orchestrator.engine.loop import run_once
+from loop_orchestrator.engine.watch import TriggerState, Watch, evaluate_triggers
+from loop_orchestrator.engine.wiki import MARKER
+from loop_orchestrator.paths import SessionPaths
+from loop_orchestrator.substrate import Substrate
+
+FAKES_BIN = Path(__file__).resolve().parent / "fakes" / "bin"
+COMPILED = "# Checkpoint\n\ncompiled state, docs-owned\n\n" + MARKER + "\n"
+NOW = 1_750_000_000.0
+
+AGENTS_STUB = """# AGENTS.md
+
+### Ingest
+General ingest words.
+
+### Ingest protocol
+Move each processed file to processed/ and append to log.md.
+
+### Coordinator contract
+not part of the protocol section.
+"""
+
+
+@pytest.fixture
+def project(tmp_path: Path, fakes_env: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "proj"
+    (root / ".loop" / "messages" / "processed").mkdir(parents=True)
+    (root / "ops-wiki").mkdir()
+    (root / "ops-wiki" / "checkpoint.md").write_text(COMPILED, encoding="utf-8")
+    (root / "AGENTS.md").write_text(AGENTS_STUB, encoding="utf-8")
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(FAKES_BIN / "fake-brain"))
+    monkeypatch.delenv("LOOP_ENGINE_INGEST_CMD", raising=False)
+    return root
+
+
+@pytest.fixture
+def cycle_recorder(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Replace loop.run_once with a recorder so ticks never run a real cycle."""
+    calls: list[tuple[str, str]] = []
+
+    def fake_run_once(project_root, session, config, **kwargs):
+        calls.append((str(project_root), session))
+        return 0
+
+    monkeypatch.setattr(loop_mod, "run_once", fake_run_once)
+    return calls
+
+
+def _events(project: Path) -> list[dict]:
+    path = SessionPaths(project, "demo").events_path
+    if not path.exists():
+        return []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def _watch(project: Path, **overrides) -> Watch:
+    config = EngineConfig(poll_interval_s=0, min_cycle_interval_s=0, **overrides)
+    return Watch(project, "demo", config)
+
+
+def _settled(w: Watch) -> Watch:
+    """Seed the previous snapshot + a recent cycle so nothing triggers."""
+    w._prev_snapshot = w.observer.snapshot().to_dict()
+    w._last_cycle_start = time.time()
+    return w
+
+
+# ── evaluate_triggers (pure, injected clock) ────────────────────────────────
+
+
+def _state(**kw) -> TriggerState:
+    base = dict(last_cycle_start=NOW - 10, checkpoint_interval_s=900, min_cycle_interval_s=0)
+    base.update(kw)
+    return TriggerState(**base)
+
+
+def test_interval_trigger():
+    assert evaluate_triggers(_state(last_cycle_start=None), NOW) == ["interval"]
+    assert evaluate_triggers(_state(last_cycle_start=NOW - 900), NOW) == ["interval"]
+    assert evaluate_triggers(_state(last_cycle_start=NOW - 899), NOW) == []
+
+
+def test_flag_triggers():
+    assert evaluate_triggers(_state(mailbox_new=True), NOW) == ["mailbox-new"]
+    assert evaluate_triggers(_state(state_file_changed=True), NOW) == ["state-changed"]
+    assert evaluate_triggers(_state(cycle_now=True), NOW) == ["cycle-now"]
+    assert evaluate_triggers(_state(reply_received=True), NOW) == ["reply-received"]
+
+
+def test_lane_transition_trigger():
+    for status in ("idle", "errored", "awaiting-approval"):
+        st = _state(lane_transitions=[("web", "working", status)])
+        assert evaluate_triggers(st, NOW) == [f"lane-transition:web:{status}"]
+    boring = [("web", "idle", "working"), ("web", None, "idle"), ("web", "working", "unknown")]
+    assert evaluate_triggers(_state(lane_transitions=boring), NOW) == []
+
+
+def test_debounce_blocks_all_triggers():
+    st = _state(
+        last_cycle_start=NOW - 30,
+        min_cycle_interval_s=120,
+        mailbox_new=True,
+        cycle_now=True,
+        reply_received=True,
+    )
+    assert evaluate_triggers(st, NOW) == []
+    past_debounce = _state(last_cycle_start=NOW - 120, min_cycle_interval_s=120, mailbox_new=True)
+    assert evaluate_triggers(past_debounce, NOW) == ["mailbox-new"]
+
+
+def test_reasons_accumulate():
+    st = _state(last_cycle_start=None, mailbox_new=True, cycle_now=True)
+    assert evaluate_triggers(st, NOW) == ["interval", "mailbox-new", "cycle-now"]
+
+
+# ── singleton + lifecycle ───────────────────────────────────────────────────
+
+
+def test_singleton_pid_refusal(project, capsys):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+    assert _watch(project).run() == 1
+
+    assert "already running" in capsys.readouterr().err
+    assert paths.pid_path.read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert "watch-start" not in [e["event"] for e in _events(project)]
+
+
+def test_run_takes_over_stale_pid_and_stops_cleanly(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.pid_path.write_text("99999999\n", encoding="utf-8")
+    monkeypatch.setattr(watch_mod, "pid_alive", lambda pid: False)
+    w = _watch(project)
+
+    def fake_tick(now):
+        assert paths.pid_path.read_text(encoding="utf-8").strip() == str(os.getpid())
+        w._stop = True
+
+    monkeypatch.setattr(w, "tick", fake_tick)
+    assert w.run() == 0
+    assert not paths.pid_path.exists()  # clean exit removed the pid file
+    kinds = [e["event"] for e in _events(project)]
+    assert "watch-start" in kinds and "watch-stop" in kinds
+
+
+# ── tick: triggers and suppression ──────────────────────────────────────────
+
+
+def test_tick_mailbox_new_triggers_run_once(project, cycle_recorder):
+    w = _watch(project)
+    w._last_cycle_start = time.time()  # suppress the interval trigger
+
+    w.tick(time.time())  # first delta sees the digest's pending mailbox file
+
+    assert cycle_recorder == [(str(project), "demo")]
+    kinds = [e["event"] for e in _events(project)]
+    assert "mailbox-new" in kinds and "cycle-trigger" in kinds and "cycle-result" in kinds
+
+    w.tick(time.time())  # nothing new -> no second cycle
+    assert len(cycle_recorder) == 1
+
+
+def test_cycle_now_consumed(project, cycle_recorder):
+    w = _settled(_watch(project))
+    w.tick(time.time())
+    assert cycle_recorder == []  # settled: nothing triggers
+
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1
+    assert not w.paths.cycle_now_path.exists()  # consumed
+    triggers = [e for e in _events(project) if e["event"] == "cycle-trigger"]
+    assert triggers[-1]["reasons"] == ["cycle-now"]
+
+
+def test_lane_transition_tick_triggers(project, cycle_recorder, monkeypatch):
+    monkeypatch.setenv("FAKE_LANE_STATUS_OVERRIDE", "web=working")
+    w = _settled(_watch(project))
+    monkeypatch.setenv("FAKE_LANE_STATUS_OVERRIDE", "web=errored")
+
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1
+    triggers = [e for e in _events(project) if e["event"] == "cycle-trigger"]
+    assert triggers[-1]["reasons"] == ["lane-transition:web:errored"]
+
+
+def test_state_file_mtime_change_triggers(project, cycle_recorder):
+    w = _settled(_watch(project))
+    state_file = w.paths.state_file
+    state_file.write_text("{}\n", encoding="utf-8")
+
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1
+    triggers = [e for e in _events(project) if e["event"] == "cycle-trigger"]
+    assert triggers[-1]["reasons"] == ["state-changed"]
+
+    w.tick(time.time())  # mtime unchanged -> no retrigger
+    assert len(cycle_recorder) == 1
+
+
+def test_paused_skip_once_per_pause(project, cycle_recorder):
+    w = _settled(_watch(project))
+    w.paths.paused_path.touch()
+
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
+    assert len(skips) == 1 and skips[0]["reason"] == "paused"
+
+    w.paths.paused_path.unlink()
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+    assert len(cycle_recorder) == 1
+
+
+def test_pending_decision_suppresses(project, cycle_recorder):
+    w = _settled(_watch(project))
+    w.paths.pending_decision_path.write_text('{"id": "d-x", "status": "pending"}', "utf-8")
+
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
+    assert skips and skips[-1]["reason"] == "pending-decision"
+
+
+def test_budget_guard_suppresses(project, cycle_recorder):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    log = EventLog(paths.events_path)
+    for _ in range(12):  # default brain.max_calls_per_hour
+        log.append("brain-call")
+    w = _settled(_watch(project))
+
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
+    assert skips and skips[-1]["reason"] == "budget"
+
+
+# ── asks: record, reply, timeout ────────────────────────────────────────────
+
+
+def _steer_doc() -> dict:
+    return {
+        "id": "d-20260611-000000",
+        "actions": [
+            {
+                "idx": 0,
+                "kind": "steer",
+                "lane": "web",
+                "payload": "report status",
+                "interrupt": False,
+                "wait_for_idle": False,
+                "expects_reply": True,
+                "reply_timeout_s": 1800,
+                "rationale": "r",
+                "classification": "safe",
+                "status": "approved",
+            }
+        ],
+    }
+
+
+def test_execute_batch_records_ask_then_reply_received(project, cycle_recorder):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+
+    actions.execute_batch(_steer_doc(), Substrate(project, "demo"), events, EngineConfig(), paths)
+
+    asks = actions.load_asks(paths)
+    assert len(asks) == 1
+    ask = asks[0]
+    assert ask["id"] == "d-20260611-000000-0"
+    assert ask["lane"] == "web"
+    assert ask["status"] == "outstanding"
+    assert ask["reply_timeout_s"] == 1800 and ask["created_at"]
+    ask_events = [e for e in _events(project) if e["event"] == "ask"]
+    assert ask_events and ask_events[0]["id"] == "d-20260611-000000-0"
+
+    w = _settled(_watch(project))
+    reply = paths.mailbox_dir / "20260611-000100-web-to-coord.md"
+    reply.write_text(
+        "---\nsubject: re:d-20260611-000000-0\nfrom: web\nto: coord\n---\n\ndone.\n",
+        encoding="utf-8",
+    )
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1  # matched reply counts as a trigger
+    triggers = [e for e in _events(project) if e["event"] == "cycle-trigger"]
+    assert triggers[-1]["reasons"] == ["reply-received"]
+    assert actions.load_asks(paths)[0]["status"] == "replied"
+    received = [e for e in _events(project) if e["event"] == "reply-received"]
+    assert received and received[0]["ask"] == "d-20260611-000000-0"
+    assert reply.exists()  # peek only — the docs lane owns the ack
+
+    w.tick(time.time())  # same file again -> no duplicate reply-received
+    assert len([e for e in _events(project) if e["event"] == "reply-received"]) == 1
+
+
+def test_unmatched_reply_subject_is_ignored(project, cycle_recorder):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    actions.record_ask(paths, "d-1-0", "web", 1800)
+    w = _settled(_watch(project))
+    reply = paths.mailbox_dir / "20260611-000200-web-to-coord.md"
+    reply.write_text("---\nsubject: unrelated update\n---\n\nbody\n", encoding="utf-8")
+
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    assert actions.load_asks(paths)[0]["status"] == "outstanding"
+
+
+def test_ask_timeout_marks_once(project, cycle_recorder):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    actions.save_asks(
+        paths,
+        [
+            {
+                "id": "d-1-0",
+                "lane": "web",
+                "created_at": "2026-06-10T00:00:00Z",  # injected old timestamp
+                "reply_timeout_s": 60,
+                "status": "outstanding",
+            }
+        ],
+    )
+    w = _settled(_watch(project))
+
+    w.tick(time.time())
+    w.tick(time.time())
+
+    assert cycle_recorder == []  # timeout is not a cycle trigger
+    asks = actions.load_asks(paths)
+    assert asks[0]["status"] == "timed-out" and asks[0]["timed_out_at"]
+    timeouts = [e for e in _events(project) if e["event"] == "reply-timeout"]
+    assert len(timeouts) == 1 and timeouts[0]["ask"] == "d-1-0"
+
+
+def test_checkpoint_prompt_lists_outstanding_asks(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    actions.record_ask(paths, "d-2-0", "web", 1800)
+
+    assert run_once(project, "demo", EngineConfig()) == 0
+
+    prompts = sorted(paths.brain_dir.glob("*.prompt.md"))
+    text = prompts[0].read_text(encoding="utf-8")
+    assert "--- outstanding asks ---" in text
+    assert "d-2-0 lane=web status=outstanding" in text
+
+
+# ── scheduled triggers: metrics after cycle, stale-lint dispatch ────────────
+
+
+def _lint_calls(call_log) -> list[str]:
+    return [line for line in call_log() if line.startswith("loop-wiki-lint")]
+
+
+def test_metrics_logged_after_each_cycle(project, cycle_recorder, call_log):
+    w = _watch(project, metrics=MetricsConfig(log_after_cycle=True))
+    w._last_cycle_start = time.time()
+
+    w.tick(time.time())  # first delta sees the pending mailbox file -> cycle
+
+    assert len(cycle_recorder) == 1
+    metrics_calls = [line for line in call_log() if line.startswith("loop-metrics")]
+    assert metrics_calls == [f"loop-metrics --session demo --project-root {project} --log"]
+    metrics_events = [e for e in _events(project) if e["event"] == "metrics"]
+    assert metrics_events and metrics_events[0]["after_cycle"] is True
+    seq = {e["event"]: e["seq"] for e in _events(project)}
+    assert seq["cycle-result"] < seq["metrics"]
+
+
+def test_metrics_disabled_by_default_and_failure_is_an_event(project, cycle_recorder, monkeypatch):
+    w = _watch(project)
+    w._last_cycle_start = time.time()
+    w.tick(time.time())
+    assert "metrics" not in [e["event"] for e in _events(project)]
+
+    monkeypatch.setenv("FAKE_METRICS_FAIL", "1")
+    w2 = _watch(project, metrics=MetricsConfig(log_after_cycle=True))
+    w2.paths.cycle_now_path.touch()
+    w2.tick(time.time())
+
+    assert len(cycle_recorder) == 2  # the failed metrics run never kills the daemon
+    errors = [e for e in _events(project) if e["event"] == "error"]
+    assert errors and errors[-1]["kind"] == "metrics-failed"
+
+
+def test_lint_dispatched_when_stale_at_most_once_per_interval(project, cycle_recorder, call_log):
+    w = _settled(_watch(project, lint=LintConfig(enabled=True)))
+
+    w.tick(time.time())  # no log.md at all -> the lint run is overdue
+
+    assert _lint_calls(call_log) == [
+        f"loop-wiki-lint --dispatch --session demo --project-root {project}"
+    ]
+    dispatches = [e for e in _events(project) if e["event"] == "lint-dispatch"]
+    assert len(dispatches) == 1 and dispatches[0]["ok"] is True
+
+    w.tick(time.time())  # inside the interval -> no second dispatch
+    assert len(_lint_calls(call_log)) == 1
+
+
+def test_lint_not_dispatched_when_recent_disabled_or_paused(project, call_log):
+    log_md = project / "ops-wiki" / "log.md"
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    log_md.write_text(f"## [{today}] lint | 5 pages, 0 findings\n", encoding="utf-8")
+    w = _settled(_watch(project, lint=LintConfig(enabled=True)))
+    w.tick(time.time())
+    assert _lint_calls(call_log) == []  # fresh lint entry in log.md
+
+    log_md.unlink()
+    w2 = _settled(_watch(project))  # lint disabled by default
+    w2.tick(time.time())
+    assert _lint_calls(call_log) == []
+
+    w3 = _settled(_watch(project, lint=LintConfig(enabled=True)))
+    w3.paths.paused_path.touch()
+    w3.tick(time.time())
+    assert _lint_calls(call_log) == []  # paused engines do not start lint lanes
+
+
+def test_lint_dispatch_failure_latches_for_the_interval(project, monkeypatch, call_log):
+    monkeypatch.setenv("FAKE_LINT_FAIL", "1")
+    w = _settled(_watch(project, lint=LintConfig(enabled=True)))
+
+    w.tick(time.time())
+    w.tick(time.time())
+
+    assert len(_lint_calls(call_log)) == 1  # the failed attempt is the per-interval latch
+    dispatches = [e for e in _events(project) if e["event"] == "lint-dispatch"]
+    assert len(dispatches) == 1 and dispatches[0]["ok"] is False
+
+
+# ── headless ingest ─────────────────────────────────────────────────────────
+
+
+def test_headless_ingest_done(project, monkeypatch, tmp_path, call_log):
+    marker = tmp_path / "ingested"
+    script = tmp_path / "fake-ingest"
+    script.write_text(f'#!/bin/sh\n: > "{marker}"\necho done\n', encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("LOOP_ENGINE_INGEST_CMD", str(script))
+    config = EngineConfig(ingest=IngestConfig(mode="headless"))
+
+    assert run_once(project, "demo", config) == 0
+
+    assert marker.exists()
+    done = [e for e in _events(project) if e["event"] == "ingest-done"]
+    assert done and done[0]["pending"] == 2  # fake loop-wiki-pending prints 2
+    # the one-shot got the protocol section + pending list (and only that section)
+    paths = SessionPaths(project, "demo")
+    prompts = sorted((paths.engine_dir / "ingest").glob("*.prompt.md"))
+    text = prompts[0].read_text(encoding="utf-8")
+    assert "### Ingest protocol" in text
+    assert "Move each processed file" in text
+    assert "not part of the protocol section" not in text
+    assert "20260610-000000-web-to-coord.md" in text
+    # headless mode never nudges the docs lane
+    assert not any(" docs " in line for line in call_log() if line.startswith("loop-dispatch"))
+
+
+def test_headless_ingest_timeout(project, monkeypatch, tmp_path):
+    script = tmp_path / "slow-ingest"
+    script.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("LOOP_ENGINE_INGEST_CMD", str(script))
+    config = EngineConfig(ingest=IngestConfig(mode="headless", timeout_s=1))
+
+    assert run_once(project, "demo", config) == 0  # the cycle survives the failure
+
+    kinds = [e["event"] for e in _events(project)]
+    assert "ingest-timeout" in kinds
+    assert "ingest-done" not in kinds
+
+
+def test_ingest_argv_appends_auto_approve(monkeypatch):
+    monkeypatch.delenv("LOOP_ENGINE_INGEST_CMD", raising=False)
+
+    class StubSub:
+        def oneshot_template(self, name):
+            assert name == "claude"
+            return "claude -p {prompt}"
+
+        def harness_field(self, name, field):
+            assert (name, field) == ("claude", "auto_approve_flag")
+            return "--dangerously-skip-permissions"
+
+    argv = loop_mod._ingest_argv(StubSub(), EngineConfig(), "P")
+    assert argv == ["claude", "-p", "P", "--dangerously-skip-permissions"]
+
+    no_auto = EngineConfig(ingest=IngestConfig(auto_approve=False))
+    assert loop_mod._ingest_argv(StubSub(), no_auto, "P") == ["claude", "-p", "P"]
+
+    other = EngineConfig(ingest=IngestConfig(harness="codex", auto_approve=False))
+
+    class CodexStub:
+        def oneshot_template(self, name):
+            assert name == "codex"  # ingest.harness overrides brain.harness
+            return "codex exec {prompt}"
+
+    assert loop_mod._ingest_argv(CodexStub(), other, "P") == ["codex", "exec", "P"]
+
+
+# ── CLI: status liveness ────────────────────────────────────────────────────
+
+
+def test_status_reports_watch_liveness(project, monkeypatch, capsys):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    base = ["--project-root", str(project), "--session", "demo", "status"]
+
+    assert cli.main(base) == 0
+    assert "watch:" not in capsys.readouterr().out  # no pid file -> no watch line
+
+    paths.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    assert cli.main(base) == 0
+    assert f"watch: alive (pid {os.getpid()}" in capsys.readouterr().out
+
+    monkeypatch.setattr(cli, "pid_alive", lambda pid: False)
+    assert cli.main(base) == 0
+    assert "watch: not running" in capsys.readouterr().out
+
+
+def test_fresh_start_does_not_fire_interval_immediately():
+    # A daemon that has never cycled must not burn a brain call at boot: the
+    # interval baseline is the watch start, not epoch zero.
+    fresh = _state(last_cycle_start=None, watch_start=NOW - 10)
+    assert evaluate_triggers(fresh, NOW) == []
+    due = _state(last_cycle_start=None, watch_start=NOW - 901)
+    assert evaluate_triggers(due, NOW) == ["interval"]
+
+
+def test_cycle_now_survives_suppression_and_fires_after_resolution(project, cycle_recorder):
+    w = _settled(_watch(project))
+    w.paths.pending_decision_path.write_text('{"id": "d-x", "status": "pending"}', "utf-8")
+    w.paths.cycle_now_path.touch()
+
+    w.tick(time.time())
+    assert cycle_recorder == []
+    assert w.paths.cycle_now_path.exists()  # request survives suppression
+
+    w.paths.pending_decision_path.unlink()
+    w.tick(time.time())
+    assert len(cycle_recorder) == 1
+    assert not w.paths.cycle_now_path.exists()  # consumed by the real cycle
+
+
+def test_cycle_skip_logged_once_per_episode(project, cycle_recorder):
+    w = _settled(_watch(project))
+    w.paths.pending_decision_path.write_text('{"id": "d-x", "status": "pending"}', "utf-8")
+    w.paths.cycle_now_path.touch()
+
+    w.tick(time.time())
+    w.tick(time.time())
+    w.tick(time.time())
+
+    skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
+    assert len(skips) == 1  # identical episode, one event — not one per poll

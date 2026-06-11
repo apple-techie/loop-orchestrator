@@ -6,7 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from loop_orchestrator.engine.brain import Brain, BrainBudgetError, BrainInvocationError
+from loop_orchestrator.engine.brain import (
+    Brain,
+    BrainBudgetError,
+    BrainInvocationError,
+    oneshot_argv,
+    run_oneshot,
+)
 from loop_orchestrator.engine.config import BrainConfig, EngineConfig
 from loop_orchestrator.engine.events import EventLog
 from loop_orchestrator.paths import SessionPaths
@@ -104,3 +110,55 @@ def test_exhausted_retries_raise_and_log(tmp_path, env, monkeypatch):
     assert "brain-failed" in kinds
     assert list(paths.brain_dir.glob("*.response.md")) == []
     assert len(list(paths.brain_dir.glob("*.prompt.md"))) == 1
+
+
+# ── run_oneshot reuse (the headless-ingest path shares this machinery) ──────
+
+
+def test_oneshot_argv_substitution_shapes():
+    assert oneshot_argv("claude -p {prompt}", "the prompt") == ["claude", "-p", "the prompt"]
+    assert oneshot_argv("hermes -z", "p") == ["hermes", "-z", "p"]  # no placeholder = append
+
+
+def test_run_oneshot_prefixed_events_and_transcripts(tmp_path, env):
+    paths, events = env
+    script = _script(tmp_path, "oneshot", 'printf "ok:%s" "$1"\n')
+
+    out = run_oneshot(
+        [str(script), "the prompt"],
+        "the prompt",
+        paths.engine_dir / "ingest",
+        30,
+        events,
+        "ingest",
+        cwd=paths.project_root,
+        harness="claude",
+    )
+
+    assert out == "ok:the prompt"
+    prompts = list((paths.engine_dir / "ingest").glob("*.prompt.md"))
+    responses = list((paths.engine_dir / "ingest").glob("*.response.md"))
+    assert len(prompts) == 1 and len(responses) == 1
+    assert prompts[0].read_text(encoding="utf-8") == "the prompt"
+    calls = [e for e in events.tail(10) if e["event"] == "ingest-call"]
+    assert len(calls) == 1 and calls[0]["harness"] == "claude"
+    assert "brain-call" not in [e["event"] for e in events.tail(10)]  # no budget impact
+
+
+def test_run_oneshot_failure_uses_prefix(tmp_path, env):
+    paths, events = env
+    script = _script(tmp_path, "oneshot", "echo nope >&2\nexit 9\n")
+
+    with pytest.raises(BrainInvocationError, match="ingest failed"):
+        run_oneshot(
+            [str(script)],
+            "p",
+            paths.engine_dir / "ingest",
+            30,
+            events,
+            "ingest",
+            cwd=paths.project_root,
+        )
+
+    kinds = [e["event"] for e in events.tail(10)]
+    assert "ingest-failed" in kinds and "brain-failed" not in kinds

@@ -59,3 +59,16 @@ def test_count_since_excludes_old_events(tmp_path):
     log.append("brain-call")
     assert log.count_since("brain-call", 3600) == 1
     assert log.count_since("brain-call", 3 * 3600) == 2
+
+
+def test_interleaved_writer_instances_get_unique_seqs(tmp_path):
+    # The P5 flow has two writer processes (daemon + approve CLI). Each append
+    # derives seq from the file under an fcntl lock, so interleaved instances
+    # never collide the way per-instance cached counters did.
+    path = tmp_path / "events.jsonl"
+    a, b = EventLog(path), EventLog(path)
+    for i in range(5):
+        a.append("from-a", i=i)
+        b.append("from-b", i=i)
+    seqs = [json.loads(line)["seq"] for line in path.read_text().splitlines() if line.strip()]
+    assert seqs == list(range(1, 11))

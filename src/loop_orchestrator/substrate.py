@@ -35,6 +35,8 @@ _REPO_RELATIVE = {
     "loop-wiki-pending": "scripts/loop-wiki-pending.sh",
     "loop-task-lint": "scripts/loop-task-lint.sh",
     "loop-jira-sync": "scripts/loop-jira-sync.sh",
+    "loop-metrics": "scripts/loop-metrics.sh",
+    "loop-wiki-lint": "scripts/loop-wiki-lint.sh",
     "harness-registry": "lib/harness-registry.sh",
 }
 
@@ -238,6 +240,35 @@ class Substrate:
             raise SubstrateError(
                 ["loop-wiki-pending"], 0, f"expected integer, got {out!r}"
             ) from exc
+
+    # ── metrics + lint (scripts/ helpers) ─────────────────────────────────
+
+    def metrics_log(self, session: str | None = None) -> str:
+        """Record the T0006 metrics block (`loop-metrics --log` appends one
+        `## [date] metrics | …` entry to ops-wiki/log.md)."""
+        return self._run(
+            "loop-metrics",
+            "--session",
+            session or self.session,
+            "--project-root",
+            str(self.project_root),
+            "--log",
+            timeout=60,
+        ).stdout
+
+    def wiki_lint_dispatch(self, timeout: float = 180) -> str:
+        """Kick off a wiki lint run (`loop-wiki-lint --dispatch` creates the
+        dynamic lint window and pastes the assembled prompt). Retiring the
+        window afterwards stays the operator's call — v1 never auto-drops."""
+        return self._run(
+            "loop-wiki-lint",
+            "--dispatch",
+            "--session",
+            self.session,
+            "--project-root",
+            str(self.project_root),
+            timeout=timeout,
+        ).stdout
 
     # ── harness registry ──────────────────────────────────────────────────
 

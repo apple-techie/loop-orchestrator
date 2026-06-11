@@ -1,5 +1,5 @@
 """loop-engine CLI — once / observe / status / approve / reject / pause /
-resume / cycle-now over the engine modules. `watch` lands in the daemon phase.
+resume / cycle-now / watch / improve over the engine modules.
 
 Session resolution: --session, then $LOOP_SESSION, else exit 2. Approve and
 reject perform the single CAS transition on pending-decision.json, execute (on
@@ -12,17 +12,20 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from ..paths import SessionPaths
 from ..substrate import Substrate
-from . import decisions, wiki
+from . import decisions, improve, wiki
 from .actions import execute_batch
+from .brain import BrainError
 from .config import load_config
 from .decisions import DecisionStateError
 from .events import EventLog
 from .loop import action_line, run_once
 from .observe import Observer
+from .watch import Watch, pid_alive
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +70,25 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("pause", help="pause brain calls and action execution")
     sub.add_parser("resume", help="resume after pause")
     sub.add_parser("cycle-now", help="request an immediate cycle from the daemon")
+
+    improve_p = sub.add_parser(
+        "improve",
+        help="mine weaknesses and file improvement proposals (apply is human-gated)",
+    )
+    improve_p.add_argument(
+        "--apply",
+        type=int,
+        default=None,
+        metavar="N",
+        help="apply proposal N from the latest improve run instead of proposing",
+    )
+    improve_p.add_argument(
+        "--max-proposals",
+        type=int,
+        default=3,
+        metavar="K",
+        help="ask the brain for at most K proposals (default: 3)",
+    )
 
     return parser
 
@@ -130,6 +152,19 @@ def cmd_status(args: argparse.Namespace, root: Path) -> int:
         )
         for action in doc.get("actions") or []:
             print(f"  {action_line(action)}")
+    if paths.pid_path.exists():
+        try:
+            pid: int | None = int(paths.pid_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = None
+        try:
+            heartbeat_age = int(time.time() - paths.pid_path.stat().st_mtime)
+        except OSError:
+            heartbeat_age = -1
+        if pid is not None and pid_alive(pid):
+            print(f"watch: alive (pid {pid}, heartbeat {heartbeat_age}s ago)")
+        else:
+            print(f"watch: not running (stale pid file: {paths.pid_path})")
     tail = EventLog(paths.events_path).tail(5)
     if tail:
         print("last events:")
@@ -161,7 +196,7 @@ def _resolve_and_finish(args: argparse.Namespace, root: Path, approve: bool) -> 
     if approve:
         events.append("decision-approved", id=doc["id"], indices=indices)
         config = load_config(root)
-        doc = execute_batch(doc, Substrate(root, session), events, config)
+        doc = execute_batch(doc, Substrate(root, session), events, config, paths=paths)
     else:
         events.append("decision-rejected", id=doc["id"], reason=doc.get("reason", ""))
     decisions.archive(paths, doc)
@@ -218,8 +253,47 @@ def cmd_cycle_now(args: argparse.Namespace, root: Path) -> int:
 
 
 def cmd_watch(args: argparse.Namespace, root: Path) -> int:
-    print("loop-engine watch: lands in the daemon phase", file=sys.stderr)
-    return 2
+    session = _session(args)
+    config = load_config(root)
+    return Watch(root, session, config).run()
+
+
+def cmd_improve(args: argparse.Namespace, root: Path) -> int:
+    session = _session(args)
+    paths = SessionPaths(root, session)
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    substrate = Substrate(root, session)
+
+    if args.apply is not None:
+        try:
+            path, meta, edit = improve.apply_proposal(paths, substrate, events, args.apply)
+        except improve.ImproveError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if meta["status"] == "applied-manually-required":
+            print(f"proposal {path.name} targets engine-config — it is NEVER auto-applied.")
+            print("Recommendation for the engine: section of lane-config.yaml:")
+            print(edit.rstrip("\n"))
+            print(f"marked applied-manually-required: {path}")
+            return 0
+        print(f"applied {path.name} [{meta['surface']}] {meta['title']} -> {meta['applied_to']}")
+        print(improve.T0006_REMINDER)
+        return 0
+
+    config = load_config(root)
+    try:
+        evidence, filed = improve.propose(
+            paths, substrate, config, events, max_proposals=args.max_proposals
+        )
+    except (BrainError, improve.ImproveError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"mined {len(evidence['clusters'])} weakness cluster(s); filed {len(filed)} proposal(s):")
+    for n, (path, meta) in enumerate(filed, start=1):
+        print(f"  {n}. [{meta['surface']}] {meta['title']} ({path.name})")
+    print(f"apply one with: loop-engine improve --apply N (proposals: {paths.proposals_dir})")
+    return 0
 
 
 _HANDLERS = {
@@ -232,6 +306,7 @@ _HANDLERS = {
     "resume": cmd_resume,
     "cycle-now": cmd_cycle_now,
     "watch": cmd_watch,
+    "improve": cmd_improve,
 }
 
 

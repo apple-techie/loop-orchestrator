@@ -7,16 +7,18 @@ ops-wiki or .loop state.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from loop_orchestrator.engine import cli, decisions
-from loop_orchestrator.engine.actions import execute
+from loop_orchestrator.engine.actions import execute, load_asks
 from loop_orchestrator.engine.config import EngineConfig
 from loop_orchestrator.engine.events import EventLog
 from loop_orchestrator.engine.loop import run_once
 from loop_orchestrator.engine.wiki import MARKER
+from loop_orchestrator.locking import atomic_write_json
 from loop_orchestrator.paths import SessionPaths
 
 FAKES_BIN = Path(__file__).resolve().parent / "fakes" / "bin"
@@ -211,6 +213,49 @@ def test_cli_reject_archives_without_execute(project, call_log):
     assert archived["actions"][0]["status"] == "rejected"
 
 
+def test_cli_approve_records_ask_for_steer(project):
+    """Human-approved steers with expects_reply must land in asks.json (the
+    P5 follow-up: _resolve_and_finish passes paths= to execute_batch)."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    doc = {
+        "contract_version": 1,
+        "id": "d-20260612-000000",
+        "created_at": "2026-06-12T00:00:00Z",
+        "approval_mode": "manual",
+        "status": "pending",
+        "critique": "c",
+        "actions": [
+            {
+                "idx": 0,
+                "kind": "steer",
+                "lane": "web",
+                "payload": "report status",
+                "interrupt": False,
+                "wait_for_idle": False,
+                "expects_reply": True,
+                "reply_timeout_s": 900,
+                "rationale": "r",
+                "classification": "safe",
+                "status": "awaiting-approval",
+            }
+        ],
+        "decided_by": None,
+        "decided_at": None,
+        "reason": "",
+    }
+    atomic_write_json(paths.pending_decision_path, doc)
+
+    rc = cli.main(["--project-root", str(project), "--session", "demo", "approve", doc["id"]])
+
+    assert rc == 0
+    asks = load_asks(paths)
+    assert [a["id"] for a in asks] == ["d-20260612-000000-0"]
+    assert asks[0]["lane"] == "web" and asks[0]["reply_timeout_s"] == 900
+    assert asks[0]["status"] == "outstanding"
+    assert "ask" in [e["event"] for e in _events(paths)]
+
+
 def test_cli_pause_resume_watch_cycle_now(project):
     paths = SessionPaths(project, "demo")
     base = ["--project-root", str(project), "--session", "demo"]
@@ -221,7 +266,10 @@ def test_cli_pause_resume_watch_cycle_now(project):
     assert not paths.paused_path.exists()
     assert cli.main([*base, "cycle-now"]) == 0
     assert paths.cycle_now_path.exists()
-    assert cli.main([*base, "watch"]) == 2
+    # watch is wired to the daemon; an alive pid file makes it refuse (exit 1)
+    paths.ensure()
+    paths.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    assert cli.main([*base, "watch"]) == 1
 
 
 def test_cli_session_inference(project, monkeypatch, capsys):
@@ -270,13 +318,13 @@ def test_steer_expects_reply_footer(tmp_path):
         "expects_reply": True,
         "rationale": "r",
     }
-    execute(action, stub, events, EngineConfig(), request_id="d-20260610-120000")
+    execute(action, stub, events, EngineConfig(), ask_id="d-20260610-120000-0")
 
     lane, payload, _mode, _ready, interrupt = stub.dispatches[0]
     assert lane == "web" and interrupt is True
     assert payload.startswith("wrap up\n\nWhen done, write a mailbox message")
     assert "-web-to-coord.md" in payload
-    assert "subject: re:d-20260610-120000" in payload
+    assert "subject: re:d-20260610-120000-0" in payload
 
 
 def test_add_lane_dispatches_brief_and_stop_is_noop(tmp_path):

@@ -1,4 +1,5 @@
-"""One full engine cycle: observe -> ingest nudge -> brain -> gate -> act.
+"""One full engine cycle: observe -> ingest nudge -> pm pull -> brain -> gate
+-> act -> pm push.
 
 Exit codes: 0 completed cycle (stdout says whether approval is pending),
 1 brain invocation failure, 3 a decision is already in flight (single
@@ -9,6 +10,8 @@ after one corrective re-prompt (needs-human doc filed), 5 paused.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import sys
 from datetime import datetime, timezone
 from importlib import resources
@@ -16,14 +19,16 @@ from pathlib import Path
 
 from ..locking import atomic_write_json, file_lock
 from ..paths import SessionPaths
+from ..pm import registry as pm_registry
+from ..pm.base import PMAdapter
 from ..substrate import Substrate, SubstrateError
 from . import actions as actions_mod
 from . import decision as decision_mod
 from . import decisions, gate, wiki
-from .brain import Brain, BrainError
+from .brain import Brain, BrainError, oneshot_argv, run_oneshot
 from .config import EngineConfig
 from .decision import DecisionError
-from .events import EventLog
+from .events import EventLog, parse_ts
 from .observe import EngineSnapshot, Observer
 
 _HEADER_RESOURCE = ("contracts", "checkpoint-header.md")
@@ -31,6 +36,11 @@ _HEADER_RESOURCE = ("contracts", "checkpoint-header.md")
 _CORRECTIVE_SUFFIX = (
     "\n\nYour previous reply could not be used: {error}. Reply with ONLY the fenced decision block."
 )
+
+_INGEST_HEADING = "### Ingest protocol"
+
+# Timed-out asks stay visible in the checkpoint addendum this long.
+_ASK_TIMEOUT_RECENCY_S = 3600
 
 # approval mode -> classifications that execute without a human (blocked never runs).
 _AUTO_CLASSES: dict[str, frozenset[str]] = {
@@ -40,8 +50,31 @@ _AUTO_CLASSES: dict[str, frozenset[str]] = {
 }
 
 
-def _assemble_prompt(substrate: Substrate, snap: EngineSnapshot) -> str:
-    """checkpoint_prompt(packaged header) + live lane status + restarts tail."""
+def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
+    """Checkpoint-addendum lines: outstanding asks + recently timed-out ones."""
+    lines: list[str] = []
+    for ask in asks:
+        status = ask.get("status")
+        if status == "outstanding":
+            lines.append(
+                f"{ask.get('id')} lane={ask.get('lane')} status=outstanding "
+                f"created_at={ask.get('created_at')} reply_timeout_s={ask.get('reply_timeout_s')}"
+            )
+        elif status == "timed-out":
+            try:
+                age_s = (now - parse_ts(ask.get("timed_out_at") or "")).total_seconds()
+            except (TypeError, ValueError):
+                continue
+            if age_s <= _ASK_TIMEOUT_RECENCY_S:
+                lines.append(
+                    f"{ask.get('id')} lane={ask.get('lane')} status=timed-out "
+                    f"timed_out_at={ask.get('timed_out_at')}"
+                )
+    return lines or ["(none)"]
+
+
+def _assemble_prompt(substrate: Substrate, snap: EngineSnapshot, paths: SessionPaths) -> str:
+    """checkpoint_prompt(packaged header) + lane status + restarts tail + asks."""
     resource = resources.files("loop_orchestrator.engine").joinpath(*_HEADER_RESOURCE)
     with resources.as_file(resource) as header:
         prompt = substrate.checkpoint_prompt(header_file=header)
@@ -54,7 +87,140 @@ def _assemble_prompt(substrate: Substrate, snap: EngineSnapshot) -> str:
         lines.extend(json.dumps(entry, sort_keys=True) for entry in snap.restarts_tail)
     else:
         lines.append("(none)")
+    lines.append("--- outstanding asks ---")
+    lines.extend(_ask_lines(actions_mod.load_asks(paths), datetime.now(timezone.utc)))
     return "\n".join(lines) + "\n"
+
+
+def _ingest_protocol(project_root: Path) -> str:
+    """The AGENTS.md '### Ingest protocol' section, verbatim; '' when absent."""
+    try:
+        text = (project_root / "AGENTS.md").read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    lines: list[str] = []
+    capture = False
+    for line in text.splitlines():
+        if line.strip() == _INGEST_HEADING:
+            capture = True
+        elif capture and (line.startswith("## ") or line.startswith("### ")):
+            break
+        if capture:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _ingest_argv(substrate: Substrate, config: EngineConfig, prompt: str) -> list[str]:
+    """LOOP_ENGINE_INGEST_CMD overrides the registry one-shot (mirrors brain)."""
+    override = os.environ.get("LOOP_ENGINE_INGEST_CMD")
+    if override:
+        return shlex.split(override) + [prompt]
+    harness = config.ingest.harness or config.brain.harness
+    argv = oneshot_argv(substrate.oneshot_template(harness), prompt)
+    if config.ingest.auto_approve:
+        try:
+            flag = substrate.harness_field(harness, "auto_approve_flag")
+        except SubstrateError:
+            flag = ""
+        if flag:
+            argv.append(flag)
+    return argv
+
+
+def _headless_ingest(
+    substrate: Substrate,
+    paths: SessionPaths,
+    events: EventLog,
+    config: EngineConfig,
+    pending: list[str],
+) -> None:
+    """One-shot harness performs the docs-lane ingest itself (no lane nudge).
+
+    Emits ingest-done (with the re-checked pending count) on success;
+    run_oneshot already emits ingest-timeout/ingest-failed on failure.
+    """
+    prompt = (
+        f"You are the docs lane for the project at {paths.project_root}. "
+        f"{len(pending)} mailbox message(s) are pending. PERFORM the ingest now — "
+        "read each pending message under .loop/messages/, write the ops-wiki "
+        "updates yourself, and move each processed file to "
+        ".loop/messages/processed/ — exactly per the protocol below.\n\n"
+        f"{_ingest_protocol(paths.project_root)}\n\n"
+        "--- pending messages (oldest first) ---\n" + "\n".join(pending) + "\n"
+    )
+    try:
+        argv = _ingest_argv(substrate, config, prompt)
+    except SubstrateError as exc:
+        events.append("error", kind="ingest-headless-failed", error=str(exc))
+        return
+    try:
+        run_oneshot(
+            argv,
+            prompt,
+            paths.engine_dir / "ingest",
+            config.ingest.timeout_s,
+            events,
+            "ingest",
+            cwd=paths.project_root,
+            harness=config.ingest.harness or config.brain.harness,
+        )
+    except BrainError:
+        return  # run_oneshot appended ingest-timeout / ingest-failed already
+    try:
+        remaining = substrate.pending_count()
+    except SubstrateError:
+        remaining = -1
+    events.append("ingest-done", pending=remaining)
+
+
+def _pm_adapters(config: EngineConfig, root: Path, events: EventLog) -> list[tuple[str, PMAdapter]]:
+    """Instantiate the adapters named in config.pm.adapters (default [] = no
+    PM layer at all: no discovery scan, no events)."""
+    entries = config.pm.adapters or []
+    if not entries:
+        return []
+    known = pm_registry.discover()
+    adapters: list[tuple[str, PMAdapter]] = []
+    for entry in entries:
+        name = entry.get("name") if isinstance(entry, dict) else str(entry)
+        if not name:
+            continue
+        cls = known.get(name)
+        if cls is None:
+            events.append("pm-skip", adapter=name, reason="unknown-adapter")
+            continue
+        try:
+            adapters.append((name, cls(project_root=root)))
+        except Exception as exc:
+            events.append("pm-error", adapter=name, op="init", error=str(exc))
+    return adapters
+
+
+def _pm_sync(
+    adapters: list[tuple[str, PMAdapter]],
+    op: str,
+    tasks_dir: Path,
+    events: EventLog,
+    dry_run: bool = False,
+) -> None:
+    """pull/push every available adapter; failures are events, never aborts."""
+    for name, adapter in adapters:
+        try:
+            if not adapter.available():
+                events.append("pm-skip", adapter=name, op=op, reason="unavailable")
+                continue
+            result = getattr(adapter, op)(tasks_dir, dry_run=dry_run)
+        except Exception as exc:  # adapter trouble must NEVER abort a cycle
+            events.append("pm-error", adapter=name, op=op, error=str(exc))
+            continue
+        events.append(
+            f"pm-{op}",
+            adapter=name,
+            created=len(result.created),
+            updated=len(result.updated),
+            conflicts=len(result.conflicts),
+            errors=len(result.errors),
+        )
 
 
 def action_line(action: dict) -> str:
@@ -128,7 +294,9 @@ def run_once(
     snap = Observer(substrate, paths).snapshot()
     events.append("observe", lanes=len(snap.lanes), mailbox_pending=len(snap.mailbox_pending))
 
-    if snap.mailbox_pending and config.ingest.mode == "lane":
+    if snap.mailbox_pending and config.ingest.mode == "headless":
+        _headless_ingest(substrate, paths, events, config, snap.mailbox_pending)
+    elif snap.mailbox_pending and config.ingest.mode == "lane":
         nudge = (
             f"{len(snap.mailbox_pending)} mailbox message(s) pending. Run the ingest loop "
             "now, exactly as specified in AGENTS.md '### Ingest protocol': ingest "
@@ -143,7 +311,11 @@ def run_once(
                 "ingest-nudge", lane=config.ingest.lane, pending=len(snap.mailbox_pending)
             )
 
-    prompt = _assemble_prompt(substrate, snap)
+    pm_adapters = _pm_adapters(config, root, events)
+    if pm_adapters:
+        _pm_sync(pm_adapters, "pull", paths.tasks_dir, events, dry_run=dry_run)
+
+    prompt = _assemble_prompt(substrate, snap, paths)
 
     if dry_run:
         print(f"dry-run: prompt {len(prompt)} bytes (~{len(prompt) // 4} tokens)")
@@ -192,7 +364,7 @@ def run_once(
         for action in autos:
             action["status"] = "auto"
         _persist(paths, doc)
-        doc = actions_mod.execute_batch(doc, substrate, events, config)
+        doc = actions_mod.execute_batch(doc, substrate, events, config, paths=paths)
         _persist(paths, doc)
 
     awaiting = [a for a in doc["actions"] if a["status"] == "awaiting-approval"]
@@ -215,6 +387,9 @@ def run_once(
         print(f"decision {doc['id']} completed; nothing awaits approval")
         for action in doc["actions"]:
             print(f"  {action_line(action)}")
+
+    if pm_adapters:  # after action execution (and in the no-actions path)
+        _pm_sync(pm_adapters, "push", paths.tasks_dir, events)
 
     wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc))
     events.append("cycle-end", outcome="pending" if awaiting else "resolved")
