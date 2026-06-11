@@ -616,6 +616,66 @@ gate, use improve and the PM adapters — with the safety rules (never
 in. Progressive references cover the substrate CLIs, the engine contract,
 and the ops-wiki/mailbox/tasks conventions.
 
+### Example prompts: adopting it in your project
+
+With the skill installed (`make install-skill`), paste one of these into
+your coding agent — Claude Code, pi, codex, or anything else that loads
+`SKILL.md`. Each states the objective, the constraints, and where the human
+gate sits; the skill supplies the mechanics.
+
+**1. Wire it into an existing project**
+
+> Using the loop-orchestrator skill: set up loop-orchestrator for this repo.
+> Install the bash CLIs and Python layer (`make install` +
+> `make install-python` from the loop-orchestrator checkout). Create
+> `.loop/orchestrator-state.json` (schema v2, empty loops), the
+> `.loop/messages/` mailbox, and `ops-wiki/` + `AGENTS.md` per the
+> conventions reference. Write a `lane-config.yaml` for this stack —
+> web=claude as the implementation lane, validate-left running our test
+> watcher, ops-top probing our healthcheck URL — plus an `engine:` section
+> with `approval_mode: manual` and a claude brain. Boot with
+> `--no-attach --boot-check`, prove the JSON surfaces parse against the live
+> session, then give me the attach command and STOP — dispatch no work yet.
+
+**2. Run a real objective through the loop**
+
+> Using the loop-orchestrator skill: session `myapp` is configured. Drop a
+> mailbox message to coord with this objective: "<one paragraph: what,
+> blast radius, what counts as done>". Start `loop-engine watch` and put
+> `loop-deck` in the coord pane. When the first decision queues, summarize
+> the brain's critique and proposed actions for me and WAIT — I approve
+> from the deck. Never approve anything yourself; never steer shell lanes.
+
+**3. Greenfield project, orchestrated from day one**
+
+> Using the loop-orchestrator skill: create a new project at `~/code/<name>`
+> (git init) and wire loop-orchestrator in before any code exists — state
+> file, mailbox, ops-wiki, AGENTS.md, tasks/ convention, lane-config.yaml
+> with an `engine:` section in manual mode. Seed `tasks/T0001-<slug>.md`
+> with our first objective: "<objective>" — fully self-contained per the
+> task-file convention and passing `scripts/loop-task-lint.sh`. Boot,
+> verify, stop.
+
+**4. Connect the task files to Jira**
+
+> Using the loop-orchestrator skill: connect this project's `tasks/` to
+> Jira. `JIRA_BASE_URL`, `JIRA_EMAIL`, and `JIRA_API_TOKEN` are in my
+> environment. Run `loop-pm sync --adapter jira pull --dry-run` first and
+> show me what would be created; if I say go, run the real pull, validate
+> with `scripts/loop-task-lint.sh`, and enable `pm: {adapters: [jira]}` in
+> the engine config. Task files win every conflict — never let the remote
+> overwrite one.
+
+**5. Let the system critique itself**
+
+> Using the loop-orchestrator skill: session `myapp` has a few days of
+> traffic. Run `loop-engine improve`, walk me through each filed proposal
+> (surface, mined signature, the edit itself), and apply NOTHING without my
+> explicit ok per proposal. If one targets the checkpoint header, show me a
+> diff against the current header first. Remind me that applied experiments
+> are judged by the `loop-metrics.sh` non-regression gate after three
+> cycles — and revert any that regress.
+
 Engine behavior is configured in an optional `engine:` section of
 `lane-config.yaml` — invisible to the bash resolver, host-overridable, all
 keys optional (see `examples/lane-config.example.yaml` for the annotated
