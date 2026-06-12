@@ -25,7 +25,7 @@ from .decisions import DecisionStateError
 from .events import EventLog
 from .loop import action_line, run_once
 from .observe import Observer
-from .watch import Watch, pid_alive
+from .watch import Watch, pid_alive, restart, stale_daemon_warning
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("observe", help="write a fresh snapshot + observe event, no cycle")
     sub.add_parser("status", help="print pending decision summary + last events")
     sub.add_parser("watch", help="run the engine daemon (poll + cycle on triggers)")
+
+    restart_p = sub.add_parser(
+        "restart",
+        help="stop a running daemon (confirm dead), then start watch (singleton-safe)",
+    )
+    restart_p.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        metavar="S",
+        help="seconds to wait for the old daemon to exit before refusing (default: 60)",
+    )
 
     approve = sub.add_parser("approve", help="approve the pending decision and execute it")
     approve.add_argument("decision_id")
@@ -163,6 +175,10 @@ def cmd_status(args: argparse.Namespace, root: Path) -> int:
             heartbeat_age = -1
         if pid is not None and pid_alive(pid):
             print(f"watch: alive (pid {pid}, heartbeat {heartbeat_age}s ago)")
+            warning = stale_daemon_warning(paths)
+            if warning is not None:
+                print(f"warning: {warning}")
+                EventLog(paths.events_path).append("daemon-stale", warning=warning)
         else:
             print(f"watch: not running (stale pid file: {paths.pid_path})")
     tail = EventLog(paths.events_path).tail(5)
@@ -258,6 +274,12 @@ def cmd_watch(args: argparse.Namespace, root: Path) -> int:
     return Watch(root, session, config).run()
 
 
+def cmd_restart(args: argparse.Namespace, root: Path) -> int:
+    session = _session(args)
+    config = load_config(root)
+    return restart(root, session, config, timeout_s=args.timeout)
+
+
 def cmd_improve(args: argparse.Namespace, root: Path) -> int:
     session = _session(args)
     paths = SessionPaths(root, session)
@@ -272,8 +294,14 @@ def cmd_improve(args: argparse.Namespace, root: Path) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 1
         if meta["status"] == "applied-manually-required":
-            print(f"proposal {path.name} targets engine-config — it is NEVER auto-applied.")
-            print("Recommendation for the engine: section of lane-config.yaml:")
+            if meta.get("surface") == "none":
+                print(
+                    f"proposal {path.name} is REPORT-ONLY (surface: none) — there is no "
+                    "editable surface for it; it needs a human/code fix:"
+                )
+            else:
+                print(f"proposal {path.name} targets engine-config — it is NEVER auto-applied.")
+                print("Recommendation for the engine: section of lane-config.yaml:")
             print(edit.rstrip("\n"))
             print(f"marked applied-manually-required: {path}")
             return 0
@@ -312,6 +340,7 @@ _HANDLERS = {
     "resume": cmd_resume,
     "cycle-now": cmd_cycle_now,
     "watch": cmd_watch,
+    "restart": cmd_restart,
     "improve": cmd_improve,
 }
 

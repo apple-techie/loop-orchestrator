@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import time
+import traceback as traceback_mod
+from datetime import datetime, timezone
 from pathlib import Path
 
 from textual import work
@@ -90,6 +92,35 @@ class LoopDeckApp(App):
         self.refreshed_at = ""
         self._watch_sig: tuple | None = None
         self._main = MainScreen()
+
+    # ── crash diagnostics ─────────────────────────────────────────────────
+
+    def _handle_exception(self, error: Exception) -> None:
+        """Append a one-line crash record to the deck-OWNED deck-crash.log, then
+        fall through to Textual's default (which exits the app).
+
+        NON-WRITER NOTE: the deck is a strict non-writer of engine STATE — the
+        invariant that protects decisions / snapshot / wiki (the things the
+        engine reads back as inputs). deck-crash.log is a PLAIN DIAGNOSTIC LOG,
+        not engine state JSON: writing it is the *point* (the DuplicateKey deck
+        crash this session left zero trace), and it never feeds a decision. So
+        this does not break the non-writer contract. improve._crash_clusters
+        mines these lines as 'crash:deck' (surface 'none', report-only)."""
+        try:
+            self._append_crash_log(error)
+        except Exception:  # diagnostics must never mask the real crash
+            pass
+        super()._handle_exception(error)
+
+    def _append_crash_log(self, error: Exception) -> None:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tb = "".join(traceback_mod.format_exception_only(type(error), error)).strip()
+        # Single-lined so each crash is exactly one minable record.
+        record = f"{ts} component=deck error={' '.join(tb.split())}"
+        log = self.paths.deck_crash_log
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a", encoding="utf-8") as fh:
+            fh.write(record + "\n")
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 

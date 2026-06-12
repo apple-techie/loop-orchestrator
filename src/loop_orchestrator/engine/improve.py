@@ -34,7 +34,14 @@ from .brain import Brain
 from .config import EngineConfig
 from .events import EventLog, parse_ts, utc_now
 
+# The 3 EDITABLE surfaces apply_proposal can write. "none" is a report-only
+# surface: a recommendation with no auto-applicable edit (a crash needs a code
+# fix outside these three) — mirrors how engine-config recommendations surface,
+# but is never applied at all. parse_proposals accepts it; apply_proposal
+# refuses it (see _NONE_SURFACE).
 SURFACES = ("checkpoint-header", "agents-md-append", "engine-config")
+_NONE_SURFACE = "none"
+_PROPOSAL_SURFACES = (*SURFACES, _NONE_SURFACE)
 MAX_SAMPLES = 3
 
 _HEADER_RESOURCE = ("contracts", "checkpoint-header.md")
@@ -42,6 +49,18 @@ _FENCE_RE = re.compile(r"```proposals[ \t]*\n(.*?)```", re.DOTALL)
 _PROPOSAL_NAME_RE = re.compile(r"^(\d{8}-\d{6})-(\d+)\.md$")
 _METRICS_LINE_RE = re.compile(r"^## \[(\d{4}-\d{2}-\d{2})\] metrics \|.*\bpending=(\d+)\b")
 _RESTART_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+# A mailbox file is <ts>-<from>-to-<to>.md (the bash convention). The UTC stamp
+# is YYYYMMDD-HHMMSS; group it so the human-steer miner can window by filename.
+_MAILBOX_NAME_RE = re.compile(r"^(\d{8}-\d{6})-([^-]+(?:-[^-]+)*?)-to-([^-]+)\.md$")
+_MAILBOX_TS_FORMAT = "%Y%m%d-%H%M%S"
+# The coordinator's mailbox handle. An UNSOLICITED steer is a message TO this
+# handle, NOT FROM it, whose subject does not start with "re:" — i.e. a human
+# (or another lane) doing the coordinator's job because it failed to act.
+_COORD = "coord"
+# A solicited reply ('re:'), tolerant of case and stray space before the colon
+# ('re :') so a sloppily-typed reply isn't miscounted as an unsolicited steer.
+_REPLY_SUBJECT_RE = re.compile(r"re\s*:", re.IGNORECASE)
 
 T0006_REMINDER = (
     "T0006 reminder: this edit is an experiment. Evaluate after >= 3 checkpoint "
@@ -89,7 +108,11 @@ def _cluster(signature: str, count: int, samples: list[str], surface: str) -> di
 
 def _brain_clusters(events: list[dict]) -> list[dict]:
     """brain-failed / brain-retry / decision-parse-error, with the raw-response
-    transcript path of the nearest preceding brain-call as evidence."""
+    transcript path of the nearest preceding brain-call as evidence.
+
+    The classified failure_kind (quota | timeout | exit) is folded into the
+    signature for brain-failed so a quota lockout is NEVER pooled with a slow
+    generation — they need different fixes (back off vs. trim the prompt)."""
     buckets: dict[str, list[str]] = {}
     last_response = ""
     for event in events:
@@ -99,10 +122,17 @@ def _brain_clusters(events: list[dict]) -> list[dict]:
             continue
         if kind not in ("brain-failed", "brain-retry", "decision-parse-error"):
             continue
+        sig_kind = kind
+        failure_kind = event.get("failure_kind")
+        if kind == "brain-failed" and failure_kind:
+            sig_kind = f"{kind}:{failure_kind}"
         sample = str(event.get("error") or "")
+        excerpt = str(event.get("stderr_excerpt") or "")
+        if excerpt:
+            sample = f"{sample} (stderr: {excerpt})".strip()
         if last_response:
             sample = f"{sample} (raw response: {last_response})".strip()
-        buckets.setdefault(kind, []).append(sample)
+        buckets.setdefault(sig_kind, []).append(sample)
     return [
         _cluster(f"brain:{kind}", len(samples), samples, "checkpoint-header")
         for kind, samples in sorted(buckets.items())
@@ -229,6 +259,170 @@ def _ask_timeout_clusters(events: list[dict]) -> list[dict]:
     return [_cluster("asks:reply-timeout", len(timeouts), samples, "agents-md-append")]
 
 
+# ── SIGNAL 1: human-intervention mining (the highest-leverage signal) ───────
+
+
+def _human_intervention_clusters(paths: SessionPaths, cutoff: datetime) -> list[dict]:
+    """UNSOLICITED human (or peer) steers of the coordinator = the human doing
+    the coordinator's job because it failed to act autonomously.
+
+    Scans mailbox files in BOTH paths.mailbox_dir and its processed/ subdir
+    named <ts>-<from>-to-<to>.md. Counts messages where to==coord, from!=coord,
+    and the subject does NOT start with 're:' (case-insensitive). 're:' replies
+    are solicited (a coordinator ask got answered); coord-authored messages are
+    the coordinator working — neither is an intervention. Windowed by the
+    filename UTC timestamp >= cutoff. A file present in both messages/ and
+    processed/ is counted ONCE (dedup by basename).
+
+    One cluster: 'human:unsolicited-steer', surface 'checkpoint-header' — the
+    proposal teaches the coordinator to self-discover this next-step class so a
+    human need not send it."""
+    seen: set[str] = set()
+    subjects: list[str] = []
+    count = 0
+    for directory in (paths.mailbox_dir, paths.processed_dir):
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("*-to-*.md")):
+            if path.name in seen:  # same basename in messages/ and processed/
+                continue
+            match = _MAILBOX_NAME_RE.match(path.name)
+            if not match:
+                continue
+            stamp_raw, sender, recipient = match.group(1), match.group(2), match.group(3)
+            try:
+                stamp = datetime.strptime(stamp_raw, _MAILBOX_TS_FORMAT).replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                continue
+            if stamp < cutoff:
+                continue
+            seen.add(path.name)
+            if recipient != _COORD or sender == _COORD:
+                continue
+            subject = _mailbox_subject(path)
+            if _REPLY_SUBJECT_RE.match(subject.strip()):
+                continue  # solicited reply to a coordinator ask — not a steer
+            count += 1
+            subjects.append(f"{path.name}: {subject}" if subject else path.name)
+    if not count:
+        return []
+    return [_cluster("human:unsolicited-steer", count, subjects, "checkpoint-header")]
+
+
+def _mailbox_subject(path: Path) -> str:
+    """Frontmatter `subject:` of a mailbox file (read-only peek of the head)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            head = [fh.readline() for _ in range(40)]
+    except OSError:
+        return ""
+    if not head or head[0].strip() != "---":
+        return ""
+    for line in head[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("subject:"):
+            return line[len("subject:") :].strip()
+    return ""
+
+
+# ── SIGNAL 2: latency-regression mining (slow-but-succeeded drift) ──────────
+
+
+def _latency_trend_clusters(events: list[dict], cutoff: datetime) -> list[dict]:
+    """Pair each brain-call with the next decision event and time the gap.
+
+    With >= 6 samples, flag a regression when the last third's mean exceeds the
+    first third's by >= 2x, OR the max is >= 3x the median. This catches the
+    slow-but-succeeded drift (a 175KB-checkpoint 290s spike) BEFORE it becomes a
+    terminal timeout — _brain_clusters only sees the terminal failures.
+
+    One cluster: 'latency:regression', surface 'checkpoint-header', samples = the
+    first and last few 'ts dur' strings."""
+    durations: list[tuple[str, float]] = []
+    pending_call: datetime | None = None
+    pending_call_ts = ""
+    for event in events:
+        kind = event.get("event")
+        if kind == "brain-call":
+            try:
+                pending_call = parse_ts(event["ts"])
+                pending_call_ts = str(event["ts"])
+            except (KeyError, TypeError, ValueError):
+                pending_call = None
+            continue
+        if kind == "decision" and pending_call is not None:
+            try:
+                dur = (parse_ts(event["ts"]) - pending_call).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                pending_call = None
+                continue
+            if dur >= 0:
+                durations.append((pending_call_ts, dur))
+            pending_call = None
+    if len(durations) < 6:
+        return []
+    values = [d for _, d in durations]
+    third = len(values) // 3
+    first_mean = sum(values[:third]) / third
+    last_mean = sum(values[-third:]) / third
+    median = sorted(values)[len(values) // 2]
+    # The max-spike branch only counts when the trend is still elevated
+    # (recent mean not below the early mean) — otherwise a HEALED series with
+    # an old spike lingering in the window would keep mining a regression that
+    # rotation already fixed, training the wrong lesson.
+    trend_elevated = last_mean >= first_mean
+    regressed = (first_mean > 0 and last_mean >= 2 * first_mean) or (
+        trend_elevated and median > 0 and max(values) >= 3 * median
+    )
+    if not regressed:
+        return []
+    head = [f"{ts} {dur:.0f}s" for ts, dur in durations[:3]]
+    tail = [f"{ts} {dur:.0f}s" for ts, dur in durations[-3:]]
+    cluster = _cluster("latency:regression", len(durations), head + tail, "checkpoint-header")
+    cluster["first_third_mean_s"] = round(first_mean, 1)
+    cluster["last_third_mean_s"] = round(last_mean, 1)
+    cluster["max_s"] = round(max(values), 1)
+    return [cluster]
+
+
+# ── SIGNAL 3: crash mining (report-only — needs a code fix) ─────────────────
+
+
+def _crash_clusters(events: list[dict], paths: SessionPaths) -> list[dict]:
+    """Crash events from events.jsonl AND lines from the deck-owned
+    deck-crash.log, bucketed by component. Surface 'none': a crash needs a code
+    fix outside the 3 editable surfaces, so it is REPORTED, never auto-applied.
+
+    The DuplicateKey deck crash left zero trace before this signal existed; the
+    deck exception hook + this miner make it minable."""
+    buckets: dict[str, list[str]] = {}
+    for event in events:
+        if event.get("event") != "crash":
+            continue
+        component = str(event.get("component") or "engine")
+        sample = f"{event.get('ts')} {event.get('error') or ''}".strip()
+        buckets.setdefault(component, []).append(sample)
+    for line in _deck_crash_lines(paths.deck_crash_log):
+        buckets.setdefault("deck", []).append(line)
+    return [
+        _cluster(f"crash:{component}", len(samples), samples, _NONE_SURFACE)
+        for component, samples in sorted(buckets.items())
+    ]
+
+
+def _deck_crash_lines(log_path: Path) -> list[str]:
+    """Non-empty lines of the deck-crash.log (a plain diagnostic log, one
+    single-line record per crash); [] when absent."""
+    try:
+        text = log_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
 def mine(paths: SessionPaths, window_days: int = 7) -> dict:
     """Evidence bundle: weakness clusters mined from the last `window_days`."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
@@ -240,6 +434,9 @@ def mine(paths: SessionPaths, window_days: int = 7) -> dict:
         + _lane_instability_clusters(paths, cutoff)
         + _ingest_clusters(events, paths, cutoff)
         + _ask_timeout_clusters(events)
+        + _human_intervention_clusters(paths, cutoff)  # SIGNAL 1 (highest leverage)
+        + _latency_trend_clusters(events, cutoff)  # SIGNAL 2
+        + _crash_clusters(events, paths)  # SIGNAL 3 (report-only, surface "none")
     )
     return {
         "window_days": window_days,
@@ -281,7 +478,7 @@ def build_prompt(paths: SessionPaths, config: EngineConfig, evidence: dict, k: i
         "```proposals",
         "version: 1",
         "proposals:",
-        "  - surface: checkpoint-header | agents-md-append | engine-config",
+        "  - surface: checkpoint-header | agents-md-append | engine-config | none",
         "    title: <short imperative title>",
         "    signature: <the ONE mined signature this targets>",
         "    rationale: <why this edit addresses that signature>",
@@ -291,12 +488,17 @@ def build_prompt(paths: SessionPaths, config: EngineConfig, evidence: dict, k: i
         "",
         "Surface rules:",
         "- checkpoint-header: `edit` is the FULL replacement content of the engine",
-        "  checkpoint header file (current text below).",
+        "  checkpoint header file (current text below). For human:unsolicited-steer,",
+        "  teach the coordinator to self-discover the next-step the human keeps",
+        "  sending, so it acts without being told.",
         "- agents-md-append: `edit` is a self-contained '#### experiment: <title>'",
         "  subsection to APPEND to AGENTS.md. AGENTS.md is append-only — never",
         "  rewrite or reorder existing content.",
         "- engine-config: `edit` is RECOMMENDATION TEXT for the `engine:` section of",
         "  lane-config.yaml. It is never auto-applied; a human edits the config.",
+        "- none: REPORT-ONLY. For a signature with no applicable edit surface (e.g.",
+        "  crash:<component>, which needs a code fix), `edit` is recommendation text",
+        "  describing the fix. It is NEVER auto-applied — it is surfaced for a human.",
         "",
         "If the evidence contains no failure clusters worth a harness edit, reply",
         "with `proposals: []` — never invent edits to have something to propose.",
@@ -345,9 +547,9 @@ def parse_proposals(text: str, max_proposals: int = 3) -> list[dict]:
         if not isinstance(item, dict):
             raise ImproveError(f"proposal {idx}: must be a mapping")
         surface = item.get("surface")
-        if surface not in SURFACES:
+        if surface not in _PROPOSAL_SURFACES:
             raise ImproveError(
-                f"proposal {idx}: surface {surface!r} is not one of {', '.join(SURFACES)}"
+                f"proposal {idx}: surface {surface!r} is not one of {', '.join(_PROPOSAL_SURFACES)}"
             )
         for field in ("title", "edit"):
             if not isinstance(item.get(field), str) or not item[field].strip():
@@ -492,10 +694,14 @@ def apply_proposal(
     surface = meta.get("surface")
     title = str(meta.get("title") or path.stem)
 
-    if surface == "engine-config":
+    if surface in ("engine-config", _NONE_SURFACE):
+        # engine-config is a config recommendation; "none" is a report-only
+        # recommendation (e.g. a crash needing a code fix outside the editable
+        # surfaces). Neither is ever auto-applied — both are surfaced for a
+        # human exactly the same way.
         meta["status"] = "applied-manually-required"
         path.write_text(_render_proposal(meta, edit), encoding="utf-8")
-        events.append("improve-manual-required", file=path.name, title=title)
+        events.append("improve-manual-required", file=path.name, surface=surface, title=title)
         return path, meta, edit
 
     if surface == "checkpoint-header":

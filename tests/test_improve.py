@@ -8,6 +8,7 @@ restores it via a finalizer.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from importlib import resources
 from pathlib import Path
 
@@ -197,6 +198,222 @@ def test_mine_clusters_from_seeded_state(project):
 def test_mine_empty_state(project):
     evidence = improve.mine(_paths(project))
     assert evidence["clusters"] == [] and evidence["window_days"] == 7
+
+
+# ── SIGNAL 1: human-intervention mining ─────────────────────────────────────
+
+
+def _write_msg(directory: Path, name: str, subject: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(f"---\nsubject: {subject}\n---\n\nbody\n", encoding="utf-8")
+
+
+def test_human_intervention_mines_unsolicited_steers_only(project):
+    paths = _paths(project)
+    from loop_orchestrator.engine.events import utc_now as _now
+
+    ts = _now()[:10].replace("-", "")  # today's YYYYMMDD, inside the window
+    processed = paths.processed_dir
+    # 3 unsolicited human steers (andrew -> coord, not "re:")
+    _write_msg(processed, f"{ts}-090000-andrew-to-coord.md", "prove the dispatch path")
+    _write_msg(processed, f"{ts}-091500-andrew-to-coord.md", "now wire up the deck")
+    _write_msg(processed, f"{ts}-093000-andrew-to-coord.md", "ship the improve loop")
+    # a solicited reply (re:) to a coordinator ask — NOT an intervention
+    _write_msg(processed, f"{ts}-094500-web-to-coord.md", "re:d-20260611-0")
+    # a coord-AUTHORED message — the coordinator working, not steered
+    _write_msg(processed, f"{ts}-095000-coord-to-web.md", "go run make check")
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    steer = clusters["human:unsolicited-steer"]
+    assert steer["count"] == 3
+    assert steer["inferred_surface"] == "checkpoint-header"
+    blob = " ".join(steer["samples"])
+    assert "prove the dispatch path" in blob
+    assert "re:d-20260611-0" not in blob  # the reply is ignored
+    assert "go run make check" not in blob  # the coord-authored msg is ignored
+
+
+def test_human_intervention_excludes_spaced_reply_subject(project):
+    # A sloppily-typed reply ("re :" with a space) is still a solicited reply,
+    # not an unsolicited steer — it must not inflate the signal.
+    paths = _paths(project)
+    from loop_orchestrator.engine.events import utc_now as _now
+
+    ts = _now()[:10].replace("-", "")
+    _write_msg(paths.processed_dir, f"{ts}-090000-web-to-coord.md", "re : d-123-0")
+    _write_msg(paths.processed_dir, f"{ts}-091500-web-to-coord.md", "RE:  d-123-1")
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    assert "human:unsolicited-steer" not in clusters
+
+
+def test_human_intervention_dedups_messages_and_processed(project):
+    paths = _paths(project)
+    from loop_orchestrator.engine.events import utc_now as _now
+
+    ts = _now()[:10].replace("-", "")
+    name = f"{ts}-100000-andrew-to-coord.md"
+    # SAME basename in messages/ (unprocessed) and processed/ (acked) — count 1.
+    _write_msg(paths.mailbox_dir, name, "the same steer, mid-ack")
+    _write_msg(paths.processed_dir, name, "the same steer, mid-ack")
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    assert clusters["human:unsolicited-steer"]["count"] == 1
+
+
+def test_human_intervention_windows_out_old_steers(project):
+    paths = _paths(project)
+    # 8 days ago is outside the default 7-day window.
+    _write_msg(paths.processed_dir, "20200101-000000-andrew-to-coord.md", "ancient steer")
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    assert "human:unsolicited-steer" not in clusters
+
+
+# ── SIGNAL 2: latency-regression mining ─────────────────────────────────────
+
+
+def _latency_events(durations_s: list[int]) -> list[dict]:
+    """A brain-call/decision pair per duration, on a steadily advancing clock."""
+    events: list[dict] = []
+    base = datetime(2026, 6, 11, 0, 0, 0, tzinfo=timezone.utc)
+    cursor = base
+    for n, dur in enumerate(durations_s):
+        events.append({"event": "brain-call", "ts": cursor.strftime("%Y-%m-%dT%H:%M:%SZ")})
+        cursor = cursor + timedelta(seconds=dur)
+        events.append(
+            {"event": "decision", "id": f"d-{n}", "ts": cursor.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        )
+        cursor = cursor + timedelta(seconds=30)  # gap before the next call
+    return events
+
+
+def test_latency_regression_mined_on_upward_trend(project):
+    paths = _paths(project)
+    # first third ~10s, last third ~120s -> last mean >= 2x first mean
+    _write_events(paths, _latency_events([10, 10, 12, 40, 80, 120, 130, 200]))
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    reg = clusters["latency:regression"]
+    assert reg["inferred_surface"] == "checkpoint-header"
+    assert reg["count"] == 8
+    assert reg["last_third_mean_s"] >= 2 * reg["first_third_mean_s"]
+
+
+def test_latency_flat_series_no_regression(project):
+    paths = _paths(project)
+    _write_events(paths, _latency_events([10, 11, 10, 12, 11, 10, 11, 12]))
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    assert "latency:regression" not in clusters
+
+
+def test_latency_needs_six_samples(project):
+    paths = _paths(project)
+    _write_events(paths, _latency_events([10, 20, 200]))  # only 3 pairs
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    assert "latency:regression" not in clusters
+
+
+def test_latency_healed_series_not_mined(project):
+    # A recovered series (an early spike, then rotation healed it) must NOT
+    # mine a regression even though the old max lingers in the window — else
+    # the loop keeps proposing a fix it already applied.
+    paths = _paths(project)
+    _write_events(paths, _latency_events([200, 180, 150, 60, 30, 15, 12, 10]))
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    assert "latency:regression" not in clusters
+
+
+# ── SIGNAL 3: crash mining (report-only, surface "none") ────────────────────
+
+
+def test_crash_mined_from_events_and_deck_log(project):
+    paths = _paths(project)
+    _write_events(
+        paths,
+        [
+            {"event": "crash", "component": "engine", "error": "RuntimeError: cycle blew up"},
+            {"event": "crash", "component": "engine", "error": "ValueError: bad parse"},
+        ],
+    )
+    paths.deck_crash_log.write_text(
+        "2026-06-11T00:00:00Z component=deck error=DuplicateKey: '0001'\n",
+        encoding="utf-8",
+    )
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    engine_crash = clusters["crash:engine"]
+    assert engine_crash["count"] == 2
+    assert engine_crash["inferred_surface"] == "none"  # report-only, never applied
+    deck_crash = clusters["crash:deck"]
+    assert deck_crash["count"] == 1
+    assert "DuplicateKey" in " ".join(deck_crash["samples"])
+    assert deck_crash["inferred_surface"] == "none"
+
+
+# ── brain failure_kind folds into the signature (quota != timeout) ──────────
+
+
+def test_brain_failure_kind_splits_quota_from_timeout(project):
+    paths = _paths(project)
+    _write_events(
+        paths,
+        [
+            {
+                "event": "brain-failed",
+                "error": "exit 1: hit the wall",
+                "failure_kind": "quota",
+                "stderr_excerpt": "Claude usage limit reached; resets 9:30pm",
+            },
+            {
+                "event": "brain-failed",
+                "error": "timed out after 300s",
+                "failure_kind": "timeout",
+                "stderr_excerpt": "",
+            },
+        ],
+    )
+
+    clusters = {c["signature"]: c for c in improve.mine(paths)["clusters"]}
+
+    # The two failures must NOT collapse into one brain:brain-failed cluster.
+    assert "brain:brain-failed:quota" in clusters
+    assert "brain:brain-failed:timeout" in clusters
+    assert clusters["brain:brain-failed:quota"]["count"] == 1
+    assert clusters["brain:brain-failed:timeout"]["count"] == 1
+    assert "resets 9:30pm" in " ".join(clusters["brain:brain-failed:quota"]["samples"])
+
+
+def test_none_surface_proposal_is_report_only(project, capsys):
+    paths = _paths(project)
+    _seed_proposal(
+        paths,
+        surface="none",
+        title="fix the DuplicateKey deck crash",
+        edit="Patch DeckTable.rebuild to dedupe row keys before add_row.\n",
+    )
+
+    rc = cli.main(["--project-root", str(project), "--session", "demo", "improve", "--apply", "1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "REPORT-ONLY" in out and "Patch DeckTable.rebuild" in out
+    meta, _ = improve._split_proposal(improve.find_proposal(paths, 1))
+    assert meta["status"] == "applied-manually-required"
+    # never touched an editable surface
+    assert (project / "AGENTS.md").read_text(encoding="utf-8") == AGENTS_STUB
 
 
 # ── proposal parsing (last fence wins, garbage -> clean error) ──────────────

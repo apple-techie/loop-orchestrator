@@ -92,7 +92,7 @@ past the deadline. Only ask lanes that run a real agent harness.
 
 ## Self-improvement (`loop-engine improve`)
 
-Adapted from Self-Harness (arXiv:2606.09498), human-gated: mines failure
+Adapted from Self-Harness (arXiv:2606.09498), human-gated: mines weakness
 clusters from events.jsonl / rejected decisions / action failures / lane
 giveups / ask timeouts → brain proposes ≤ 3 minimal edits targeting ONE
 mined signature each, restricted to the declared surfaces: the engine
@@ -103,6 +103,60 @@ subsection), or engine-config (recommendation text, never auto-applied).
 to the wiki, and the T0006 gate decides keep/revert: after ≥ 3 cycles,
 `scripts/loop-metrics.sh` numbers must not regress.
 
+**Learning from human interventions (not just internal failures).** Three
+extra signals widen the miner beyond terminal failures:
+
+- `human:unsolicited-steer` (surface `checkpoint-header`, **highest leverage**)
+  — scans the mailbox dir + its `processed/` subdir for `<ts>-<from>-to-<to>.md`
+  messages where `to==coord`, `from!=coord`, and the subject does NOT start
+  with `re:`. An unsolicited steer of the coordinator is a human doing the
+  coordinator's job because it failed to act autonomously — the richest "you
+  should have acted and did not" signal. Deduped by basename across the two
+  dirs, windowed by the filename UTC stamp. The proposal teaches the
+  coordinator to self-discover that next-step class.
+- `latency:regression` (surface `checkpoint-header`) — pairs each `brain-call`
+  with the next `decision`, times the gap, and (≥ 6 samples) flags when the
+  last third's mean is ≥ 2× the first third's, or the max is ≥ 3× the median.
+  Catches the slow-but-succeeded drift (a 175 KB-checkpoint 290 s spike) before
+  it becomes a terminal timeout.
+- `crash:<component>` (surface **`none`** = report-only) — mines `crash` events
+  from events.jsonl plus lines from the deck-owned `engine/deck-crash.log`. A
+  crash needs a code fix outside the three editable surfaces, so it is
+  surfaced as a recommendation, never auto-applied. The watch cycle emits a
+  `crash` event on any unhandled cycle exception; the deck installs a Textual
+  exception hook that appends to `deck-crash.log` (a plain diagnostic log — NOT
+  engine STATE, so the deck's non-writer invariant over decisions/snapshot/wiki
+  holds).
+
+`failure_kind` (`quota` | `timeout` | `exit`) — classified from the brain's
+stderr tail — is folded into the `brain-failed` signature, so a quota lockout
+(`brain:brain-failed:quota`) is never pooled with a slow generation
+(`brain:brain-failed:timeout`). The `none` surface mirrors how engine-config
+recommendations are surfaced (printed for a human, marked
+`applied-manually-required`), but is never applicable at all.
+
+## Operations (`restart`, quota backoff, stale-daemon guard)
+
+- **`loop-engine restart [--timeout S]`** — the singleton-safe restart. Reads
+  the pid file; if a daemon is alive, SIGTERMs it and polls until exit (default
+  60 s). If it does NOT exit in time, it reports and **does not start a second
+  instance** (confirm-dead-before-start — the singleton trap). Once exited (or
+  none was running) it starts `watch` exactly as the `watch` subcommand does.
+  Emits `watch-stop-requested` / `watch-stopped` / `watch-stop-timeout`.
+- **Quota-aware backoff** — when a brain failure is `failure_kind=="quota"`,
+  the watch loop does NOT burn retries into the wall: it computes a backoff
+  deadline (parsed from a `resets <time>` hint in the stderr excerpt, else
+  `brain.quota_backoff_minutes`, default 60) and suppresses brain calls until
+  then, emitting `cycle-skip reason=quota-backoff`. Observation and PM steps
+  keep running; only the brain is gated. The backoff clears once the deadline
+  passes (`quota-backoff-cleared`).
+- **Stale-daemon guard** — `watch` records the on-disk mtime of the loaded
+  `gate.py` (plus pid + start time) into `engine/daemon-build.json` at boot.
+  `status` compares the current module mtime to the recorded one; if the
+  on-disk file is newer, it prints `daemon is running stale code (installed
+  <t2> > daemon start <t1>) — run: loop-engine restart` and emits
+  `daemon-stale`. This is the stale-after-reinstall bite made visible.
+
 ## Config (`engine:` key in lane-config.yaml — invisible to bash)
 
 ```yaml
@@ -112,7 +166,8 @@ engine:
   min_cycle_interval_s: 120
   checkpoint_interval_s: 900
   brain: {harness: claude, model: "", timeout_s: 300, max_retries: 1,
-          max_calls_per_hour: 12, extra_args: [], stream: false}
+          max_calls_per_hour: 12, extra_args: [], stream: false,
+          quota_backoff_minutes: 60}   # backoff when failure_kind==quota
   ingest: {mode: lane, lane: docs, timeout_s: 600}   # or mode: headless
   destructive: {max_dispatches_per_cycle: 4, max_lanes: 12,
                 payload_patterns: ["git push --force", "rm -rf", "reset --hard"]}

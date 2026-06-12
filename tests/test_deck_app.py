@@ -480,6 +480,47 @@ def test_brain_screen_in_flight_without_terminator(paths):
     asyncio.run(main())
 
 
+def test_deck_crash_hook_appends_to_deck_owned_log(paths):
+    # The deck exception hook must append a one-line crash record to the
+    # deck-OWNED deck-crash.log (a plain diagnostic log, NOT engine STATE), so
+    # a deck crash is minable by improve._crash_clusters. This does NOT violate
+    # the non-writer invariant, which protects decisions/snapshot/wiki.
+    stub = StubSubstrate()
+    app = make_app(paths, stub)
+
+    app._append_crash_log(KeyError("DuplicateKey: '0001'"))
+    app._append_crash_log(ValueError("second crash"))
+
+    log = paths.deck_crash_log
+    assert log.exists()
+    lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2  # append-only, one record per crash
+    assert "component=deck" in lines[0]
+    assert "DuplicateKey" in lines[0]
+    assert "second crash" in lines[1]
+    # the hook never wrote engine STATE (the non-writer invariant)
+    assert not paths.pending_decision_path.exists()
+    assert not paths.snapshot_path.exists()
+    assert not paths.checkpoint_page.exists()
+
+
+def test_deck_handle_exception_routes_through_crash_log(paths, monkeypatch):
+    # _handle_exception is Textual's unhandled-exception entry point; ours must
+    # log to deck-crash.log, then delegate to super (which exits the app).
+    from textual.app import App
+
+    stub = StubSubstrate()
+    app = make_app(paths, stub)
+    delegated: list[Exception] = []
+    monkeypatch.setattr(App, "_handle_exception", lambda self, error: delegated.append(error))
+
+    boom = RuntimeError("kaboom in a worker")
+    app._handle_exception(boom)
+
+    assert delegated == [boom]  # fell through to Textual's default
+    assert "kaboom in a worker" in paths.deck_crash_log.read_text(encoding="utf-8")
+
+
 def test_rebuild_tolerates_duplicate_row_keys():
     # Regression: two support files in docs/adr/ shared the ADR's numeric
     # prefix, the ADR screen passed duplicate ids as row keys, and Textual's

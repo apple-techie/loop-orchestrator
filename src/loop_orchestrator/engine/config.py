@@ -26,6 +26,11 @@ class BrainConfig:
     max_calls_per_hour: int = 12
     extra_args: list[str] = field(default_factory=list)
     stream: bool = False  # claude stream-json into the live response transcript
+    # When a brain failure is classified failure_kind=="quota", the watch loop
+    # suppresses brain calls (only the brain — observation/PM continue) until a
+    # reset deadline. If the stderr carries no parseable "resets <time>", back
+    # off this many minutes instead of burning retries against the wall.
+    quota_backoff_minutes: int = 60
 
 
 @dataclass(frozen=True)

@@ -592,3 +592,217 @@ def test_cycle_skip_logged_once_per_episode(project, cycle_recorder):
 
     skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
     assert len(skips) == 1  # identical episode, one event — not one per poll
+
+
+# ── OPS GUARD A: restart (confirm-dead-before-start singleton trap) ──────────
+
+
+def test_restart_stops_then_starts_when_old_daemon_exits(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.pid_path.write_text("4242\n", encoding="utf-8")
+
+    # the old pid is alive until SIGTERM, then exits (poll observes the death)
+    alive = {"4242": True}
+    monkeypatch.setattr(watch_mod, "pid_alive", lambda pid: alive.get(str(pid), False))
+
+    def fake_kill(pid, sig):
+        alive["4242"] = False  # SIGTERM lands -> the daemon exits
+
+    monkeypatch.setattr(watch_mod.os, "kill", fake_kill)
+    started: list[bool] = []
+    monkeypatch.setattr(watch_mod.Watch, "run", lambda self: started.append(True) or 0)
+
+    rc = watch_mod.restart(project, "demo", EngineConfig(), timeout_s=2.0)
+
+    assert rc == 0
+    assert started == [True]  # exactly one new daemon started
+    kinds = [e["event"] for e in _events(project)]
+    assert "watch-stop-requested" in kinds and "watch-stopped" in kinds
+
+
+def test_restart_refuses_second_instance_when_old_will_not_die(project, monkeypatch, capsys):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.pid_path.write_text("5555\n", encoding="utf-8")
+
+    # the old daemon never dies, even after SIGTERM
+    monkeypatch.setattr(watch_mod, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(watch_mod.os, "kill", lambda pid, sig: None)
+    started: list[bool] = []
+    monkeypatch.setattr(watch_mod.Watch, "run", lambda self: started.append(True) or 0)
+
+    rc = watch_mod.restart(project, "demo", EngineConfig(), timeout_s=0.2)
+
+    assert rc == 1
+    assert started == []  # the singleton trap: NEVER start a second instance
+    assert "NOT starting a second instance" in capsys.readouterr().err
+    kinds = [e["event"] for e in _events(project)]
+    assert "watch-stop-timeout" in kinds
+
+
+def test_restart_starts_directly_when_nothing_running(project, monkeypatch):
+    # no pid file at all -> stop_daemon is a no-op, watch starts immediately
+    monkeypatch.setattr(watch_mod, "pid_alive", lambda pid: False)
+    started: list[bool] = []
+    monkeypatch.setattr(watch_mod.Watch, "run", lambda self: started.append(True) or 0)
+
+    assert watch_mod.restart(project, "demo", EngineConfig(), timeout_s=1.0) == 0
+    assert started == [True]
+
+
+def test_restart_cli_wires_timeout(project, monkeypatch):
+    monkeypatch.setattr(watch_mod, "pid_alive", lambda pid: False)
+    captured: dict = {}
+
+    def fake_restart(root, session, config, timeout_s):
+        captured["timeout"] = timeout_s
+        return 0
+
+    monkeypatch.setattr(cli, "restart", fake_restart)
+    rc = cli.main(
+        ["--project-root", str(project), "--session", "demo", "restart", "--timeout", "5"]
+    )
+    assert rc == 0 and captured["timeout"] == 5.0
+
+
+# ── OPS GUARD B: quota-aware backoff ────────────────────────────────────────
+
+
+def test_reset_deadline_parsing():
+    now = time.mktime(time.struct_time((2026, 6, 11, 8, 0, 0, 0, 0, -1)))  # 8:00 local
+    # "resets 9:30pm" -> a future epoch later the same day
+    deadline = watch_mod.parse_reset_deadline("usage limit; resets 9:30pm", now)
+    assert deadline is not None and deadline > now
+    parsed = time.localtime(deadline)
+    assert (parsed.tm_hour, parsed.tm_min) == (21, 30)
+    # already past today -> rolls to tomorrow
+    past = watch_mod.parse_reset_deadline("resets 7am", now)
+    assert past is not None and past > now
+    # no hint -> None (caller falls back to config minutes)
+    assert watch_mod.parse_reset_deadline("generic error, no reset", now) is None
+
+
+def test_quota_failure_sets_backoff_and_next_tick_skips(project, monkeypatch):
+    # a brain that fails with a quota message -> the cycle ends rc=1 quota
+    quota_brain = project / "quota-brain"
+    quota_brain.write_text(
+        '#!/bin/sh\necho "Claude usage limit reached; resets 9:30pm" >&2\nexit 1\n',
+        encoding="utf-8",
+    )
+    quota_brain.chmod(0o755)
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(quota_brain))
+
+    w = _watch(project)  # real run_once this time (not the cycle_recorder)
+    w._last_cycle_start = time.time()
+
+    now = time.time()
+    w.tick(now)  # mailbox-new trigger -> a real cycle -> brain quota failure
+
+    assert w._quota_backoff_until is not None and w._quota_backoff_until > now
+    set_events = [e for e in _events(project) if e["event"] == "quota-backoff-set"]
+    assert set_events and set_events[-1]["source"] == "stderr-reset"
+
+    # the NEXT tick is gated: brain suppressed, cycle-skip reason=quota-backoff
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+    skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
+    assert skips and skips[-1]["reason"] == "quota-backoff"
+
+
+def test_quota_backoff_clears_after_deadline(project, cycle_recorder):
+    w = _settled(_watch(project))
+    w._quota_backoff_until = time.time() - 1  # already elapsed
+
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+
+    assert w._quota_backoff_until is None  # cleared
+    cleared = [e for e in _events(project) if e["event"] == "quota-backoff-cleared"]
+    assert cleared
+    assert len(cycle_recorder) == 1  # the brain runs again once the window passed
+
+
+def test_quota_backoff_falls_back_to_config_minutes(project, monkeypatch):
+    quota_brain = project / "quota-brain2"
+    quota_brain.write_text(
+        '#!/bin/sh\necho "quota exceeded, no reset hint here" >&2\nexit 1\n', encoding="utf-8"
+    )
+    quota_brain.chmod(0o755)
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(quota_brain))
+    from loop_orchestrator.engine.config import BrainConfig
+
+    w = _watch(project, brain=BrainConfig(quota_backoff_minutes=30))
+    w._last_cycle_start = time.time()
+
+    now = time.time()
+    w.tick(now)
+
+    assert w._quota_backoff_until is not None
+    # ~30 minutes out (config default), give a generous tolerance for clock drift
+    assert 25 * 60 < (w._quota_backoff_until - now) < 35 * 60
+    set_events = [e for e in _events(project) if e["event"] == "quota-backoff-set"]
+    assert set_events and set_events[-1]["source"] == "config-default"
+
+
+# ── OPS GUARD C: stale-daemon warning ───────────────────────────────────────
+
+
+def test_status_surfaces_stale_daemon_warning(project, monkeypatch, capsys):
+    import json as _json
+
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "pid_alive", lambda pid: True)
+
+    # daemon recorded an OLD module mtime; the on-disk module is newer now
+    from loop_orchestrator.engine import gate as gate_mod
+
+    module_mtime = os.stat(gate_mod.__file__).st_mtime_ns
+    paths.daemon_build_path.write_text(
+        _json.dumps({"pid": os.getpid(), "module_mtime_ns": module_mtime - 10_000_000_000}),
+        encoding="utf-8",
+    )
+
+    rc = cli.main(["--project-root", str(project), "--session", "demo", "status"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "running stale code" in out and "loop-engine restart" in out
+    assert "daemon-stale" in [e["event"] for e in _events(project)]
+
+
+def test_status_no_warning_when_daemon_is_current(project, monkeypatch, capsys):
+    import json as _json
+
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "pid_alive", lambda pid: True)
+
+    from loop_orchestrator.engine import gate as gate_mod
+
+    module_mtime = os.stat(gate_mod.__file__).st_mtime_ns
+    # recorded mtime EQUAL to on-disk -> not stale
+    paths.daemon_build_path.write_text(
+        _json.dumps({"pid": os.getpid(), "module_mtime_ns": module_mtime}), encoding="utf-8"
+    )
+
+    assert cli.main(["--project-root", str(project), "--session", "demo", "status"]) == 0
+    assert "running stale code" not in capsys.readouterr().out
+
+
+def test_record_daemon_build_stamps_module_mtime(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+
+    watch_mod.record_daemon_build(paths, pid=1234)
+
+    import json as _json
+
+    build = _json.loads(paths.daemon_build_path.read_text(encoding="utf-8"))
+    assert build["pid"] == 1234 and isinstance(build["module_mtime_ns"], int)
+    assert build["started_at"]
+    # a freshly-recorded build is, by construction, NOT stale
+    assert watch_mod.stale_daemon_warning(paths) is None

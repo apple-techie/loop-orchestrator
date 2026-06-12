@@ -95,6 +95,20 @@ class SessionPaths:
     def lock_path(self) -> Path:
         return self.engine_dir / ".lock"
 
+    # Deck-OWNED diagnostic log. The deck stays a strict NON-WRITER of engine
+    # STATE (decisions / snapshot / wiki) — appending crash tracebacks to this
+    # plain log does NOT violate that invariant: it is a diagnostic sink, never
+    # authoritative state the engine reads back as a decision input.
+    @property
+    def deck_crash_log(self) -> Path:
+        return self.engine_dir / "deck-crash.log"
+
+    # Stale-daemon guard: the watch daemon records the build mtime of its loaded
+    # gate module here at boot; `status` compares it to the on-disk module.
+    @property
+    def daemon_build_path(self) -> Path:
+        return self.engine_dir / "daemon-build.json"
+
     def ensure(self) -> None:
         self.engine_dir.mkdir(parents=True, exist_ok=True)
         self.decisions_dir.mkdir(exist_ok=True)

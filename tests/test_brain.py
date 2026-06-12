@@ -118,6 +118,58 @@ def test_exhausted_retries_raise_and_log(tmp_path, env, monkeypatch):
     assert len(list(paths.brain_dir.glob("*.prompt.md"))) == 1
 
 
+# ── failure_kind classification on the failure event ────────────────────────
+
+
+def test_brain_failed_records_quota_failure_kind(tmp_path, env, monkeypatch):
+    paths, events = env
+    # a session-limit message on stderr, then a non-zero exit -> classified quota
+    script = _script(
+        tmp_path, "brain", 'echo "Claude usage limit reached; resets 9:30pm" >&2\nexit 1\n'
+    )
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(max_retries=0)), None, paths, events)
+
+    with pytest.raises(BrainInvocationError) as excinfo:
+        brain.invoke("p")
+
+    assert excinfo.value.failure_kind == "quota"
+    assert "resets 9:30pm" in excinfo.value.stderr_excerpt
+    failed = [e for e in events.tail(20) if e["event"] == "brain-failed"]
+    assert failed and failed[-1]["failure_kind"] == "quota"
+    assert "usage limit reached" in failed[-1]["stderr_excerpt"]
+
+
+def test_brain_timeout_records_timeout_failure_kind(tmp_path, env, monkeypatch):
+    paths, events = env
+    script = _script(tmp_path, "brain", "echo started\nexec sleep 30\n")
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(timeout_s=1, max_retries=0)), None, paths, events)
+
+    with pytest.raises(BrainInvocationError) as excinfo:
+        brain.invoke("p")
+
+    assert excinfo.value.failure_kind == "timeout"
+    timeout_ev = [e for e in events.tail(20) if e["event"] == "brain-timeout"]
+    assert timeout_ev and timeout_ev[-1]["failure_kind"] == "timeout"
+    failed = [e for e in events.tail(20) if e["event"] == "brain-failed"]
+    assert failed and failed[-1]["failure_kind"] == "timeout"
+
+
+def test_brain_failed_plain_exit_is_not_quota(tmp_path, env, monkeypatch):
+    paths, events = env
+    script = _script(tmp_path, "brain", "echo generic boom >&2\nexit 2\n")
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(max_retries=0)), None, paths, events)
+
+    with pytest.raises(BrainInvocationError) as excinfo:
+        brain.invoke("p")
+
+    assert excinfo.value.failure_kind == "exit"
+    failed = [e for e in events.tail(20) if e["event"] == "brain-failed"]
+    assert failed and failed[-1]["failure_kind"] == "exit"
+
+
 # ── run_oneshot reuse (the headless-ingest path shares this machinery) ──────
 
 

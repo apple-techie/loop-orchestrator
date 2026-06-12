@@ -548,6 +548,7 @@ loop-engine --session s once --approval manual   # one cycle, decision queues
 loop-engine --session s status                   # read the pending decision
 loop-engine --session s approve d-…              # human gate; executes + archives
 loop-engine --session s watch                    # the daemon
+loop-engine --session s restart [--timeout 60]   # singleton-safe stop+start
 ```
 
 `watch` polls and runs cycles on triggers — checkpoint interval, new mailbox
@@ -565,7 +566,7 @@ the checkpoint marker, so the wiki accumulates the system's reasoning.
 the deck's `b` panel watches it.
 
 `loop-engine improve` adapts *Self-Harness* (arXiv:2606.09498) to this
-stack: it mines failure clusters from the engine's own traces (brain
+stack: it mines weakness clusters from the engine's own traces (brain
 failures, rejected decisions, action failures, lane instability, ask
 timeouts), has the brain propose at most three minimal edits to the
 **declared surfaces only** (the checkpoint header, append-only AGENTS.md
@@ -573,6 +574,24 @@ experiment subsections, engine-config recommendations), and files them as
 proposals — nothing applies without `--apply N`, and applied experiments
 live or die by the `loop-metrics.sh` non-regression gate. Zero mined
 weaknesses → zero proposals, by design.
+
+The miner also learns from **human interventions**, not just internal
+failures. The highest-leverage signal, `human:unsolicited-steer`, counts
+unsolicited mailbox messages to the coordinator (`…-to-coord.md`, not from
+coord, subject not `re:`) — a human steering the coordinator is the
+coordinator failing to act autonomously, so the proposal teaches it to
+self-discover that next step. `latency:regression` catches slow-but-succeeded
+drift (brain-call→decision timings trending up) before it becomes a terminal
+timeout, and `crash:<component>` mines unhandled engine cycle crashes plus
+deck crashes (via a deck-owned `deck-crash.log`) under a report-only `none`
+surface — a crash needs a code fix, so it is surfaced, never auto-applied.
+Brain failures are classified (`quota` / `timeout` / `exit`) so a quota
+lockout is never misdiagnosed as a slow generation. Operationally, the watch
+loop applies **quota-aware backoff** (suppresses only the brain until the
+limit resets, observation continues), a **stale-daemon guard** (`status`
+warns when a reinstall landed after the daemon started — run `restart`), and
+`restart` is **singleton-safe** (confirms the old daemon is dead before
+starting a new one, never two at once).
 
 ### `loop-deck` — the flight deck
 

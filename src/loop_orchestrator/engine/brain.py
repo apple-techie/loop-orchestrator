@@ -20,6 +20,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -35,6 +36,29 @@ BUDGET_WINDOW_S = 3600
 KILL_GRACE_S = 5
 _READ_CHUNK = 65536
 
+# A quota/usage-limit stderr must never be misdiagnosed as a slow generation:
+# the cure is to back off until the window resets, not to keep retrying.
+_QUOTA_RE = re.compile(r"session.?limit|usage.?limit|\bquota\b|rate.?limit", re.IGNORECASE)
+# Length-capped excerpt of the stderr tail carried on the failure event so the
+# watch loop (and the miner) can read the reset hint without re-opening files.
+_STDERR_EXCERPT_LEN = 280
+
+
+def classify_failure(stderr: str, timed_out: bool) -> str:
+    """failure_kind for a brain/one-shot failure: 'quota' (session/usage limit
+    — back off, do not retry), 'timeout' (the deadline kill), else 'exit'."""
+    if _QUOTA_RE.search(stderr or ""):
+        return "quota"
+    if timed_out:
+        return "timeout"
+    return "exit"
+
+
+def _stderr_excerpt(stderr: str) -> str:
+    """Last `_STDERR_EXCERPT_LEN` chars of the stderr tail, single-lined."""
+    text = " ".join((stderr or "").split())
+    return text[-_STDERR_EXCERPT_LEN:]
+
 
 class BrainError(RuntimeError):
     """Base for one-shot invocation failures."""
@@ -45,7 +69,17 @@ class BrainBudgetError(BrainError):
 
 
 class BrainInvocationError(BrainError):
-    """Every allowed attempt exited non-zero, timed out, or failed to spawn."""
+    """Every allowed attempt exited non-zero, timed out, or failed to spawn.
+
+    Carries the classified `failure_kind` ('quota' | 'timeout' | 'exit') and a
+    capped `stderr_excerpt` so the watch loop can apply quota-aware backoff
+    without re-reading events.jsonl.
+    """
+
+    def __init__(self, message: str, failure_kind: str = "exit", stderr_excerpt: str = ""):
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.stderr_excerpt = stderr_excerpt
 
 
 def oneshot_argv(template: str, prompt: str) -> list[str]:
@@ -295,15 +329,30 @@ def run_oneshot(
     )
     attempts = max_retries + 1
     last_error = ""
+    last_failure_kind = "exit"
+    last_excerpt = ""
     for attempt in range(1, attempts + 1):
         renderer = StreamRenderer() if stream else None
         try:
             returncode, stdout = _run_attempt(argv, timeout_s, cwd, response_path, renderer)
         except subprocess.TimeoutExpired:
             last_error = f"timed out after {timeout_s}s"
-            events.append(f"{kind_prefix}-timeout", attempt=attempt, timeout_s=timeout_s)
+            # A quota notice on stderr can land before the deadline kill — read
+            # the tail so a quota-then-timeout is still classified 'quota'.
+            stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
+            last_failure_kind = classify_failure(stderr_text, timed_out=True)
+            last_excerpt = _stderr_excerpt(stderr_text)
+            events.append(
+                f"{kind_prefix}-timeout",
+                attempt=attempt,
+                timeout_s=timeout_s,
+                failure_kind=last_failure_kind,
+                stderr_excerpt=last_excerpt,
+            )
         except OSError as exc:
             last_error = f"spawn failed: {exc}"
+            last_failure_kind = "exit"
+            last_excerpt = ""
         else:
             if returncode == 0:
                 if renderer is not None:
@@ -311,11 +360,22 @@ def run_oneshot(
                 return stdout
             stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
             last_error = f"exit {returncode}: {stderr_text.strip()[:500]}"
+            last_failure_kind = classify_failure(stderr_text, timed_out=False)
+            last_excerpt = _stderr_excerpt(stderr_text)
         if attempt < attempts:
             events.append(f"{kind_prefix}-retry", attempt=attempt, error=last_error)
     response_path.unlink(missing_ok=True)  # failed runs leave no response transcript
-    events.append(f"{kind_prefix}-failed", error=last_error)
-    raise BrainInvocationError(f"{kind_prefix} failed after {attempts} attempt(s): {last_error}")
+    events.append(
+        f"{kind_prefix}-failed",
+        error=last_error,
+        failure_kind=last_failure_kind,
+        stderr_excerpt=last_excerpt,
+    )
+    raise BrainInvocationError(
+        f"{kind_prefix} failed after {attempts} attempt(s): {last_error}",
+        failure_kind=last_failure_kind,
+        stderr_excerpt=last_excerpt,
+    )
 
 
 class Brain:
