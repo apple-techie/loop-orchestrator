@@ -536,7 +536,12 @@ def test_apply_checkpoint_header_overwrites_engine_source(project, request):
     original = header.read_text(encoding="utf-8")
     request.addfinalizer(lambda: header.write_text(original, encoding="utf-8"))
     paths = _paths(project)
-    replacement = "SENTINEL HEADER vNEXT\nthe whole replacement header body\n"
+    # A valid replacement preserves the decision contract (fence + every kind).
+    replacement = (
+        "SENTINEL HEADER vNEXT\nthe whole replacement header body\n\n"
+        "```decision\nversion: 1\n```\n"
+        "kinds: dispatch add_lane drop_lane steer stop escalate\n"
+    )
     path = _seed_proposal(paths, surface="checkpoint-header", title="lean header", edit=replacement)
 
     rc = cli.main(["--project-root", str(project), "--session", "demo", "improve", "--apply", "1"])
@@ -549,6 +554,22 @@ def test_apply_checkpoint_header_overwrites_engine_source(project, request):
     assert run_once(project, "demo", EngineConfig()) == 0
     prompt = sorted(paths.brain_dir.glob("*.prompt.md"))[0].read_text(encoding="utf-8")
     assert "SENTINEL HEADER vNEXT" in prompt
+
+
+def test_apply_checkpoint_header_rejects_truncated_contract(project, capsys):
+    # A full-replacement header that drops the decision contract would brick the
+    # coordinator — the apply must reject it and leave the header untouched.
+    header = _header_path()
+    original = header.read_text(encoding="utf-8")
+    paths = _paths(project)
+    truncated = "You are the coordinator.\nReply with a decision block. The body is YAML:\n"
+    _seed_proposal(paths, surface="checkpoint-header", title="lean header", edit=truncated)
+
+    rc = cli.main(["--project-root", str(project), "--session", "demo", "improve", "--apply", "1"])
+
+    assert rc == 1
+    assert "decision contract" in capsys.readouterr().err
+    assert header.read_text(encoding="utf-8") == original  # unchanged
 
 
 def test_apply_engine_config_is_manual_only(project, capsys):

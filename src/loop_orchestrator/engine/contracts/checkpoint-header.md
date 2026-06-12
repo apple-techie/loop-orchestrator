@@ -6,6 +6,18 @@ Run the critique first: what is unproven? What downstream state is only
 inferred, not observed? What single observation would falsify your confidence
 fastest?
 
+Then anticipate the human. Unsolicited steering mail is a lagging signal of
+direction you should have inferred yourself. The recurring pattern: a
+milestone completes -> verify it against an explicit quality gate -> audit
+before implementing the next improvement. Before choosing actions, ask: if I
+stop here, what next-step message would the human have to send? Check the
+pending mailbox and recent checkpoint history for that pattern. If the next
+step is unambiguous from the compiled state and fits within the limits below,
+dispatch it this cycle instead of waiting to be told. Reserve `stop` for
+genuinely converged state — never for "awaiting direction" on a step you
+could infer. Reserve `escalate` for true human judgment (ADR acceptance,
+scope changes, spend), not for inferable next steps.
+
 Then reply with EXACTLY ONE fenced code block whose info-string is
 `decision`, and NOTHING else after it. The body is YAML:
 

@@ -488,9 +488,13 @@ def build_prompt(paths: SessionPaths, config: EngineConfig, evidence: dict, k: i
         "",
         "Surface rules:",
         "- checkpoint-header: `edit` is the FULL replacement content of the engine",
-        "  checkpoint header file (current text below). For human:unsolicited-steer,",
-        "  teach the coordinator to self-discover the next-step the human keeps",
-        "  sending, so it acts without being told.",
+        "  checkpoint header file (current text below). It MUST preserve the entire",
+        "  decision contract verbatim — the ```decision fence and every action kind",
+        "  (dispatch, add_lane, drop_lane, steer, stop, escalate); reproduce the",
+        "  current text and add your change, never truncate it, or the edit is",
+        "  rejected. For human:unsolicited-steer, teach the coordinator to",
+        "  self-discover the next-step the human keeps sending, so it acts without",
+        "  being told.",
         "- agents-md-append: `edit` is a self-contained '#### experiment: <title>'",
         "  subsection to APPEND to AGENTS.md. AGENTS.md is append-only — never",
         "  rewrite or reorder existing content.",
@@ -647,9 +651,28 @@ def find_proposal(paths: SessionPaths, n: int) -> Path | None:
     return best[1] if best else None
 
 
+# A checkpoint-header replacement is FULL-replacement, so a proposal that
+# omits the decision-contract spec would silently brick the coordinator (it
+# would know to emit a `decision` block but not what may go in it). Require
+# the load-bearing pieces to survive any replacement.
+_HEADER_REQUIRED = ("```decision", "dispatch", "add_lane", "drop_lane", "steer", "stop", "escalate")
+
+
+def _validate_header_replacement(edit: str) -> None:
+    missing = [token for token in _HEADER_REQUIRED if token not in edit]
+    if missing:
+        raise ImproveError(
+            "checkpoint-header replacement is missing the decision contract "
+            f"({', '.join(missing)}) — a full-replacement edit must preserve the "
+            "fence and every action kind, or the coordinator cannot emit a valid "
+            "decision. Proposal rejected; the header is unchanged."
+        )
+
+
 def _apply_checkpoint_header(edit: str) -> Path:
     """Overwrite the checkpoint header the engine actually uses — resolved via
     importlib.resources exactly like loop._assemble_prompt does."""
+    _validate_header_replacement(edit)
     resource = resources.files("loop_orchestrator.engine").joinpath(*_HEADER_RESOURCE)
     with resources.as_file(resource) as header:
         target = Path(header)
