@@ -429,7 +429,17 @@ def test_jira_complete_sprint_active_resolves_then_closes(jira_env, capsys):
     adapter, transport = _adapter(
         [
             ("GET", "/rest/agile/1.0/board/5/sprint", ACTIVE_SPRINT_RESPONSE),
-            ("GET", "/rest/agile/1.0/sprint/7", {"id": 7, "name": "Sprint 12", "state": "active"}),
+            (
+                "GET",
+                "/rest/agile/1.0/sprint/7",
+                {
+                    "id": 7,
+                    "name": "Sprint 12",
+                    "state": "active",
+                    "startDate": "2026-06-01T00:00:00.000Z",
+                    "endDate": "2026-06-15T00:00:00.000Z",
+                },
+            ),
             ("PUT", "/rest/agile/1.0/sprint/7", {"id": 7, "name": "Sprint 12", "state": "closed"}),
         ]
     )
@@ -444,7 +454,9 @@ def test_jira_complete_sprint_active_resolves_then_closes(jira_env, capsys):
     assert "incomplete issues back to the backlog" in out  # operator is told what Jira did
     method, url, body = transport.writes()[0]
     assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/7")
-    assert json.loads(body) == {"state": "closed"}
+    payload = json.loads(body)
+    assert payload["state"] == "closed" and payload["name"] == "Sprint 12"
+    assert payload["startDate"] and payload["endDate"]  # Jira requires the dates too
 
 
 def test_jira_complete_sprint_not_active_exit_1_no_close(jira_env, capsys):

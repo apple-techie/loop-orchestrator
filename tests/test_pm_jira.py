@@ -606,10 +606,17 @@ def test_start_sprint_jira_refusal_surfaced(jira_env):
 
 
 def test_complete_sprint_checks_active_then_closes(jira_env):
+    active_sprint = {
+        "id": 8,
+        "name": "Sprint 13",
+        "state": "active",
+        "startDate": "2026-06-01T00:00:00.000Z",
+        "endDate": "2026-06-15T00:00:00.000Z",
+    }
     transport = FakeTransport(
         [
-            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"}),
-            ("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "closed"}),
+            ("GET", "/rest/agile/1.0/sprint/8", active_sprint),
+            ("PUT", "/rest/agile/1.0/sprint/8", {**active_sprint, "state": "closed"}),
         ]
     )
     adapter = JiraAdapter(transport=transport)
@@ -619,8 +626,13 @@ def test_complete_sprint_checks_active_then_closes(jira_env):
     assert closed["state"] == "closed"
     method, url, body = transport.writes()[0]
     assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/8")
-    # Jira requires name on the close PUT too — preserve the fetched name.
-    assert json.loads(body) == {"name": "Sprint 13", "state": "closed"}
+    # Jira requires name + startDate + endDate on the close PUT — all preserved.
+    assert json.loads(body) == {
+        "state": "closed",
+        "name": "Sprint 13",
+        "startDate": "2026-06-01T00:00:00.000Z",
+        "endDate": "2026-06-15T00:00:00.000Z",
+    }
 
 
 def test_complete_sprint_not_active_is_clean_error_no_write(jira_env):
