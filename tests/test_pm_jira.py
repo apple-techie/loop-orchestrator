@@ -7,6 +7,7 @@ payloads and records every call so write-HTTP can be asserted absent.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,14 @@ CREATED_RESPONSE = {"id": "10001", "key": "PROJ-77"}
 
 ACTIVE_SPRINT_RESPONSE = {"values": [{"id": 7, "name": "Sprint 12", "state": "active"}]}
 
+# Deliberately NOT in id order: --next must resolve the EARLIEST future sprint.
+FUTURE_SPRINTS_RESPONSE = {
+    "values": [
+        {"id": 9, "name": "Sprint 14", "state": "future"},
+        {"id": 8, "name": "Sprint 13", "state": "future"},
+    ]
+}
+
 TASK_NO_JIRA = """\
 ---
 id: T0002
@@ -440,6 +449,122 @@ def test_move_to_sprint_payload(jira_env):
     method, url, body = transport.writes()[0]
     assert url.endswith("/rest/agile/1.0/sprint/7/issue")
     assert json.loads(body) == {"issues": ["PROJ-1", "PROJ-2"]}
+
+
+def test_future_sprints(jira_env):
+    transport = FakeTransport([("GET", "/rest/agile/1.0/board/5/sprint", FUTURE_SPRINTS_RESPONSE)])
+    adapter = JiraAdapter(transport=transport)
+
+    sprints = adapter.future_sprints("5")
+
+    assert sprints == [{"id": 9, "name": "Sprint 14"}, {"id": 8, "name": "Sprint 13"}]
+    method, url, _ = transport.calls[0]
+    assert method == "GET" and url.endswith("/rest/agile/1.0/board/5/sprint?state=future")
+
+
+def test_future_sprints_empty(jira_env):
+    transport = FakeTransport([("GET", "/rest/agile/1.0/board/5/sprint", {"values": []})])
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.future_sprints("5") == []
+
+
+def test_create_sprint_payload(jira_env):
+    transport = FakeTransport(
+        [("POST", "/rest/agile/1.0/sprint", {"id": 21, "name": "Sprint 15", "state": "future"})]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.create_sprint("5", "Sprint 15") == {"id": 21, "name": "Sprint 15"}
+    method, url, body = transport.writes()[0]
+    assert method == "POST" and url.endswith("/rest/agile/1.0/sprint")
+    assert json.loads(body) == {"name": "Sprint 15", "originBoardId": 5}
+
+
+def test_create_sprint_non_numeric_board_is_clean_error(jira_env):
+    transport = FakeTransport([])
+    adapter = JiraAdapter(transport=transport)
+
+    with pytest.raises(JiraError, match="not numeric"):
+        adapter.create_sprint("board-5", "Sprint 15")
+    assert transport.calls == []
+
+
+def _parse_jira_date(value: str) -> datetime:
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def test_start_sprint_payload_state_active_with_both_dates(jira_env):
+    transport = FakeTransport(
+        [("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"})]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    doc = adapter.start_sprint(8)
+
+    assert doc["state"] == "active"
+    method, url, body = transport.writes()[0]
+    assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/8")
+    payload = json.loads(body)
+    assert payload["state"] == "active"
+    assert "goal" not in payload
+    start = _parse_jira_date(payload["startDate"])
+    end = _parse_jira_date(payload["endDate"])
+    assert end - start == timedelta(days=14)  # default duration honored
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    assert abs(now - start) < timedelta(minutes=5)  # startDate is now-UTC
+
+
+def test_start_sprint_duration_and_goal(jira_env):
+    transport = FakeTransport([("PUT", "/rest/agile/1.0/sprint/8", {})])
+    adapter = JiraAdapter(transport=transport)
+
+    adapter.start_sprint(8, duration_days=7, goal="Ship the sync")
+
+    payload = json.loads(transport.writes()[0][2])
+    assert payload["goal"] == "Ship the sync"
+    delta = _parse_jira_date(payload["endDate"]) - _parse_jira_date(payload["startDate"])
+    assert delta == timedelta(days=7)
+
+
+def test_start_sprint_jira_refusal_surfaced(jira_env):
+    def already_active(method, url, headers, body):
+        detail = {"errorMessages": ["Sprint 'Sprint 12' is already active on this board."]}
+        return 400, json.dumps(detail).encode("utf-8")
+
+    adapter = JiraAdapter(transport=already_active)
+
+    with pytest.raises(JiraError, match="already active on this board") as excinfo:
+        adapter.start_sprint(8)
+    assert excinfo.value.status == 400
+
+
+def test_complete_sprint_checks_active_then_closes(jira_env):
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"}),
+            ("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "closed"}),
+        ]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    closed = adapter.complete_sprint(8)
+
+    assert closed["state"] == "closed"
+    method, url, body = transport.writes()[0]
+    assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/8")
+    assert json.loads(body) == {"state": "closed"}
+
+
+def test_complete_sprint_not_active_is_clean_error_no_write(jira_env):
+    transport = FakeTransport(
+        [("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "future"})]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    with pytest.raises(JiraError, match=r"sprint 8 \(Sprint 13\) is not active \(state: future\)"):
+        adapter.complete_sprint(8)
+    assert transport.writes() == []  # the close PUT never happens
 
 
 def test_add_comment_minimal_adf(jira_env):

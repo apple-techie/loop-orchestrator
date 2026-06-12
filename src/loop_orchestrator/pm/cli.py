@@ -62,6 +62,27 @@ def build_parser() -> argparse.ArgumentParser:
     move.add_argument("--board", default=None, help=f"for --active (default ${ENV_BOARD})")
     move.add_argument("keys", nargs="+", metavar="KEY")
 
+    start = jira_sub.add_parser(
+        "start-sprint", help="activate a sprint (sets start/end dates from now)"
+    )
+    which = start.add_mutually_exclusive_group(required=True)
+    which.add_argument("--sprint", default=None, help="sprint id")
+    which.add_argument("--next", action="store_true", help="earliest future sprint on the board")
+    which.add_argument(
+        "--create", default=None, metavar="NAME", help="create a sprint, then start it"
+    )
+    start.add_argument("--board", default=None, help=f"for --next/--create (default ${ENV_BOARD})")
+    start.add_argument("--duration-days", type=int, default=14, help="sprint length (default 14)")
+    start.add_argument("--goal", default=None, help="sprint goal")
+
+    complete = jira_sub.add_parser(
+        "complete-sprint", help="close a sprint (Jira moves incomplete issues to the backlog)"
+    )
+    which = complete.add_mutually_exclusive_group(required=True)
+    which.add_argument("--sprint", default=None, help="sprint id")
+    which.add_argument("--active", action="store_true", help="resolve the board's active sprint")
+    complete.add_argument("--board", default=None, help=f"for --active (default ${ENV_BOARD})")
+
     retro = jira_sub.add_parser("retro", help="post a retrospective onto an epic")
     retro.add_argument("--epic", required=True, help="epic issue key")
     retro.add_argument("--title", default=None, help="default: 'Retrospective <YYYY-MM-DD>'")
@@ -207,11 +228,48 @@ def cmd_jira(args: argparse.Namespace, adapter: JiraAdapter | None = None) -> in
             sprint_id = _resolve_sprint_id(adapter, args)
             adapter.move_to_sprint(sprint_id, args.keys)
             print(f"moved {len(args.keys)} issue(s) to sprint {sprint_id}")
+        elif args.jira_command == "start-sprint":
+            return _cmd_jira_start_sprint(args, adapter)
+        elif args.jira_command == "complete-sprint":
+            return _cmd_jira_complete_sprint(args, adapter)
         elif args.jira_command == "retro":
             return _cmd_jira_retro(args, adapter)
     except JiraError as exc:
         print(f"loop-pm: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_jira_start_sprint(args: argparse.Namespace, adapter: JiraAdapter) -> int:
+    if args.create is not None:
+        board = _require(args.board, ENV_BOARD, "--board")
+        sprint = adapter.create_sprint(board, args.create)
+        print(f"created sprint {sprint['id']} {sprint['name']}")
+        sprint_id = sprint["id"]
+    elif args.next:
+        board = _require(args.board, ENV_BOARD, "--board")
+        future = adapter.future_sprints(board)
+        if not future:
+            print(
+                f"loop-pm: board {board} has no future sprint (create one with --create NAME)",
+                file=sys.stderr,
+            )
+            return 1
+        sprint_id = min(future, key=lambda sprint: sprint["id"])["id"]
+    else:
+        sprint_id = args.sprint
+    adapter.start_sprint(sprint_id, duration_days=args.duration_days, goal=args.goal)
+    goal_suffix = f" — goal: {args.goal}" if args.goal else ""
+    print(f"started sprint {sprint_id} ({args.duration_days} days){goal_suffix}")
+    return 0
+
+
+def _cmd_jira_complete_sprint(args: argparse.Namespace, adapter: JiraAdapter) -> int:
+    sprint_id = _resolve_sprint_id(adapter, args)
+    closed = adapter.complete_sprint(sprint_id)
+    name = closed.get("name")
+    print(f"closed sprint {sprint_id}" + (f" {name}" if name else ""))
+    print("note: Jira moves a closed sprint's incomplete issues back to the backlog")
     return 0
 
 

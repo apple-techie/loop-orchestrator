@@ -33,6 +33,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import taskfiles
@@ -84,6 +85,11 @@ def _adf_doc(text: str) -> dict:
 
 def _jql_quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _utc_iso(moment: datetime) -> str:
+    """Jira's date-time format: UTC, millisecond precision, 'Z' suffix."""
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def _error_detail(raw: bytes) -> str:
@@ -272,6 +278,54 @@ class JiraAdapter(PMAdapter):
 
     def move_to_sprint(self, sprint_id: str | int, keys: list[str]) -> None:
         self._request("POST", f"/rest/agile/1.0/sprint/{sprint_id}/issue", body={"issues": keys})
+
+    def future_sprints(self, board_id: str | int) -> list[dict]:
+        """[{'id': ..., 'name': ...}, ...] for the board's future sprints."""
+        doc = self._request("GET", f"/rest/agile/1.0/board/{board_id}/sprint?state=future")
+        return [
+            {"id": sprint.get("id"), "name": sprint.get("name")}
+            for sprint in doc.get("values") or []
+        ]
+
+    def create_sprint(self, board_id: str | int, name: str) -> dict:
+        """Create a future sprint on the board; returns {'id': ..., 'name': ...}."""
+        try:
+            origin = int(board_id)
+        except (TypeError, ValueError) as exc:
+            raise JiraError(f"create-sprint: board id {board_id!r} is not numeric") from exc
+        doc = self._request(
+            "POST", "/rest/agile/1.0/sprint", body={"name": name, "originBoardId": origin}
+        )
+        return {"id": doc.get("id"), "name": doc.get("name")}
+
+    def start_sprint(
+        self, sprint_id: str | int, duration_days: int = 14, goal: str | None = None
+    ) -> dict:
+        """Activate a sprint: state=active, startDate=now (UTC), endDate=now+
+        duration. Jira's own refusals (e.g. another sprint already active on
+        the board) surface as JiraError with the response's error messages."""
+        now = datetime.now(timezone.utc)
+        body: dict = {
+            "state": "active",
+            "startDate": _utc_iso(now),
+            "endDate": _utc_iso(now + timedelta(days=duration_days)),
+        }
+        if goal:
+            body["goal"] = goal
+        return self._request("PUT", f"/rest/agile/1.0/sprint/{sprint_id}", body=body)
+
+    def complete_sprint(self, sprint_id: str | int) -> dict:
+        """Close an ACTIVE sprint (the state is checked first — closing is
+        irreversible and Jira moves incomplete issues to the backlog)."""
+        sprint = self._request("GET", f"/rest/agile/1.0/sprint/{sprint_id}")
+        state = sprint.get("state")
+        if state != "active":
+            name = sprint.get("name") or "unnamed"
+            raise JiraError(
+                f"sprint {sprint_id} ({name}) is not active (state: {state or 'unknown'}) "
+                "— only an active sprint can be completed"
+            )
+        return self._request("PUT", f"/rest/agile/1.0/sprint/{sprint_id}", body={"state": "closed"})
 
     def add_comment(self, issue_key: str, text: str) -> None:
         self._request(

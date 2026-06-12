@@ -11,6 +11,7 @@ from test_pm_jira import (
     ACTIVE_SPRINT_RESPONSE,
     CREATED_RESPONSE,
     EPIC_SEARCH_RESPONSE,
+    FUTURE_SPRINTS_RESPONSE,
     FakeTransport,
 )
 
@@ -315,6 +316,148 @@ def test_jira_move_to_sprint_explicit_id(jira_env, capsys):
     )
     assert rc == 0
     assert json.loads(transport.writes()[0][2]) == {"issues": ["PROJ-1"]}
+
+
+def test_jira_start_sprint_by_id(jira_env, capsys):
+    adapter, transport = _adapter(
+        [("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"})]
+    )
+    rc = main(["jira", "start-sprint", "--sprint", "8"], registry={}, jira_adapter=adapter)
+    assert rc == 0
+    assert "started sprint 8 (14 days)" in capsys.readouterr().out
+    method, url, body = transport.writes()[0]
+    assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/8")
+    payload = json.loads(body)
+    assert payload["state"] == "active"
+    assert "startDate" in payload and "endDate" in payload and "goal" not in payload
+
+
+def test_jira_start_sprint_next_resolves_earliest_future(jira_env, capsys):
+    adapter, transport = _adapter(
+        [
+            ("GET", "/rest/agile/1.0/board/5/sprint", FUTURE_SPRINTS_RESPONSE),
+            ("PUT", "/rest/agile/1.0/sprint/8", {}),
+        ]
+    )
+    rc = main(["jira", "start-sprint", "--next", "--board", "5"], registry={}, jira_adapter=adapter)
+    assert rc == 0
+    assert "started sprint 8" in capsys.readouterr().out
+    # fixture lists id 9 first: --next picks the earliest (8), not the first
+    assert transport.writes()[0][1].endswith("/rest/agile/1.0/sprint/8")
+    assert "state=future" in transport.calls[0][1]
+
+
+def test_jira_start_sprint_with_goal_and_duration(jira_env, capsys):
+    adapter, transport = _adapter([("PUT", "/rest/agile/1.0/sprint/8", {})])
+    rc = main(
+        ["jira", "start-sprint", "--sprint", "8", "--duration-days", "7", "--goal", "Ship it"],
+        registry={},
+        jira_adapter=adapter,
+    )
+    assert rc == 0
+    assert "started sprint 8 (7 days) — goal: Ship it" in capsys.readouterr().out
+    payload = json.loads(transport.writes()[0][2])
+    assert payload["goal"] == "Ship it"
+
+
+def test_jira_start_sprint_create_then_start(jira_env, capsys):
+    adapter, transport = _adapter(
+        [
+            ("POST", "/rest/agile/1.0/sprint", {"id": 21, "name": "Sprint 15", "state": "future"}),
+            ("PUT", "/rest/agile/1.0/sprint/21", {}),
+        ]
+    )
+    rc = main(
+        ["jira", "start-sprint", "--create", "Sprint 15", "--board", "5"],
+        registry={},
+        jira_adapter=adapter,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "created sprint 21 Sprint 15" in out
+    assert "started sprint 21" in out
+    create, start = transport.writes()
+    assert json.loads(create[2]) == {"name": "Sprint 15", "originBoardId": 5}
+    assert start[0] == "PUT" and start[1].endswith("/rest/agile/1.0/sprint/21")
+    assert json.loads(start[2])["state"] == "active"
+
+
+def test_jira_start_sprint_next_missing_board_exit_64(jira_env, capsys):
+    adapter, transport = _adapter([])
+    with pytest.raises(SystemExit) as excinfo:
+        main(["jira", "start-sprint", "--next"], registry={}, jira_adapter=adapter)
+    assert excinfo.value.code == 64
+    assert "JIRA_BOARD_ID" in capsys.readouterr().err
+    assert transport.calls == []
+
+
+def test_jira_start_sprint_missing_creds_exit_64(monkeypatch, capsys):
+    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    rc = main(["jira", "start-sprint", "--sprint", "8"], registry={})
+    assert rc == 64
+    assert "JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN" in capsys.readouterr().err
+
+
+def test_jira_start_sprint_already_active_exit_1(jira_env, capsys):
+    def already_active(method, url, headers, body):
+        detail = {"errorMessages": ["Sprint 'Sprint 12' is already active on this board."]}
+        return 400, json.dumps(detail).encode("utf-8")
+
+    adapter = JiraAdapter(transport=already_active)
+    rc = main(["jira", "start-sprint", "--sprint", "8"], registry={}, jira_adapter=adapter)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "already active on this board" in err  # Jira's refusal surfaced verbatim
+
+
+def test_jira_complete_sprint_active_resolves_then_closes(jira_env, capsys):
+    adapter, transport = _adapter(
+        [
+            ("GET", "/rest/agile/1.0/board/5/sprint", ACTIVE_SPRINT_RESPONSE),
+            ("GET", "/rest/agile/1.0/sprint/7", {"id": 7, "name": "Sprint 12", "state": "active"}),
+            ("PUT", "/rest/agile/1.0/sprint/7", {"id": 7, "name": "Sprint 12", "state": "closed"}),
+        ]
+    )
+    rc = main(
+        ["jira", "complete-sprint", "--active", "--board", "5"],
+        registry={},
+        jira_adapter=adapter,
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "closed sprint 7 Sprint 12" in out
+    assert "incomplete issues back to the backlog" in out  # operator is told what Jira did
+    method, url, body = transport.writes()[0]
+    assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/7")
+    assert json.loads(body) == {"state": "closed"}
+
+
+def test_jira_complete_sprint_not_active_exit_1_no_close(jira_env, capsys):
+    adapter, transport = _adapter(
+        [("GET", "/rest/agile/1.0/sprint/9", {"id": 9, "name": "Sprint 14", "state": "closed"})]
+    )
+    rc = main(["jira", "complete-sprint", "--sprint", "9"], registry={}, jira_adapter=adapter)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "sprint 9 (Sprint 14) is not active (state: closed)" in err
+    assert transport.writes() == []
+
+
+def test_jira_complete_sprint_active_missing_board_exit_64(jira_env, capsys):
+    adapter, _ = _adapter([])
+    with pytest.raises(SystemExit) as excinfo:
+        main(["jira", "complete-sprint", "--active"], registry={}, jira_adapter=adapter)
+    assert excinfo.value.code == 64
+    assert "JIRA_BOARD_ID" in capsys.readouterr().err
+
+
+def test_jira_complete_sprint_missing_creds_exit_64(monkeypatch, capsys):
+    for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    rc = main(["jira", "complete-sprint", "--sprint", "9"], registry={})
+    assert rc == 64
+    assert "JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN" in capsys.readouterr().err
 
 
 def test_jira_retro_comment_default(jira_env, capsys):

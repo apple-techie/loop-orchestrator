@@ -125,6 +125,9 @@ loop-pm sync --adapter jira (pull|push|both) [--dry-run] [--tasks-dir D] [--proj
 loop-pm jira ensure-epic --name N [--project K]          # prints epic key (found or created)
 loop-pm jira sprint-status [--board B]                   # active sprint id/name | 'no active sprint'
 loop-pm jira move-to-sprint (--sprint ID | --active) KEY...
+loop-pm jira start-sprint (--sprint ID | --next | --create NAME) [--board B]
+                          [--duration-days N] [--goal TEXT]
+loop-pm jira complete-sprint (--sprint ID | --active) [--board B]
 loop-pm jira retro --epic KEY [--title T] (--body-file F | --body TEXT) [--as-issue]
 ```
 
@@ -137,9 +140,15 @@ mapping open↔To Do, in-progress↔In Progress, done↔Done. `sync push` also
 creates issues for open/in-progress tasks without a `jira:` key (in
 `JIRA_PROJECT_KEY`, under `--epic` if given), writes the new key back into
 the task frontmatter and logs `sync | <key> created from <task-id>` to the
-wiki. `retro` posts an ADF comment on the epic; `--as-issue` creates a Task
-labeled `retrospective` instead. Epic links use the team-managed `parent`
-field — company-managed projects reject it, the issue is then created
+wiki. `start-sprint` activates a sprint (start=now UTC, end after
+`--duration-days`, optional `--goal`; `--next` = earliest future sprint,
+`--create NAME` makes one first). `complete-sprint` refuses non-active
+sprints and notes that Jira moves incomplete issues back to the backlog —
+ceremony decisions stay human, but the verbs make the cadence
+operator-invokable. `retro` posts an ADF comment on the epic; `--as-issue`
+creates a Task labeled `retrospective` instead. Epic links use the
+team-managed `parent` field — company-managed projects reject it, the
+issue is then created
 unlinked with a warning (per-site epic-link customfield ids are never
 guessed). Exit 64 = adapter unknown/unavailable or required env missing
 (creds always; `JIRA_PROJECT_KEY`/`JIRA_BOARD_ID` only for verbs that need

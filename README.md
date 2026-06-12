@@ -56,7 +56,7 @@ loop-orchestrator/
 │   ├── loop-metrics.sh        #   coordinator-efficiency metrics
 │   └── loop-wiki-lint.sh      #   nightly ops-wiki lint prompt
 ├── src/loop_orchestrator/ # the Python layer (engine / deck / pm)
-├── tests/                 # 248 tests; fakes-on-PATH harness, no tmux needed
+├── tests/                 # 268 tests; fakes-on-PATH harness, no tmux needed
 ├── ops-wiki/              # compiled coordinator memory (see AGENTS.md)
 ├── tasks/                 # tasks-as-files (+ archive/)
 ├── examples/
@@ -601,6 +601,9 @@ loop-pm sync --adapter jira push [--project K] [--epic KEY] [--sprint ID|active]
 loop-pm jira ensure-epic --name N [--project K]            # prints the epic key (found or created)
 loop-pm jira sprint-status [--board B]                     # active sprint id/name, or 'no active sprint'
 loop-pm jira move-to-sprint (--sprint ID | --active) KEY...
+loop-pm jira start-sprint (--sprint ID | --next | --create NAME) [--board B]
+                          [--duration-days N] [--goal TEXT]
+loop-pm jira complete-sprint (--sprint ID | --active) [--board B]
 loop-pm jira retro --epic KEY [--title T] (--body-file F | --body TEXT) [--as-issue]
 ```
 
@@ -613,13 +616,19 @@ ops-wiki/log.md. `retro` posts an ADF comment on the epic by default;
 uses the team-managed `parent` field; company-managed projects reject it,
 in which case the issue is created without the link and a warning is
 surfaced (the epic-link customfield id varies per site — never guessed).
+`start-sprint` activates a sprint (start now-UTC, end after
+`--duration-days`, optional `--goal`; `--next` picks the board's earliest
+future sprint, `--create NAME` makes one first); `complete-sprint` closes
+the active sprint — Jira moves its incomplete issues back to the backlog,
+and the CLI says so. Ceremony *decisions* stay with the human; these verbs
+just make the full scrum cadence operator-invokable end-to-end.
 
 ### Install / develop
 
 ```bash
 make install-python      # uv tool install (pip --user fallback; Python >= 3.10)
 uv sync --group dev      # development
-make check-python        # ruff + pytest (248 tests)
+make check-python        # ruff + pytest (268 tests)
 make check-all           # bash substrate + python layer
 make install-skill       # link skills/loop-orchestrator into ~/.claude/skills
                          # (other harnesses: SKILLS_DIR=~/proj/.pi/skills etc.)
