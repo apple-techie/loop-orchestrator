@@ -1,7 +1,11 @@
-"""Brain invocation: argv shapes, budget guard, retries, transcripts."""
+"""Brain invocation: argv shapes, budget guard, retries, transcripts,
+incremental (live-tailable) writes, timeout kill, stream-json reassembly."""
 
 from __future__ import annotations
 
+import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -10,8 +14,10 @@ from loop_orchestrator.engine.brain import (
     Brain,
     BrainBudgetError,
     BrainInvocationError,
+    StreamRenderer,
     oneshot_argv,
     run_oneshot,
+    stream_argv,
 )
 from loop_orchestrator.engine.config import BrainConfig, EngineConfig
 from loop_orchestrator.engine.events import EventLog
@@ -162,3 +168,154 @@ def test_run_oneshot_failure_uses_prefix(tmp_path, env):
 
     kinds = [e["event"] for e in events.tail(10)]
     assert "ingest-failed" in kinds and "brain-failed" not in kinds
+
+
+# ── incremental transcripts (live-tailable from t=0) ────────────────────────
+
+
+def test_response_transcript_is_live_tailable_mid_run(tmp_path, env):
+    paths, events = env
+    script = _script(
+        tmp_path,
+        "slow",
+        "echo line-1\nsleep 0.4\necho line-2\nsleep 0.4\necho line-3\n",
+    )
+    result: dict = {}
+
+    def run() -> None:
+        result["out"] = run_oneshot(
+            [str(script)], "p", paths.brain_dir, 30, events, "brain", cwd=paths.project_root
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    partial = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        responses = list(paths.brain_dir.glob("*.response.md"))
+        if responses:
+            text = responses[0].read_text(encoding="utf-8")
+            if "line-1" in text and "line-3" not in text:
+                partial = text  # observed BEFORE the one-shot completed
+                break
+        time.sleep(0.02)
+    worker.join()
+
+    assert partial is not None, "no partial transcript observed mid-run"
+    assert result["out"] == "line-1\nline-2\nline-3\n"
+    responses = list(paths.brain_dir.glob("*.response.md"))
+    assert responses[0].read_text(encoding="utf-8") == result["out"]
+
+
+def test_stderr_streams_to_sibling_transcript(tmp_path, env):
+    paths, events = env
+    script = _script(tmp_path, "oneshot", "echo out\necho err >&2\n")
+
+    out = run_oneshot(
+        [str(script)], "p", paths.brain_dir, 30, events, "brain", cwd=paths.project_root
+    )
+
+    assert out == "out\n"
+    stderrs = list(paths.brain_dir.glob("*.stderr.txt"))
+    assert len(stderrs) == 1
+    assert stderrs[0].read_text(encoding="utf-8") == "err\n"
+
+
+def test_timeout_kills_process_and_brain_failed_path_intact(tmp_path, env, monkeypatch):
+    paths, events = env
+    script = _script(tmp_path, "brain", "echo started\nexec sleep 30\n")
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(timeout_s=1, max_retries=0)), None, paths, events)
+
+    start = time.time()
+    with pytest.raises(BrainInvocationError, match="timed out after 1s"):
+        brain.invoke("p")
+    assert time.time() - start < 10  # killed at the deadline, not after 30s
+
+    kinds = [e["event"] for e in events.tail(20)]
+    assert "brain-timeout" in kinds and "brain-failed" in kinds
+    assert list(paths.brain_dir.glob("*.response.md")) == []  # failed runs leave none
+
+
+# ── stream-json mode ────────────────────────────────────────────────────────
+
+
+def test_stream_argv_appends_and_dedupes():
+    assert stream_argv(["claude", "-p", "x"]) == [
+        "claude",
+        "-p",
+        "x",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+    ]
+    # flags already present (any order/position): nothing duplicated
+    already = ["claude", "-p", "--output-format", "stream-json", "--verbose", "x"]
+    assert stream_argv(already) == already
+    # template carries the flags -> streamable even for a non-claude binary
+    assert stream_argv(["mycli", "--output-format", "stream-json", "x"]) == [
+        "mycli",
+        "--output-format",
+        "stream-json",
+        "x",
+        "--verbose",
+    ]
+    # absolute path still recognized by basename
+    assert stream_argv(["/usr/local/bin/claude", "-p", "x"]) is not None
+    # non-claude binary without the flags: not streamable
+    assert stream_argv(["hermes", "-z", "x"]) is None
+
+
+def test_stream_json_reassembly_from_fixture(tmp_path, env, monkeypatch):
+    paths, events = env
+    fixture = Path(__file__).parent / "fixtures" / "claude-stream.jsonl"
+    script = _script(tmp_path, "claude", f'cat "{fixture}"\n')
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(stream=True)), None, paths, events)
+
+    out = brain.invoke("p")
+
+    assert out == "hello-from-foo"  # the 'result' event text, verbatim
+    response = next(iter(paths.brain_dir.glob("*.response.md"))).read_text(encoding="utf-8")
+    assert "hello-from-foo" in response  # assistant text delta, verbatim
+    assert "[tool] Read /private/tmp/claude-probe/foo.ts" in response  # tool one-liner
+    assert response.startswith("=== ")  # system/init header line
+    assert "hook_started" not in response  # noise events are not rendered
+    raw = next(iter(paths.brain_dir.glob("*.stream.jsonl"))).read_text(encoding="utf-8")
+    assert raw == fixture.read_text(encoding="utf-8")  # raw JSONL provenance
+
+
+def test_stream_renderer_result_fallback_to_assistant_text():
+    renderer = StreamRenderer()
+    blocks = [{"type": "text", "text": "A"}]
+    line = json.dumps({"type": "assistant", "message": {"content": blocks}})
+    renderer.feed(line + "\n")
+    assert renderer.result_text is None
+    assert "".join(renderer.assistant_text) == "A"
+
+
+def test_stream_unsupported_harness_warns_and_runs_plain(tmp_path, env, monkeypatch):
+    paths, events = env
+    script = _script(tmp_path, "hermes", 'printf "plain:%s" "$1"\n')
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(
+        EngineConfig(brain=BrainConfig(harness="hermes", stream=True)), None, paths, events
+    )
+
+    assert brain.invoke("p") == "plain:p"  # plain run: raw stdout returned
+
+    warnings = [e for e in events.tail(10) if e["event"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["kind"] == "brain-stream-unsupported"
+    assert warnings[0]["harness"] == "hermes"
+    assert list(paths.brain_dir.glob("*.stream.jsonl")) == []  # no stream artifacts
+
+
+def test_stream_defaults_off_and_brain_cmd_path_identical(tmp_path, env, monkeypatch):
+    assert BrainConfig().stream is False
+    paths, events = env
+    script = _script(tmp_path, "claude", 'printf "raw:%s" "$1"\n')
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(), None, paths, events)
+    assert brain.invoke("p") == "raw:p"  # claude-named binary, stream off: plain
+    assert list(paths.brain_dir.glob("*.stream.jsonl")) == []

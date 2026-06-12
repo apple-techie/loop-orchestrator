@@ -45,17 +45,19 @@ class LoopDeckApp(App):
     MailboxPanel { height: 1fr; }
     EventTicker { height: 1fr; }
     FleetTable, LoopsTable, DecisionQueue, MailboxPanel, EventTicker,
-    #lane-pane-scroll, #events-scroll, #adr-table, #adr-content-scroll {
+    #lane-pane-scroll, #events-scroll, #adr-table, #adr-content-scroll,
+    #brain-pane-scroll {
         border: round $primary;
         border-title-color: $text;
     }
     DecisionQueue, MailboxPanel, EventTicker { padding: 0 1; }
     FleetTable:focus, LoopsTable:focus, #adr-table:focus,
-    #lane-pane-scroll:focus, #events-scroll:focus, #adr-content-scroll:focus {
+    #lane-pane-scroll:focus, #events-scroll:focus, #adr-content-scroll:focus,
+    #brain-pane-scroll:focus {
         border: round $accent;
     }
-    #lane-meta { height: 1; background: $panel; }
-    #lane-pane-scroll, #events-scroll { height: 1fr; }
+    #lane-meta, #brain-meta { height: 1; background: $panel; }
+    #lane-pane-scroll, #events-scroll, #brain-pane-scroll { height: 1fr; }
     #adr-table { height: 1fr; }
     #adr-content-scroll { height: 2fr; }
     """
@@ -74,6 +76,7 @@ class LoopDeckApp(App):
         Binding("p", "pause_toggle", "pause/resume"),
         Binding("a", "adrs", "adrs"),
         Binding("e", "events", "events"),
+        Binding("b", "brain", "brain"),
         Binding("m", "toggle_processed", "mailbox view", show=False),
     ]
 
@@ -381,6 +384,11 @@ class LoopDeckApp(App):
         from .screens import AdrScreen
 
         self.push_screen(AdrScreen())
+
+    def action_brain(self) -> None:
+        from .screens import BrainScreen
+
+        self.push_screen(BrainScreen())
 
     def action_toggle_processed(self) -> None:
         if not self._main.is_mounted:

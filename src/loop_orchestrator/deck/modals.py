@@ -251,7 +251,7 @@ x drop selected lane  g jump to tmux window
 c checkpoint (once)   p pause/resume engine
 y approve decision    N reject decision
 a ADR screen          e events screen
-escape back/cancel
+b brain activity      escape back/cancel
 """
 
 

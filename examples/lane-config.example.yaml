@@ -91,6 +91,7 @@ lanes:
 #     max_retries: 1
 #     max_calls_per_hour: 12
 #     extra_args: []
+#     stream: false                # claude stream-json into the live transcript (deck 'b')
 #   ingest:
 #     mode: lane                   # lane (nudge the docs lane) | headless
 #     lane: docs

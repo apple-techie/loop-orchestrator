@@ -556,8 +556,11 @@ cycle. Debounce, a single-in-flight decision invariant, a brain-calls-per-hour
 budget, pid-singleton, and pause/resume keep it boring. Ingest runs either by
 nudging the docs lane or fully headless (a one-shot agent performs the
 docs-lane protocol). Every step lands in an append-only `events.jsonl`;
-brain transcripts are kept for provenance; approved decisions are filed below
+brain transcripts are kept for provenance and written incrementally, so they
+are live-tailable while the brain runs; approved decisions are filed below
 the checkpoint marker, so the wiki accumulates the system's reasoning.
+`brain.stream: true` streams claude token events into the live transcript —
+the deck's `b` panel watches it.
 
 `loop-engine improve` adapts *Self-Harness* (arXiv:2606.09498) to this
 stack: it mines failure clusters from the engine's own traces (brain

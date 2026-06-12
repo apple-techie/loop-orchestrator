@@ -356,6 +356,73 @@ def test_jump_outside_tmux_surfaces_substrate_error(paths):
     asyncio.run(main())
 
 
+def test_brain_screen_opens_and_tails_newest_transcript(paths):
+    from loop_orchestrator.deck.screens import BrainScreen
+    from loop_orchestrator.engine.events import EventLog
+
+    prompt = paths.brain_dir / "20260611-100000.prompt.md"
+    response = paths.brain_dir / "20260611-100000.response.md"
+    prompt.write_text("the checkpoint prompt", encoding="utf-8")
+    response.write_text(
+        "=== claude-fable-5 session=abc cwd=/tmp ===\n"
+        "[tool] Read foo.ts\n"
+        "PROBE-OK\n"
+        "=== result: success ===\n",
+        encoding="utf-8",
+    )
+    events = EventLog(paths.events_path)
+    events.append("brain-call", prompt_path=str(prompt), response_path=str(response))
+    events.append("decision", id="d-1", actions=[])  # terminator -> done
+    app = make_app(paths, StubSubstrate())
+
+    async def main():
+        async with app.run_test() as pilot:
+            await settle(app, pilot)
+            await pilot.press("b")
+            await settle(app, pilot)
+            assert isinstance(app.screen, BrainScreen)
+            meta = app.screen.meta_line
+            assert "brain" in meta
+            assert response.name in meta
+            assert "done" in meta
+            body = app.screen.body_text
+            assert "[tool] Read foo.ts" in body
+            assert "PROBE-OK" in body
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, BrainScreen)
+
+    asyncio.run(main())
+
+
+def test_brain_screen_in_flight_without_terminator(paths):
+    from loop_orchestrator.deck.screens import BrainScreen
+    from loop_orchestrator.engine.events import EventLog
+
+    ingest_dir = paths.engine_dir / "ingest"
+    ingest_dir.mkdir(parents=True, exist_ok=True)
+    prompt = ingest_dir / "20260611-110000.prompt.md"
+    response = ingest_dir / "20260611-110000.response.md"
+    prompt.write_text("ingest these", encoding="utf-8")
+    response.write_text("partial output so far", encoding="utf-8")
+    EventLog(paths.events_path).append(
+        "ingest-call", prompt_path=str(prompt), response_path=str(response)
+    )
+    app = make_app(paths, StubSubstrate())
+
+    async def main():
+        async with app.run_test() as pilot:
+            await settle(app, pilot)
+            await pilot.press("b")
+            await settle(app, pilot)
+            assert isinstance(app.screen, BrainScreen)
+            meta = app.screen.meta_line
+            assert "ingest" in meta and "in-flight" in meta
+            assert "partial output so far" in app.screen.body_text
+
+    asyncio.run(main())
+
+
 def test_rebuild_tolerates_duplicate_row_keys():
     # Regression: two support files in docs/adr/ shared the ADR's numeric
     # prefix, the ADR screen passed duplicate ids as row keys, and Textual's

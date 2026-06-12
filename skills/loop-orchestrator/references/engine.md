@@ -93,7 +93,7 @@ engine:
   min_cycle_interval_s: 120
   checkpoint_interval_s: 900
   brain: {harness: claude, model: "", timeout_s: 300, max_retries: 1,
-          max_calls_per_hour: 12, extra_args: []}
+          max_calls_per_hour: 12, extra_args: [], stream: false}
   ingest: {mode: lane, lane: docs, timeout_s: 600}   # or mode: headless
   destructive: {max_dispatches_per_cycle: 4, max_lanes: 12,
                 payload_patterns: ["git push --force", "rm -rf", "reset --hard"]}
@@ -102,8 +102,11 @@ engine:
   pm: {adapters: []}             # e.g. [jira]
 ```
 
-Host overrides merge from `lane-config.<short-hostname>.yaml` (top-level
-engine keys replace wholesale).
+`brain.stream: true` streams claude token events into the live response
+transcript (raw JSONL kept in a sibling `.stream.jsonl`); the deck's `b`
+panel watches it. Host overrides merge from
+`lane-config.<short-hostname>.yaml` (top-level engine keys replace
+wholesale).
 
 ## loop-deck (Textual TUI)
 
@@ -113,7 +116,8 @@ non-writer: every mutation shells the audited CLIs. Keymap: `y`/`N` approve
 or reject the pending decision · `s` steer · `d` dispatch · `n` add-lane ·
 `x` drop-lane (typed-name confirm for base lanes) · `g` jump-to-tmux ·
 `c` checkpoint now · `p` pause/resume · `a` ADRs (`A` accept = the human
-gate) · `e` events · `enter` lane detail (live pane tail) · `q` quit.
+gate) · `e` events · `b` brain activity (live one-shot transcript tail) ·
+`enter` lane detail (live pane tail) · `q` quit.
 Engine off → read-only OBSERVE MODE dashboard.
 
 ## loop-pm (PM adapters)

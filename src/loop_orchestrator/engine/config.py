@@ -25,6 +25,7 @@ class BrainConfig:
     max_retries: int = 1
     max_calls_per_hour: int = 12
     extra_args: list[str] = field(default_factory=list)
+    stream: bool = False  # claude stream-json into the live response transcript
 
 
 @dataclass(frozen=True)
