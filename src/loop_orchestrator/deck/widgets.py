@@ -43,8 +43,18 @@ class DeckTable(DataTable):
     def rebuild(self, rows: list[tuple]) -> None:
         cursor = self.cursor_row
         self.clear()
-        for key, cells in rows:
-            self.add_row(*cells, key=key)
+        # Row keys are display identity only — selection flows through
+        # cursor_row into the screens' parallel lists — so duplicate source
+        # ids (e.g. two ADR-dir files sharing a numeric prefix) get a
+        # uniquifying suffix instead of crashing the app with Textual's
+        # DuplicateKey.
+        seen: set[str] = set()
+        for i, (key, cells) in enumerate(rows):
+            row_key = str(key)
+            if row_key in seen:
+                row_key = f"{row_key}#{i}"
+            seen.add(row_key)
+            self.add_row(*cells, key=row_key)
         if self.row_count:
             self.move_cursor(row=min(max(cursor, 0), self.row_count - 1))
 

@@ -354,3 +354,35 @@ def test_jump_outside_tmux_surfaces_substrate_error(paths):
             assert any("not inside tmux" in toast for toast in app.toasts)
 
     asyncio.run(main())
+
+
+def test_rebuild_tolerates_duplicate_row_keys():
+    # Regression: two support files in docs/adr/ shared the ADR's numeric
+    # prefix, the ADR screen passed duplicate ids as row keys, and Textual's
+    # DuplicateKey crashed the whole deck. Duplicate keys must render, not
+    # raise.
+    import asyncio
+
+    from textual.app import App, ComposeResult
+
+    from loop_orchestrator.deck.widgets import DeckTable
+
+    class TableApp(App):
+        def compose(self) -> ComposeResult:
+            yield DeckTable(id="t")
+
+    async def run() -> int:
+        app = TableApp()
+        async with app.run_test():
+            table = app.query_one("#t", DeckTable)
+            table.add_columns("ID", "STATUS", "TITLE")
+            table.rebuild(
+                [
+                    ("0001", ("0001", "?", "0001-verify-record.md")),
+                    ("0001", ("0001", "?", "0001-rollback.md")),
+                    ("0001", ("0001", "Proposed", "Feedback durability")),
+                ]
+            )
+            return table.row_count
+
+    assert asyncio.run(run()) == 3
