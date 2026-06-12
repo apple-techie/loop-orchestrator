@@ -366,6 +366,38 @@ class JiraAdapter(PMAdapter):
             "POST", f"/rest/api/3/issue/{issue_key}/comment", body={"body": _adf_doc(text)}
         )
 
+    def complete_epic(self, issue_key: str) -> str:
+        """Transition an epic (or any issue) to a Done-category status. Closing a
+        sprint and its child issues does NOT roll the parent epic to Done — the
+        epic is its own issue and needs its own transition. Matches by
+        statusCategory 'done' (not the literal name 'Done', which varies per
+        workflow). Returns the new status name; no-op if already done."""
+        issue = self._request("GET", f"/rest/api/3/issue/{issue_key}?fields=status")
+        status = (issue.get("fields") or {}).get("status") or {}
+        if (status.get("statusCategory") or {}).get("key") == "done":
+            return status.get("name") or "Done"
+        doc = self._request("GET", f"/rest/api/3/issue/{issue_key}/transitions")
+        transition = next(
+            (
+                t
+                for t in doc.get("transitions") or []
+                if ((t.get("to") or {}).get("statusCategory") or {}).get("key") == "done"
+            ),
+            None,
+        )
+        if transition is None:
+            names = [t.get("name") for t in doc.get("transitions") or []]
+            raise JiraError(
+                f"{issue_key}: no transition to a Done-category status "
+                f"(available: {', '.join(n for n in names if n) or 'none'})"
+            )
+        self._request(
+            "POST",
+            f"/rest/api/3/issue/{issue_key}/transitions",
+            body={"transition": {"id": transition["id"]}},
+        )
+        return (transition.get("to") or {}).get("name") or "Done"
+
     # ── pull ──────────────────────────────────────────────────────────────
 
     def pull(self, tasks_dir: Path, dry_run: bool = False) -> PMSyncResult:

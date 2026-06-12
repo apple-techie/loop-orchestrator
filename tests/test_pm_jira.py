@@ -646,6 +646,82 @@ def test_complete_sprint_not_active_is_clean_error_no_write(jira_env):
     assert transport.writes() == []  # the close PUT never happens
 
 
+def test_complete_epic_transitions_to_done_category(jira_env):
+    transport = FakeTransport(
+        [
+            ("GET", "fields=status", {"fields": {"status": {"statusCategory": {"key": "new"}}}}),
+            (
+                "GET",
+                "/transitions",
+                {
+                    "transitions": [
+                        {
+                            "id": "11",
+                            "to": {
+                                "name": "In Progress",
+                                "statusCategory": {"key": "indeterminate"},
+                            },
+                        },
+                        {"id": "31", "to": {"name": "Done", "statusCategory": {"key": "done"}}},
+                    ]
+                },
+            ),
+            ("POST", "/transitions", {}),
+        ]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    # matches by statusCategory 'done', not the literal name "Done"
+    assert adapter.complete_epic("SCRUM-117") == "Done"
+    method, url, body = transport.writes()[0]
+    assert method == "POST" and url.endswith("/rest/api/3/issue/SCRUM-117/transitions")
+    assert json.loads(body) == {"transition": {"id": "31"}}
+
+
+def test_complete_epic_already_done_is_noop(jira_env):
+    transport = FakeTransport(
+        [
+            (
+                "GET",
+                "fields=status",
+                {"fields": {"status": {"name": "Done", "statusCategory": {"key": "done"}}}},
+            )
+        ]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    assert adapter.complete_epic("SCRUM-117") == "Done"
+    assert transport.writes() == []  # no transition POST when already done
+
+
+def test_complete_epic_no_done_transition_errors(jira_env):
+    transport = FakeTransport(
+        [
+            ("GET", "fields=status", {"fields": {"status": {"statusCategory": {"key": "new"}}}}),
+            (
+                "GET",
+                "/transitions",
+                {
+                    "transitions": [
+                        {
+                            "id": "11",
+                            "to": {
+                                "name": "In Progress",
+                                "statusCategory": {"key": "indeterminate"},
+                            },
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+    adapter = JiraAdapter(transport=transport)
+
+    with pytest.raises(JiraError, match="no transition to a Done-category status"):
+        adapter.complete_epic("SCRUM-117")
+    assert transport.writes() == []
+
+
 def test_add_comment_minimal_adf(jira_env):
     transport = FakeTransport([("POST", "/comment", {})])
     adapter = JiraAdapter(transport=transport)

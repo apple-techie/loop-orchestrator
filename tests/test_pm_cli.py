@@ -470,6 +470,28 @@ def test_jira_complete_sprint_not_active_exit_1_no_close(jira_env, capsys):
     assert transport.writes() == []
 
 
+def test_jira_complete_epic_prints_new_status(jira_env, capsys):
+    adapter, transport = _adapter(
+        [
+            ("GET", "fields=status", {"fields": {"status": {"statusCategory": {"key": "new"}}}}),
+            (
+                "GET",
+                "/transitions",
+                {
+                    "transitions": [
+                        {"id": "31", "to": {"name": "Done", "statusCategory": {"key": "done"}}}
+                    ]
+                },
+            ),
+            ("POST", "/transitions", {}),
+        ]
+    )
+    rc = main(["jira", "complete-epic", "SCRUM-117"], registry={}, jira_adapter=adapter)
+    assert rc == 0
+    assert "SCRUM-117 -> Done" in capsys.readouterr().out
+    assert transport.writes()[0][1].endswith("/rest/api/3/issue/SCRUM-117/transitions")
+
+
 def test_jira_complete_sprint_active_missing_board_exit_64(jira_env, capsys):
     adapter, _ = _adapter([])
     with pytest.raises(SystemExit) as excinfo:

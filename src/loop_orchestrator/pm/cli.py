@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     which.add_argument("--active", action="store_true", help="resolve the board's active sprint")
     complete.add_argument("--board", default=None, help=f"for --active (default ${ENV_BOARD})")
 
+    complete_epic = jira_sub.add_parser(
+        "complete-epic", help="transition an epic to Done (sprint/issue completion doesn't roll up)"
+    )
+    complete_epic.add_argument("key", help="epic issue key, e.g. SCRUM-117")
+
     retro = jira_sub.add_parser("retro", help="post a retrospective onto an epic")
     retro.add_argument("--epic", required=True, help="epic issue key")
     retro.add_argument("--title", default=None, help="default: 'Retrospective <YYYY-MM-DD>'")
@@ -232,6 +237,9 @@ def cmd_jira(args: argparse.Namespace, adapter: JiraAdapter | None = None) -> in
             return _cmd_jira_start_sprint(args, adapter)
         elif args.jira_command == "complete-sprint":
             return _cmd_jira_complete_sprint(args, adapter)
+        elif args.jira_command == "complete-epic":
+            new_status = adapter.complete_epic(args.key)
+            print(f"{args.key} -> {new_status}")
         elif args.jira_command == "retro":
             return _cmd_jira_retro(args, adapter)
     except JiraError as exc:

@@ -206,6 +206,7 @@ loop-pm jira move-to-sprint (--sprint ID | --active) KEY...
 loop-pm jira start-sprint (--sprint ID | --next | --create NAME) [--board B]
                           [--duration-days N] [--goal TEXT]
 loop-pm jira complete-sprint (--sprint ID | --active) [--board B]
+loop-pm jira complete-epic KEY        # transition the epic to Done (no auto-rollup)
 loop-pm jira retro --epic KEY [--title T] (--body-file F | --body TEXT) [--as-issue]
 ```
 
