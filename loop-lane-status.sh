@@ -195,9 +195,16 @@ classify_target() {
   # lane. Braille spinner frames only render while generation is active, and the
   # `^` anchor ignores echoed "Web: ⠙ …" status lines, so matching them across
   # the full tail is safe.
+  # `esc to interrupt` is a LIVE-only marker (cleared the instant generation
+  # ends), so it is matched across the FULL tail, not just the bottom slice —
+  # Codex renders "• Working (Xs • esc to interrupt)" ABOVE its persistent
+  # composer/footer, out of the bottom slice, so a bottom-only check misses a
+  # working Codex lane and the footer then trips Rule 4 idle. The echoed-line
+  # guard below still filters a coord pane mirroring another lane's tail.
   local SPINNER_LINES
   SPINNER_LINES="$(
-    grep -E 'esc to interrupt|Working\.\.\.|Thinking\.\.\.|Orbiting|Planning\.\.\.|Searching\.\.\.|Envisioning|Analyzing\.\.\.|Inspecting\.\.\.|Running\.\.\.|Reading file|Reasoning\.\.\.|Computing\.\.\.|Generating\.\.\.|Loading\.\.\.' <<<"$TAIL_BOTTOM" || true
+    grep -E 'esc to interrupt' <<<"$TAIL" || true
+    grep -E 'Working\.\.\.|Thinking\.\.\.|Orbiting|Planning\.\.\.|Searching\.\.\.|Envisioning|Analyzing\.\.\.|Inspecting\.\.\.|Running\.\.\.|Reading file|Reasoning\.\.\.|Computing\.\.\.|Generating\.\.\.|Loading\.\.\.' <<<"$TAIL_BOTTOM" || true
     grep -E '^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' <<<"$TAIL" || true
   )"
   if [[ -n "$SPINNER_LINES" ]]; then

@@ -67,7 +67,11 @@ loop-lane-status --json --all S      # whole fleet; absent fixed lanes skipped
 
 Classification is pane-tail heuristics; extend idle detection for unusual
 harness chrome with `LOOP_LANE_IDLE_HOME_PATTERN` (ERE alternation). Never
-auto-act on `unknown` or `errored` lanes.
+auto-act on `unknown` or `errored` lanes. Codex lanes render the idle home
+chrome as the model·cwd footer, so set
+`LOOP_LANE_IDLE_HOME_PATTERN='gpt-5\.5.*·'` (or your model) for them; working
+detection handles codex out of the box (the live `esc to interrupt` marker is
+matched across the full tail, above codex's composer).
 
 ## loop-digest — state digest
 
