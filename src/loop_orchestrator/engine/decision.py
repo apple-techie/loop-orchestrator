@@ -24,6 +24,12 @@ MAX_TEXT_CHARS = 16384
 
 _FENCE_RE = re.compile(r"```decision[ \t]*\n(.*?)```", re.DOTALL)
 _WINDOW_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]+$")
+# A model id reaches a shell when add_lane spawns a harness, so it is locked to
+# a strict safe-token charset: letters, digits, and the punctuation real model
+# ids use (claude-fable-5, gpt-5.5, anthropic/claude-3.5, o1-preview). The
+# anchored full match excludes every shell metacharacter — whitespace, quotes,
+# ; | & $ ` ( ) < > — killing model-field command injection at parse time.
+_MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 
 
 class DecisionError(Exception):
@@ -109,6 +115,15 @@ class AddLaneAction:
             value = getattr(self, name)
             if value is not None:
                 _need_str(name, value)
+        # harness is registry-validated downstream (unknown harnesses are
+        # rejected before any process spawns); model is free-form, so it is
+        # pinned here to a shell-safe charset to kill command injection at parse
+        # time (the model id is interpolated into the harness command line).
+        if self.model is not None and not _MODEL_RE.match(self.model):
+            raise DecisionValidationError(
+                f"field 'model' {self.model!r} must match ^[A-Za-z0-9._:/-]+$ "
+                "(no shell metacharacters)"
+            )
         _need_bool("auto_approve", self.auto_approve)
         _no_coord("window", self.window)
 
@@ -130,6 +145,7 @@ class SteerAction:
     lane: str
     payload: str
     rationale: str
+    mode: str = "text"
     interrupt: bool = False
     wait_for_idle: bool = False
     expects_reply: bool = False
@@ -140,6 +156,8 @@ class SteerAction:
         _need_str("lane", self.lane)
         _need_str("payload", self.payload, limit=MAX_TEXT_CHARS)
         _need_str("rationale", self.rationale)
+        if self.mode not in ("text", "command"):
+            raise DecisionValidationError("field 'mode' must be 'text' or 'command'")
         _need_bool("interrupt", self.interrupt)
         _need_bool("wait_for_idle", self.wait_for_idle)
         _need_bool("expects_reply", self.expects_reply)

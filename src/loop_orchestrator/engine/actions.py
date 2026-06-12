@@ -120,7 +120,12 @@ def execute(
         expects_reply = bool(action.get("expects_reply"))
         if expects_reply:
             payload += _REPLY_FOOTER.format(lane=action["lane"], request_id=ask_id)
-        substrate.dispatch(action["lane"], payload, interrupt=bool(action.get("interrupt", False)))
+        substrate.dispatch(
+            action["lane"],
+            payload,
+            mode=action.get("mode", "text"),
+            interrupt=bool(action.get("interrupt", False)),
+        )
         if expects_reply and paths is not None and ask_id:
             timeout_s = int(action.get("reply_timeout_s") or 1800)
             record_ask(paths, ask_id, action["lane"], timeout_s)

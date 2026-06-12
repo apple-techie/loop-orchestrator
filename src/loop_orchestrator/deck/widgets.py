@@ -29,6 +29,10 @@ def status_text(status: str) -> Text:
     return Text(status, style=STATUS_STYLES.get(status, ""))
 
 
+def _truncate(value: str, limit: int = 200) -> str:
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
 class DeckTable(DataTable):
     """DataTable with vim row-cursor keys; rows rebuilt in place on refresh."""
 
@@ -107,6 +111,24 @@ class DecisionQueue(Static):
         self.border_title = "decision queue"
         self.update_decision(None)
 
+    @staticmethod
+    def _command_fields(action: dict) -> list[tuple[str, str]]:
+        """The executable fields of an action a human is approving, in render
+        order — empty when the action carries none."""
+        fields: list[tuple[str, str]] = []
+        if action.get("mode") == "command":
+            fields.append(("mode", "command"))
+            # A command-mode payload IS a shell command — surface the literal
+            # bytes in the warning style, not just the dim rationale, so the
+            # approver judges what actually executes.
+            if action.get("payload"):
+                fields.append(("payload", str(action["payload"])))
+        if action.get("cmd"):
+            fields.append(("cmd", str(action["cmd"])))
+        if action.get("model"):
+            fields.append(("model", str(action["model"])))
+        return fields
+
     def update_decision(self, doc: dict | None) -> None:
         self._doc = doc
         if not doc:
@@ -126,6 +148,10 @@ class DecisionQueue(Static):
             text.append(f"{action.get('kind')} {target} ")
             text.append(f"{action.get('classification')} ", style="dim")
             text.append(status, style=ACTION_STATUS_STYLES.get(status, ""))
+            # Command-bearing fields render in a stand-out warning style so an
+            # approver sees exactly what executes — not just the rationale.
+            for label, value in self._command_fields(action):
+                text.append(f"\n  {label}={_truncate(str(value))}", style="bold red")
             rationale = (action.get("rationale") or "").strip()
             if rationale:
                 text.append(f"\n  {rationale}", style="dim")

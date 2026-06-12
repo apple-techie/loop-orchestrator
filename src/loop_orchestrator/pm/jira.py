@@ -42,6 +42,9 @@ from .base import PMAdapter, PMSyncResult
 ENV_VARS = ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
 ENV_PROJECT = "JIRA_PROJECT_KEY"
 ENV_BOARD = "JIRA_BOARD_ID"
+# Escape hatch for localhost dev only: when set to "1", an http:// base URL is
+# permitted so the Basic-auth token can be sent to a non-TLS dev instance.
+ENV_ALLOW_INSECURE = "JIRA_ALLOW_INSECURE_BASE_URL"
 
 JQL = "assignee = currentUser() AND statusCategory != Done"
 SEARCH_FIELDS = "summary,description,status"
@@ -61,6 +64,24 @@ class JiraError(RuntimeError):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
+
+
+def _require_safe_base_url(base: str) -> None:
+    """Guard the Basic-auth token: the base URL must be https:// and carry no
+    embedded credentials, so the token never reaches a non-TLS or poisoned
+    host. JIRA_ALLOW_INSECURE_BASE_URL=1 (localhost dev only) waives the https
+    requirement; embedded userinfo is rejected unconditionally."""
+    parsed = urllib.parse.urlsplit(base)
+    if "@" in parsed.netloc:
+        raise JiraError(
+            f"{ENV_VARS[0]} {base!r} embeds credentials in the authority (userinfo '@') "
+            "— remove them; the API token is the only credential"
+        )
+    if parsed.scheme != "https" and os.environ.get(ENV_ALLOW_INSECURE) != "1":
+        raise JiraError(
+            f"{ENV_VARS[0]} {base!r} is not https:// — refusing to send the API token over "
+            f"an unencrypted connection (set {ENV_ALLOW_INSECURE}=1 for localhost dev only)"
+        )
 
 
 def _urllib_transport(
@@ -170,6 +191,7 @@ class JiraAdapter(PMAdapter):
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+        _require_safe_base_url(base)  # before the token is built/sent (MEDIUM-4)
         credentials = f"{os.environ.get('JIRA_EMAIL', '')}:{os.environ.get('JIRA_API_TOKEN', '')}"
         headers = {
             "Authorization": "Basic " + base64.b64encode(credentials.encode()).decode("ascii"),

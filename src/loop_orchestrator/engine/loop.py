@@ -223,12 +223,35 @@ def _pm_sync(
         )
 
 
+def _truncate(value: str, limit: int = 200) -> str:
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
 def action_line(action: dict) -> str:
     target = action.get("lane") or action.get("window") or "-"
-    return (
+    # FIRST line byte-format is asserted by tests — never change it.
+    first = (
         f"{action.get('idx')}. {action.get('kind')} {target} "
         f"[{action.get('classification')}/{action.get('status')}]"
     )
+    # SECOND line surfaces the executable fields a human is actually approving
+    # (command mode, a raw cmd, a model id, the payload/brief) so FIX 1/2
+    # approval is not blind. Absent these, no second line is emitted.
+    parts: list[str] = []
+    if action.get("mode") == "command":
+        parts.append("mode=command")
+    cmd = action.get("cmd")
+    if cmd:
+        parts.append(f"cmd={_truncate(str(cmd))}")
+    model = action.get("model")
+    if model:
+        parts.append(f"model={model}")
+    body = action.get("payload") or action.get("brief")
+    if body:
+        parts.append(f"payload={_truncate(str(body))}")
+    if parts:
+        return first + "\n     " + " ".join(parts)
+    return first
 
 
 def _persist(paths: SessionPaths, doc: dict) -> None:

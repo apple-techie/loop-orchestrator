@@ -535,10 +535,12 @@ One cycle: observe lanes → ingest pending mail → assemble the compiled
 checkpoint prompt (`loop-checkpoint.sh --print --header-file …`) → call a
 **swappable headless brain** (`claude -p`, `codex exec`, `amp -x`, … via the
 registry's `oneshot_template`) → parse a fenced ` ```decision ` block
-(critique + up to 8 typed actions) → **gate** each action
+(critique + up to 8 typed actions) → **gate** each action by its *shape*
 (safe / destructive / blocked — `loop-adr accept` and the coord lane are
-never automatable) → execute through `loop-dispatch` / `add-lane` /
-`drop-lane`. Decisions queue in
+never automatable; any action that runs a raw command — `mode: command`
+dispatch/steer, or `add_lane` with a `cmd` — is destructive by shape and
+needs a human, not just by a text blocklist) → execute through
+`loop-dispatch` / `add-lane` / `drop-lane`. Decisions queue in
 `.loop/sessions/<s>/engine/pending-decision.json` until resolved:
 
 ```bash
@@ -594,8 +596,12 @@ sync target, never the brain. Jira ships in-repo as the reference adapter
 (REST v3 + Agile 1.0, env-only credentials: `JIRA_BASE_URL`, `JIRA_EMAIL`,
 `JIRA_API_TOKEN`; optional scrum context: `JIRA_PROJECT_KEY` for issue
 creation/epic search, `JIRA_BOARD_ID` for sprint lookups — `--project` /
-`--board` override). With zero adapters configured the engine behaves
-identically — PM integration is optional by construction.
+`--board` override). `JIRA_BASE_URL` **must** be `https://` and carry no
+embedded credentials (a `user@host` authority is rejected), so the API token
+is never sent over plaintext or to a poisoned host; set
+`JIRA_ALLOW_INSECURE_BASE_URL=1` to waive the https requirement for localhost
+dev only. With zero adapters configured the engine behaves identically — PM
+integration is optional by construction.
 
 ```bash
 loop-pm list-adapters

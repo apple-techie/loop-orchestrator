@@ -28,20 +28,39 @@ actions: […]}` — last fence wins, ≤ 8 actions, every action needs a
 | kind | required | optional |
 |---|---|---|
 | dispatch | lane, payload | mode=text, wait_ready |
-| steer | lane, payload | interrupt, wait_for_idle, expects_reply, reply_timeout_s=1800 |
+| steer | lane, payload | mode=text, interrupt, wait_for_idle, expects_reply, reply_timeout_s=1800 |
 | add_lane | window, harness or cmd, brief | model, role, auto_approve |
 | drop_lane | window | |
 | stop / escalate | rationale / summary | |
 
 ## Gating
 
-`safe` executes per mode; `destructive` (any drop_lane, steer with
-interrupt, payload matching configured patterns like `rm -rf` / `git push
---force` / `reset --hard`, lane count over cap, dispatch+steer fan-out > 4
-per cycle) queues unless mode is `full`; `blocked` (targets coord, or
-payload invokes `loop-adr accept`) NEVER executes in any mode. Modes:
-`manual` (default — everything queues), `auto` (safe executes, destructive
-queues), `full` (blocked still held).
+Classification is on action **shape**, not a text blocklist — a regex over a
+free-text payload can never enumerate every shell-injection vector, so any
+action that runs a raw command is destructive by shape. `safe` executes per
+mode; `destructive` queues unless mode is `full`; `blocked` (targets coord,
+or payload invokes `loop-adr accept`) NEVER executes in any mode.
+
+`destructive` covers: any `drop_lane`; `steer` with `interrupt`; a
+`dispatch`/`steer` with `mode: command` (it injects a raw shell command);
+an `add_lane` carrying a raw `cmd` (it spawns an arbitrary process);
+`add_lane` over the lane cap; dispatch+steer fan-out > 4 per cycle; and —
+as an *additional* trigger for text-mode dispatch/steer only — a payload
+matching the configured patterns (`rm -rf` / `git push --force` / `reset
+--hard`). The pattern list is a cheap extra catch, never the primary
+boundary.
+
+**Limitation (honest):** the gate is mode-based, not harness-based. It does
+not carry the per-lane harness, so it cannot tell whether `command` mode is
+even meaningful for a given lane; it conservatively treats *all* command-mode
+dispatch/steer as destructive and all text-mode as safe. This is a deliberate
+over-approximation. The `model` field of `add_lane` is additionally pinned at
+parse time to `^[A-Za-z0-9._:/-]+$` (no shell metacharacters), since it is
+interpolated into the harness command line; `harness` is registry-validated
+downstream.
+
+Modes: `manual` (default — everything queues), `auto` (safe executes,
+destructive queues), `full` (blocked still held).
 
 ```bash
 loop-engine --session S status            # pending decision + last events

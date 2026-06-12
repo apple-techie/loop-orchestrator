@@ -106,6 +106,61 @@ def _log_text(project: Path) -> str:
     return log_md.read_text(encoding="utf-8") if log_md.exists() else ""
 
 
+def test_http_base_url_rejected_before_any_transport_call(project: Path, monkeypatch):
+    # FIX 4 (MEDIUM-4): the token must never leave over an unencrypted channel.
+    monkeypatch.setenv("JIRA_BASE_URL", "http://jira.example.com")
+    monkeypatch.setenv("JIRA_EMAIL", "dev@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "token")
+    monkeypatch.delenv("JIRA_ALLOW_INSECURE_BASE_URL", raising=False)
+    transport = FakeTransport([("GET", "/search/jql?", SEARCH_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert len(result.errors) == 1 and "not https" in result.errors[0]
+    assert transport.calls == []  # transport never invoked — token never built/sent
+
+
+def test_https_base_url_allows_request(jira_env, project: Path):
+    transport = FakeTransport([("GET", "/search/jql?", SEARCH_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert result.errors == []
+    assert transport.calls  # the https path reaches the transport
+
+
+def test_insecure_escape_hatch_allows_http(project: Path, monkeypatch):
+    monkeypatch.setenv("JIRA_BASE_URL", "http://localhost:8080")
+    monkeypatch.setenv("JIRA_EMAIL", "dev@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "token")
+    monkeypatch.setenv("JIRA_ALLOW_INSECURE_BASE_URL", "1")
+    transport = FakeTransport([("GET", "/search/jql?", SEARCH_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert result.errors == []
+    assert transport.calls  # localhost dev escape hatch reaches the transport
+
+
+def test_embedded_credentials_in_base_url_rejected(project: Path, monkeypatch):
+    # A poisoned authority (userinfo '@') is rejected even over https and even
+    # with the insecure escape hatch — credentials must never be smuggled in.
+    monkeypatch.setenv("JIRA_BASE_URL", "https://attacker@evil.example.com")
+    monkeypatch.setenv("JIRA_EMAIL", "dev@example.com")
+    monkeypatch.setenv("JIRA_API_TOKEN", "token")
+    monkeypatch.setenv("JIRA_ALLOW_INSECURE_BASE_URL", "1")
+    transport = FakeTransport([("GET", "/search/jql?", SEARCH_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert len(result.errors) == 1 and "credentials" in result.errors[0]
+    assert transport.calls == []
+
+
 def test_validate_env_and_available(monkeypatch: pytest.MonkeyPatch):
     for var in ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN"):
         monkeypatch.delenv(var, raising=False)
