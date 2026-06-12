@@ -82,7 +82,9 @@ HARNESS_OPENCODE_ONESHOT_TEMPLATE="opencode run {prompt}"
 HARNESS_CODEX_LAUNCH_CMD="codex"
 HARNESS_CODEX_MODEL_FLAG="--config"
 HARNESS_CODEX_EXPECTED_PROCESS="codex|node"
-HARNESS_CODEX_AUTO_APPROVE_FLAG="--full-auto"
+# codex-cli dropped --full-auto; the current skip-all-approvals analog of
+# claude's --dangerously-skip-permissions is this flag (verified on 0.139.0).
+HARNESS_CODEX_AUTO_APPROVE_FLAG="--dangerously-bypass-approvals-and-sandbox"
 HARNESS_CODEX_PASTE_ENTER_DELAY="2.0"
 HARNESS_CODEX_SKILL_DIR=".codex"
 HARNESS_CODEX_NON_INTERACTIVE_FLAG="exec"
