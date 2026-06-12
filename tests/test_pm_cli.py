@@ -320,7 +320,10 @@ def test_jira_move_to_sprint_explicit_id(jira_env, capsys):
 
 def test_jira_start_sprint_by_id(jira_env, capsys):
     adapter, transport = _adapter(
-        [("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"})]
+        [
+            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "future"}),
+            ("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"}),
+        ]
     )
     rc = main(["jira", "start-sprint", "--sprint", "8"], registry={}, jira_adapter=adapter)
     assert rc == 0
@@ -336,6 +339,7 @@ def test_jira_start_sprint_next_resolves_earliest_future(jira_env, capsys):
     adapter, transport = _adapter(
         [
             ("GET", "/rest/agile/1.0/board/5/sprint", FUTURE_SPRINTS_RESPONSE),
+            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 14"}),
             ("PUT", "/rest/agile/1.0/sprint/8", {}),
         ]
     )
@@ -348,7 +352,12 @@ def test_jira_start_sprint_next_resolves_earliest_future(jira_env, capsys):
 
 
 def test_jira_start_sprint_with_goal_and_duration(jira_env, capsys):
-    adapter, transport = _adapter([("PUT", "/rest/agile/1.0/sprint/8", {})])
+    adapter, transport = _adapter(
+        [
+            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 14"}),
+            ("PUT", "/rest/agile/1.0/sprint/8", {}),
+        ]
+    )
     rc = main(
         ["jira", "start-sprint", "--sprint", "8", "--duration-days", "7", "--goal", "Ship it"],
         registry={},
@@ -364,6 +373,11 @@ def test_jira_start_sprint_create_then_start(jira_env, capsys):
     adapter, transport = _adapter(
         [
             ("POST", "/rest/agile/1.0/sprint", {"id": 21, "name": "Sprint 15", "state": "future"}),
+            (
+                "GET",
+                "/rest/agile/1.0/sprint/21",
+                {"id": 21, "name": "Sprint 15", "state": "future"},
+            ),
             ("PUT", "/rest/agile/1.0/sprint/21", {}),
         ]
     )

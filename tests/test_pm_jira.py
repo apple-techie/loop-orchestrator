@@ -551,7 +551,10 @@ def _parse_jira_date(value: str) -> datetime:
 
 def test_start_sprint_payload_state_active_with_both_dates(jira_env):
     transport = FakeTransport(
-        [("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"})]
+        [
+            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "future"}),
+            ("PUT", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint 13", "state": "active"}),
+        ]
     )
     adapter = JiraAdapter(transport=transport)
 
@@ -562,6 +565,7 @@ def test_start_sprint_payload_state_active_with_both_dates(jira_env):
     assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/8")
     payload = json.loads(body)
     assert payload["state"] == "active"
+    assert payload["name"] == "Sprint 13"  # Jira requires name on the activate PUT
     assert "goal" not in payload
     start = _parse_jira_date(payload["startDate"])
     end = _parse_jira_date(payload["endDate"])
@@ -571,7 +575,12 @@ def test_start_sprint_payload_state_active_with_both_dates(jira_env):
 
 
 def test_start_sprint_duration_and_goal(jira_env):
-    transport = FakeTransport([("PUT", "/rest/agile/1.0/sprint/8", {})])
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/agile/1.0/sprint/8", {"id": 8, "name": "Sprint X"}),
+            ("PUT", "/rest/agile/1.0/sprint/8", {}),
+        ]
+    )
     adapter = JiraAdapter(transport=transport)
 
     adapter.start_sprint(8, duration_days=7, goal="Ship the sync")
@@ -584,6 +593,8 @@ def test_start_sprint_duration_and_goal(jira_env):
 
 def test_start_sprint_jira_refusal_surfaced(jira_env):
     def already_active(method, url, headers, body):
+        if method == "GET":  # the name-fetch succeeds; the activate PUT is refused
+            return 200, json.dumps({"id": 8, "name": "Sprint 12"}).encode("utf-8")
         detail = {"errorMessages": ["Sprint 'Sprint 12' is already active on this board."]}
         return 400, json.dumps(detail).encode("utf-8")
 

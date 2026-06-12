@@ -326,8 +326,13 @@ class JiraAdapter(PMAdapter):
         """Activate a sprint: state=active, startDate=now (UTC), endDate=now+
         duration. Jira's own refusals (e.g. another sprint already active on
         the board) surface as JiraError with the response's error messages."""
+        # Jira's sprint-update endpoint requires `name` even when only changing
+        # state, so fetch the current name and preserve it in the PUT (a bare
+        # state/date PUT 400s with "name is required").
+        sprint = self._request("GET", f"/rest/agile/1.0/sprint/{sprint_id}")
         now = datetime.now(timezone.utc)
         body: dict = {
+            "name": sprint.get("name"),
             "state": "active",
             "startDate": _utc_iso(now),
             "endDate": _utc_iso(now + timedelta(days=duration_days)),
