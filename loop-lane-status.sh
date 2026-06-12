@@ -243,8 +243,16 @@ classify_target() {
   # a home footer means no live spinner, i.e. genuinely idle.
   local idle_home_chrome='accept edits on|bypass permissions on'
   [[ -n "${LOOP_LANE_IDLE_HOME_PATTERN:-}" ]] && idle_home_chrome+="|${LOOP_LANE_IDLE_HOME_PATTERN}"
+  # Themed shell prompts (oh-my-zsh `➜`, a `git:(branch)` segment, a starship/
+  # powerlevel `❯` at the line end) mean an idle shell waiting for input — the
+  # bare $/%/❯ regex only matches a prompt glyph ALONE on a line and misses
+  # these, so a finished shell lane with a themed prompt was reading 'unknown'.
+  # Anchored to the bottom slice (after the working/errored rules) so a
+  # still-running command's output, not its prompt, can't trip it.
+  local themed_prompt='^[[:space:]]*➜[[:space:]]|git:\([^)]+\)[[:space:]]*[✗✔✓±]?[[:space:]]*$|❯[[:space:]]*$'
   if grep -qE "$idle_home_chrome" <<<"$TAIL" \
-     || grep -qE '^[[:space:]]*[$%❯][[:space:]]*$' <<<"$TAIL_BOTTOM"; then
+     || grep -qE '^[[:space:]]*[$%❯][[:space:]]*$' <<<"$TAIL_BOTTOM" \
+     || grep -qE "$themed_prompt" <<<"$TAIL_BOTTOM"; then
     echo "idle"
     return 0
   fi
