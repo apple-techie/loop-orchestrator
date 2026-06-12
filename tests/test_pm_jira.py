@@ -619,7 +619,8 @@ def test_complete_sprint_checks_active_then_closes(jira_env):
     assert closed["state"] == "closed"
     method, url, body = transport.writes()[0]
     assert method == "PUT" and url.endswith("/rest/agile/1.0/sprint/8")
-    assert json.loads(body) == {"state": "closed"}
+    # Jira requires name on the close PUT too — preserve the fetched name.
+    assert json.loads(body) == {"name": "Sprint 13", "state": "closed"}
 
 
 def test_complete_sprint_not_active_is_clean_error_no_write(jira_env):

@@ -352,7 +352,13 @@ class JiraAdapter(PMAdapter):
                 f"sprint {sprint_id} ({name}) is not active (state: {state or 'unknown'}) "
                 "— only an active sprint can be completed"
             )
-        return self._request("PUT", f"/rest/agile/1.0/sprint/{sprint_id}", body={"state": "closed"})
+        # Jira requires `name` on any sprint-update PUT, including the close —
+        # preserve the name we already fetched (a bare {state} PUT 400s).
+        return self._request(
+            "PUT",
+            f"/rest/agile/1.0/sprint/{sprint_id}",
+            body={"name": sprint.get("name"), "state": "closed"},
+        )
 
     def add_comment(self, issue_key: str, text: str) -> None:
         self._request(
