@@ -248,10 +248,18 @@ fi
 
 case "$MODE" in
   command)
-    # -l/-- sends the payload as literal text, so a command that happens to be
-    # a tmux key name (e.g. "Enter", "Up", "C-c") is typed rather than fired as
-    # a keystroke. Enter is sent separately in the PRESS_ENTER block below.
-    tmux send-keys -t "$TARGET" -l -- "$PAYLOAD"
+    # Run the payload via a temp SCRIPT FILE rather than typing it into the
+    # shell as literal keystrokes. Pasting a payload directly is fragile: an
+    # unbalanced quote or apostrophe (common when a brain composes a quoted
+    # `bash -lc '...'` one-liner, or mixes prose with a command) leaves the
+    # shell stuck at a `quote>` continuation and the command never runs — a
+    # SILENT hang the caller can't distinguish from "still working". Writing
+    # the payload to a file and typing only a fixed `bash <file>` line makes
+    # the keystrokes immune to the payload's own content; the mktemp path has
+    # no shell-special chars, so the typed line is always safe.
+    cmd_file="$(mktemp "${TMPDIR:-/tmp}/loop-dispatch-cmd.XXXXXX")"
+    printf '%s\n' "$PAYLOAD" > "$cmd_file"
+    tmux send-keys -t "$TARGET" -l -- "bash '$cmd_file'; rm -f '$cmd_file'"
     ;;
   text)
     # Use a named, per-dispatch buffer. tmux's unnamed buffer is shared
