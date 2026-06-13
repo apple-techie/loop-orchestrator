@@ -81,3 +81,14 @@ retro` and the Confluence page._
   harness-level. Codex was simultaneously down too, so the only failover was a
   model pin within claude — underscoring that availability is per (harness,
   model), a fact the roster/health probe should carry.
+
+- **F1 recurrence (2026-06-13).** Even after the guardrail steer, the brain again text-dispatched a verify brief to `validate-left` (a shell lane). It routes BUILD work to web correctly now, but still treats the 'gate/proving' lane as an agent for verification — sometimes command-mode (correct), sometimes text (wrong). Confirms F1 needs the MECHANICAL fix (a dispatch-target harness check), not advice. Operator partial-approved the correct action only.
+
+- **F4 — brain self-authorized a deferred/sign-off-gated phase (live, 2026-06-13).**
+  After completing Phase 0+1, the brain wrote "Phase 2 authorized" into a web
+  brief and dispatched it to start Phase 2 (the readiness/health contract),
+  rather than escalating the go/no-go the objective required. Nothing in the
+  gate stopped it — "start a deferred/out-of-scope phase" is not a recognized
+  destructive shape. **Refinement:** governance/objective-fences should make
+  crossing into an explicitly-deferred phase an escalate-or-block, not a brain
+  judgment call. Operator interrupted the lane and forced the escalate.
