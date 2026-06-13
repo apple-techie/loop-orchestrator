@@ -93,16 +93,49 @@ retro` and the Confluence page._
   crossing into an explicitly-deferred phase an escalate-or-block, not a brain
   judgment call. Operator interrupted the lane and forced the escalate.
 
-## Sprint: "Govern P2 — readiness/health" (green-lit 2026-06-13)
+## Sprint: "Govern P2 — readiness/health" (COMPLETE 2026-06-13)
 Goal: the per-harness readiness/health contract + the dispatch-target (F1) and
 model-availability (F3) governance gaps. Additive; frozen status output.
 
 | Issue | Title | Status |
 |-------|-------|--------|
-| T0015 | harness-aware lane readiness markers | open |
-| T0016 | real health probe + health-aware wait_ready | open |
-| T0017 | F1 — validate dispatch/steer targets are agent lanes | open |
-| T0018 | F3 — model-unavailable failure kind + model failover | open |
+| T0015 | harness-aware lane readiness markers | done |
+| T0016 | real health probe + health-aware wait_ready | done |
+| T0017 | F1 — validate dispatch/steer targets are agent lanes | done |
+| T0018 | F3 — model-unavailable failure kind + model failover | done |
+
+**Completion (2026-06-13):** all four done, gate 414/0. Merged to `main` in two
+batches (e705ae6 batch-1 = T0015+T0017; b79470b batch-2 = T0016+T0018);
+governance stays inert behind the empty `harness_policy`. T0015's
+`loop-lane-status.sh` was reconciled at merge with main's idle-footer hotfix:
+claude/codex `working_marker` now require an elapsed timer to co-occur with
+esc/tokens/thinking, because the bare "esc to interrupt" string false-positived
+Claude Code's idle composer footer and stalled the live loop.
+
+**Findings closed:** F1 + F1-recurrence → T0017 (dispatch-target gate). F3 →
+T0018 (model-unavailable kind + `model_failover` field). F4 → mitigated: the
+brain now escalates the phase boundary instead of self-authorizing (verified
+live at the Phase 2→3 handoff). F2 remains unrecoverable (noted above).
+
+## Sprint: "Govern P3 — operability + continuity" (green-lit 2026-06-13 via the operating-doctrine decision)
+Goal: close the operability/continuity gaps surfaced when reasoning about the
+whole system as a coherent workflow — make lane/agent provisioning a *governed*
+decision, name the standing-vs-worker distinction, and make continuity a code
+invariant rather than prose discipline. Operator decisions settled:
+demand-provisioning enforced as a **HARD gate rule**; `orchestrator-state.json`
+is the **canonical** work-state surface (checkpoint.md becomes its projection).
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| T0019 | standing:/worker declared lane field (base-lane protection + demand-provision substrate) | open |
+| T0020 | demand→provision→reuse→retire HarnessPolicy + HARD reuse-before-spawn gate (incl. role-vocab unify + activate policy) | open |
+| T0021 | orchestrator-state.json canonical; project checkpoint compiled-region FROM the ledger | open |
+| T0022 | decision-log retention in wiki.py (atomic rotate+archive) + hard token gate (durable fix for the 235KB checkpoint) | open |
+| T0023 | Phase-5 lane-handoff breadcrumb (## Handoff state + idle-gated drop_lane flush) | open |
+
+Operator config step (not a build): activate a starter `engine.harness_policy`
+in ooLEO + govern lane-configs so T0017's dispatch-target gate goes LIVE (it is
+inert today — empty policy). Lands with T0020's role-vocabulary unification.
 
 (Migration map unchanged — when Jira is added these replay as a new epic +
 sprint via the loop-pm jira verbs; task files are the source of truth.)
