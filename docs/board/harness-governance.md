@@ -43,3 +43,15 @@ mirror would have transitioned issues.
 _Filled at sprint completion, in the Start doing / Stop doing / Keep doing /
 Action items format — the same body that would be posted via `loop-pm jira
 retro` and the Confluence page._
+
+## Findings (from dogfooding this build)
+- **F1 — dispatch-target governance gap (live, 2026-06-13).** The brain
+  dispatched an agent ingest brief to the `docs` SHELL lane; nothing stopped it
+  (the gate is harness-blind) and manual approval didn't catch it; it errored
+  in zsh and did nothing. There is a *convention* ("only dispatch to agent
+  lanes") but no *enforcement*. **Refinement for T0013/Phase 2:** governance
+  must validate **dispatch/steer TARGETS** (is the target lane's harness an
+  agent that can act on a brief?), not only the `add_lane` harness *choice*. A
+  `mode:text` dispatch to a non-agent (shell) lane should classify DESTRUCTIVE
+  or BLOCKED, and a health-aware `wait_ready` should refuse to paste an agent
+  brief into a shell lane. This is the build motivating its own next test.
