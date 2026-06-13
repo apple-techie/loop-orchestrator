@@ -68,6 +68,22 @@ class LintConfig:
 
 
 @dataclass(frozen=True)
+class HarnessPolicy:
+    """Harness governance policy (harness-governance plan A.1).
+
+    Facts live in lib/harness-registry.sh (capability_tags, cost_tier,
+    autonomy_class, ...); this is the policy layer the gate enforces.
+    The empty policy is a strict pass-through — today's behavior.
+    """
+
+    allow: list[str] = field(default_factory=list)  # empty = every harness allowed
+    deny: list[str] = field(default_factory=list)  # deny wins over allow
+    cost_ceiling: str = ""  # max registry cost_tier (low|medium|high); "" = no ceiling
+    autonomy_cap: str = ""  # max registry autonomy_class (none|attended|unattended); "" = no cap
+    role_tag_map: dict[str, list[str]] = field(default_factory=dict)  # role -> capability tags
+
+
+@dataclass(frozen=True)
 class EngineConfig:
     brain: BrainConfig = field(default_factory=BrainConfig)
     approval_mode: str = "manual"  # manual | auto | full
@@ -79,6 +95,7 @@ class EngineConfig:
     pm: PmConfig = field(default_factory=PmConfig)
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     lint: LintConfig = field(default_factory=LintConfig)
+    harness_policy: HarnessPolicy = field(default_factory=HarnessPolicy)
 
 
 def _merge(cls: type, data: object):
