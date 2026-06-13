@@ -360,6 +360,7 @@ def _file_needs_human(
     approval: str,
     error: DecisionError,
     raw_text: str,
+    keep: int = wiki.DEFAULT_KEEP_DECISIONS,
 ) -> int:
     summary = f"brain reply unusable after corrective re-prompt: {error}"
     stub = decision_mod.Decision(
@@ -374,7 +375,7 @@ def _file_needs_human(
     _persist(paths, doc)
     events.append("decision-parse-error", id=doc["id"], error=str(error))
     events.append("escalate", summary=summary)
-    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc))
+    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc), keep=keep)
     print(f"decision {doc['id']} needs a human: {error}")
     events.append("cycle-end", outcome="needs-human")
     return 4
@@ -488,7 +489,9 @@ def run_once(
         try:
             parsed = decision_mod.parse_and_validate(reply, live_lanes)
         except DecisionError as second_error:
-            return _file_needs_human(paths, events, approval, second_error, reply)
+            return _file_needs_human(
+                paths, events, approval, second_error, reply, keep=config.checkpoint.keep_decisions
+            )
 
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
     governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)
@@ -539,6 +542,10 @@ def run_once(
     if pm_adapters:  # after action execution (and in the no-actions path)
         _pm_sync(pm_adapters, "push", paths.tasks_dir, events)
 
-    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc))
+    wiki.file_decision(
+        paths.checkpoint_page,
+        wiki.render_decision_entry(doc),
+        keep=config.checkpoint.keep_decisions,
+    )
     events.append("cycle-end", outcome="pending" if awaiting else "resolved")
     return 0

@@ -15,6 +15,12 @@ HEADER_FILE=""
 MODE=""
 LANE="coord"
 TOKEN_WARN_LIMIT=24000
+# Hard ceiling (T0022): above this, refuse to emit the prompt (exit non-zero)
+# rather than feed a runaway checkpoint to coord. Configurable via
+# --token-ceiling or $LOOP_CHECKPOINT_TOKEN_CEILING; defaults to 2x the warn
+# budget so it backstops genuine runaway while in-band drift only warns. The
+# decision-log rotation (wiki.py) keeps the steady state well under this.
+TOKEN_HARD_LIMIT="${LOOP_CHECKPOINT_TOKEN_CEILING:-48000}"
 
 # Resolve this script's real directory (symlink-aware) so the sibling
 # loop-wiki-pending.sh and the default project root (this script's
@@ -54,11 +60,15 @@ Options:
                         of checkpoint.md writes and dispatches)
   --project-root <path> Repo root containing ops-wiki/ and .loop/
                         default: this script's parent-of-parent directory
+  --token-ceiling <n>   Hard ceiling on the bytes/4 token estimate; over it the
+                        script refuses to emit (exit 3). Default 48000, or
+                        $LOOP_CHECKPOINT_TOKEN_CEILING.
   -h, --help            Show this help
 
 The assembled prompt's byte count and approximate token count (bytes/4) are
 printed to STDERR so size drift stays visible without polluting --print
-output; a warning is emitted if the prompt exceeds 24000 tokens.
+output; a warning is emitted past 24000 tokens and the prompt is REFUSED
+(exit 3) past the hard ceiling (--token-ceiling, default 48000).
 EOF
 }
 
@@ -84,6 +94,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --header-file)  HEADER_FILE="$2"; shift 2 ;;
     --project-root) PROJECT_ROOT="$2"; shift 2 ;;
+    --token-ceiling) TOKEN_HARD_LIMIT="$2"; shift 2 ;;
     -h|--help)      usage; exit 0 ;;
     --*)
       echo "Unknown option: $1" >&2
@@ -166,6 +177,13 @@ TOKEN_COUNT=$(( BYTE_COUNT / 4 ))
 echo "prompt size: ${BYTE_COUNT} bytes (~${TOKEN_COUNT} tokens, bytes/4)" >&2
 if [[ "$TOKEN_COUNT" -gt "$TOKEN_WARN_LIMIT" ]]; then
   echo "warning: assembled prompt ~${TOKEN_COUNT} tokens exceeds ${TOKEN_WARN_LIMIT} — compiled state is drifting; trim checkpoint.md/index.md" >&2
+fi
+# Hard gate (T0022): a prompt over the ceiling is refused, not emitted — a
+# runaway checkpoint must fail loudly, not silently feed coord a bloated boot
+# context. Configurable via --token-ceiling / LOOP_CHECKPOINT_TOKEN_CEILING.
+if [[ "$TOKEN_COUNT" -gt "$TOKEN_HARD_LIMIT" ]]; then
+  echo "error: assembled prompt ~${TOKEN_COUNT} tokens exceeds the hard ceiling ${TOKEN_HARD_LIMIT} — refusing to emit a runaway checkpoint. Rotate ops-wiki/checkpoint.md (decision-log retention) or raise --token-ceiling / LOOP_CHECKPOINT_TOKEN_CEILING." >&2
+  exit 3
 fi
 
 # Resolve loop-dispatch: prefer the installed symlink on PATH (make install),

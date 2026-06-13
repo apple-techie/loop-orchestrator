@@ -68,6 +68,14 @@ class LintConfig:
 
 
 @dataclass(frozen=True)
+class CheckpointConfig:
+    # Decision-log retention (T0022): file_decision keeps the last N decision
+    # entries below the coord-decisions marker and rotates the overflow into
+    # ops-wiki/decisions-archive.md, so the boot checkpoint stays bounded.
+    keep_decisions: int = 10
+
+
+@dataclass(frozen=True)
 class HarnessPolicy:
     """Harness governance policy (harness-governance plan A.1).
 
@@ -103,6 +111,7 @@ class EngineConfig:
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     lint: LintConfig = field(default_factory=LintConfig)
     harness_policy: HarnessPolicy = field(default_factory=HarnessPolicy)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
 
 
 def _merge(cls: type, data: object):

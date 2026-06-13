@@ -158,6 +158,15 @@ engine:
     assert load_config(tmp_path).harness_policy.brain_allow == ["claude", "codex"]
 
 
+def test_checkpoint_keep_decisions_default_and_parsed(tmp_path):
+    # default decision-log retention (T0022)
+    assert EngineConfig().checkpoint.keep_decisions == 10
+    (tmp_path / "lane-config.yaml").write_text(
+        "engine:\n  checkpoint:\n    keep_decisions: 25\n", encoding="utf-8"
+    )
+    assert load_config(tmp_path).checkpoint.keep_decisions == 25
+
+
 def test_harness_policy_partial_keeps_defaults(tmp_path):
     (tmp_path / "lane-config.yaml").write_text(
         """

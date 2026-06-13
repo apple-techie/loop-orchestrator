@@ -10,11 +10,16 @@ optimistically: re-stat before write, retry on mtime change (max 3).
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from pathlib import Path
 
 MARKER = "<!-- coord-decisions -->"
 _MAX_ATTEMPTS = 3
+# Default decision entries kept below the marker before rotation (T0022); the
+# overflow goes to the decisions archive. Configurable via EngineConfig.
+DEFAULT_KEEP_DECISIONS = 10
+_ENTRY_RE = re.compile(r"(?m)^### ")
 
 
 def _mtime_ns(path: Path) -> int | None:
@@ -49,12 +54,62 @@ def _write_replace(path: Path, content: str) -> None:
         raise
 
 
-def file_decision(checkpoint_page: Path, entry_markdown: str) -> None:
-    """Append entry_markdown below the coord-decisions marker.
+def _rotate(content: str, keep: int) -> tuple[str, str]:
+    """Keep only the last `keep` decision entries below the marker; return
+    (kept_content, overflow_markdown). A decision entry is a block starting with
+    a '### ' line. Content above the marker, the marker line, and any preamble
+    before the first entry are preserved byte-for-byte, and entries are split on
+    their '### ' boundary so a partial entry is never created. No overflow and
+    byte-identical content when keep < 1, the marker is absent, or there are
+    <= keep entries — so rotation is inert until the log exceeds N."""
+    if keep < 1 or MARKER not in content:
+        return content, ""
+    marker_nl = content.find("\n", content.find(MARKER))
+    if marker_nl == -1:
+        return content, ""
+    head, tail = content[: marker_nl + 1], content[marker_nl + 1 :]
+    starts = [m.start() for m in _ENTRY_RE.finditer(tail)]
+    if len(starts) <= keep:
+        return content, ""
+    preamble = tail[: starts[0]]
+    bounds = starts + [len(tail)]
+    entries = [tail[bounds[i] : bounds[i + 1]] for i in range(len(starts))]
+    cut = len(entries) - keep
+    return head + preamble + "".join(entries[cut:]), "".join(entries[:cut])
+
+
+def _append_archive(archive_page: Path, overflow_markdown: str) -> None:
+    """Atomically append rotated-out entries to the decisions archive (full
+    read+rewrite via os.replace, so a crash never leaves a partial entry)."""
+    if not overflow_markdown:
+        return
+    try:
+        existing = archive_page.read_text(encoding="utf-8")
+    except OSError:
+        existing = ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    if not overflow_markdown.endswith("\n"):
+        overflow_markdown += "\n"
+    _write_replace(archive_page, existing + overflow_markdown)
+
+
+def file_decision(
+    checkpoint_page: Path,
+    entry_markdown: str,
+    keep: int = DEFAULT_KEEP_DECISIONS,
+    archive_page: Path | None = None,
+) -> None:
+    """Append entry_markdown below the coord-decisions marker, retaining only the
+    last `keep` decision entries and rotating the overflow into the decisions
+    archive (default: <checkpoint dir>/decisions-archive.md) — all inside the
+    existing mtime-guarded atomic write, so the boot checkpoint stays bounded.
 
     Missing file or missing marker: the marker line is created at EOF first.
     Raises RuntimeError if the page keeps changing under us for 3 attempts.
     """
+    if archive_page is None:
+        archive_page = checkpoint_page.parent / "decisions-archive.md"
     for _attempt in range(_MAX_ATTEMPTS):
         before = _mtime_ns(checkpoint_page)
         if before is None:
@@ -64,10 +119,14 @@ def file_decision(checkpoint_page: Path, entry_markdown: str) -> None:
                 content = checkpoint_page.read_text(encoding="utf-8")
             except OSError:
                 continue  # deleted between stat and read — retry
-        new_content = _compose(content, entry_markdown)
+        kept_content, overflow = _rotate(_compose(content, entry_markdown), keep)
         if _mtime_ns(checkpoint_page) != before:
             continue  # concurrent writer (docs recompile) — re-read and retry
-        _write_replace(checkpoint_page, new_content)
+        # Archive BEFORE replacing the checkpoint: if the second write fails the
+        # overflow survives in the archive AND the un-rotated checkpoint
+        # (duplicated on the next rotation, never lost).
+        _append_archive(archive_page, overflow)
+        _write_replace(checkpoint_page, kept_content)
         return
     raise RuntimeError(
         f"{checkpoint_page}: page changed during {_MAX_ATTEMPTS} write attempts; giving up"

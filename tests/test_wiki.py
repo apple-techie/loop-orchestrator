@@ -66,6 +66,74 @@ def test_mtime_conflict_exhausts_retries(tmp_path, monkeypatch):
     assert page.read_text(encoding="utf-8") == COMPILED + MARKER + "\n"  # untouched
 
 
+def _entry(i: str, body: str = "") -> str:
+    head = f"### [t{i}] decision d-{i} (approved)\n"
+    if not body:
+        return head
+    return head + (body if body.endswith("\n") else body + "\n")
+
+
+def test_rotation_keeps_last_n_and_archives_overflow(tmp_path):
+    import re
+
+    page = tmp_path / "checkpoint.md"
+    archive = tmp_path / "decisions-archive.md"
+    page.write_text(COMPILED + MARKER + "\n", encoding="utf-8")
+    for i in range(5):
+        file_decision(page, _entry(str(i), f"body {i}"), keep=3)
+    content = page.read_text(encoding="utf-8")
+    assert re.findall(r"decision (d-\d)", content) == ["d-2", "d-3", "d-4"]  # last 3
+    assert content.startswith(COMPILED + MARKER)  # above + marker byte-for-byte
+    arch = archive.read_text(encoding="utf-8")
+    assert "d-0" in arch and "d-1" in arch  # overflow archived
+    assert "d-2" not in arch  # kept entries are not also archived
+
+
+def test_rotation_no_op_below_n_writes_no_archive(tmp_path):
+    page = tmp_path / "checkpoint.md"
+    page.write_text(COMPILED + MARKER + "\n", encoding="utf-8")
+    for i in range(3):
+        file_decision(page, _entry(str(i)), keep=10)
+    assert not (tmp_path / "decisions-archive.md").exists()
+    assert all(f"d-{i}" in page.read_text(encoding="utf-8") for i in range(3))
+
+
+def test_rotation_preserves_marker_and_preamble(tmp_path):
+    page = tmp_path / "checkpoint.md"
+    page.write_text(COMPILED + MARKER + "\n## Decision needed\n(none)\n", encoding="utf-8")
+    for i in range(4):
+        file_decision(page, _entry(str(i)), keep=2)
+    content = page.read_text(encoding="utf-8")
+    assert MARKER in content
+    assert "## Decision needed\n(none)" in content  # preamble preserved...
+    # ...and never rotated into the archive
+    assert "(none)" not in (tmp_path / "decisions-archive.md").read_text(encoding="utf-8")
+
+
+def test_rotation_steady_state_archives_one_at_a_time(tmp_path):
+    import re
+
+    page = tmp_path / "checkpoint.md"
+    page.write_text(COMPILED + MARKER + "\n", encoding="utf-8")
+    for i in range(3):
+        file_decision(page, _entry(str(i)), keep=3)
+    assert not (tmp_path / "decisions-archive.md").exists()  # exactly N: nothing yet
+    file_decision(page, _entry("3"), keep=3)  # N+1 -> rotate one
+    assert re.findall(r"decision (d-\d)", page.read_text(encoding="utf-8")) == ["d-1", "d-2", "d-3"]
+
+
+def test_rotation_never_splits_a_partial_entry(tmp_path):
+    page = tmp_path / "checkpoint.md"
+    page.write_text(COMPILED + MARKER + "\n", encoding="utf-8")
+    file_decision(page, "### [t0] decision d-0 (approved)\nline a\nline b\nline c\n", keep=1)
+    file_decision(page, "### [t1] decision d-1 (approved)\nonly\n", keep=1)
+    archive = (tmp_path / "decisions-archive.md").read_text(encoding="utf-8")
+    # the whole multi-line d-0 block rotated out intact, not truncated.
+    assert "### [t0] decision d-0 (approved)\nline a\nline b\nline c\n" in archive
+    content = page.read_text(encoding="utf-8")
+    assert "d-1" in content and "d-0" not in content
+
+
 def test_render_decision_entry():
     doc = {
         "id": "d-20260610-120000",
