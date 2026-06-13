@@ -111,6 +111,24 @@ def test_harness_registry(sub, call_log):
         sub.oneshot_template("pi")
 
 
+def test_harness_roster_unstubbed_is_empty(sub, call_log):
+    assert sub.harness_roster() == {}
+    assert call_log() == ["harness-registry roster --json"]
+
+
+def test_harness_roster_parses_entries(sub, monkeypatch):
+    monkeypatch.setenv(
+        "FAKE_ROSTER_JSON",
+        '{"contract_version": 1, "harnesses": ['
+        '{"name": "claude", "present": true, "drift_pins": "low"},'
+        '{"name": "amp", "present": false, "drift_pins": "high"}]}',
+    )
+    roster = sub.harness_roster()
+    assert set(roster) == {"claude", "amp"}
+    assert roster["claude"]["present"] is True
+    assert roster["amp"]["drift_pins"] == "high"
+
+
 def test_dispatch_argv_order(sub, call_log):
     sub.dispatch("web", "echo hi", wait_ready=True, interrupt=True)
     sub.dispatch("docs", "hello", mode="command")

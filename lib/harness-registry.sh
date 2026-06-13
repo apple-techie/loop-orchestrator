@@ -20,6 +20,38 @@
 #                         Callers shlex-split the template and substitute the
 #                         {prompt} token as ONE argument (never shell-interp).
 #
+# Governance fields (harness-governance plan A.1/A.3 — declared FACTS only;
+# policy lives in the engine's HarnessPolicy). All empty-safe: harness_field
+# returns "" for any unset value, so partial registries degrade to today's
+# behavior:
+#   capability_tags       Comma-separated capability tags ("code,brain",
+#                         "search,research", ...) matched against the
+#                         engine policy's role_tag_map
+#   cost_tier             Relative model cost: low | medium | high | none
+#   autonomy_class        Unattended capability, ordered for the policy's
+#                         autonomy cap: none < attended < unattended
+#                         (unattended = has a real auto_approve_flag)
+#   auth_requirement      What must be live beyond the binary on PATH:
+#                         account | gateway | none
+#   health_probe          Auth/gateway probe command ("" = none declared;
+#                         health degrades to the PATH check)
+#   drift_pins            Behavioral drift tier vs the claude baseline:
+#                         low | med | high | none (matrix A.3 Drift column)
+#
+# Readiness fields (harness-governance Phase 2 — declared readiness markers
+# that loop-lane-status.sh PREFERS over its built-in heuristics when a lane's
+# @loop_lane_harness is set, falling back to the heuristics otherwise). Both
+# empty-safe (unset = "" = heuristics only) and matched as EXTENDED regexes
+# against the FULL captured pane tail, so they must be LIVE-only / persistent
+# home-chrome signals — never past-tense recaps or scrollback-stale prompts
+# (bare/themed shell prompts stay on the heuristic's bottom-slice path):
+#   working_marker        Regex that is present ONLY while the harness is
+#                         actively generating (e.g. "esc to interrupt", a
+#                         braille spinner). "" = use the working heuristic.
+#   idle_marker           Regex for the harness's persistent idle home-chrome
+#                         (e.g. claude's "accept edits on"). "" = use the idle
+#                         heuristic (home-chrome default + bare/themed prompts).
+#
 # Source this file from any script that needs to resolve harness behavior:
 #   source "$PROJECT_ROOT/scripts/lib/harness-registry.sh"
 #   harness_field pi launch_cmd        # -> "pi"
@@ -31,6 +63,8 @@
 #   harness-registry.sh field <name> <field>          # print one field
 #   harness-registry.sh oneshot <name>                # print one-shot command template
 #   harness-registry.sh probe <name>                  # verify binary exists, print resolved launch
+#   harness-registry.sh roster [--json]               # every harness + governance fields + present flag
+#   harness-registry.sh health <name>                 # ok | missing | unauthenticated | unhealthy
 #
 # This file MUST be POSIX-bash compatible (no zsh-isms) so it sources cleanly
 # under tmux-spawned shells.
@@ -54,6 +88,14 @@ HARNESS_PI_PASTE_ENTER_DELAY="2.0"
 HARNESS_PI_SKILL_DIR=".pi/skills"
 HARNESS_PI_NON_INTERACTIVE_FLAG=""
 HARNESS_PI_ONESHOT_TEMPLATE=""
+HARNESS_PI_CAPABILITY_TAGS="product,synthesis"
+HARNESS_PI_COST_TIER="medium"
+HARNESS_PI_AUTONOMY_CLASS="attended"
+HARNESS_PI_AUTH_REQUIREMENT="account"
+HARNESS_PI_HEALTH_PROBE=""
+HARNESS_PI_DRIFT_PINS="med"
+HARNESS_PI_WORKING_MARKER="esc to interrupt|^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
+HARNESS_PI_IDLE_MARKER=""
 
 # claude — Anthropic's Claude Code CLI. Anthropic-only models.
 # launch_cmd is the bare invocation; consumers append auto_approve_flag
@@ -66,6 +108,14 @@ HARNESS_CLAUDE_PASTE_ENTER_DELAY="2.0"
 HARNESS_CLAUDE_SKILL_DIR=".claude/skills"
 HARNESS_CLAUDE_NON_INTERACTIVE_FLAG="-p"
 HARNESS_CLAUDE_ONESHOT_TEMPLATE="claude -p {prompt}"
+HARNESS_CLAUDE_CAPABILITY_TAGS="brain,ingest,code,ops"
+HARNESS_CLAUDE_COST_TIER="high"
+HARNESS_CLAUDE_AUTONOMY_CLASS="unattended"
+HARNESS_CLAUDE_AUTH_REQUIREMENT="account"
+HARNESS_CLAUDE_HEALTH_PROBE=""
+HARNESS_CLAUDE_DRIFT_PINS="low"
+HARNESS_CLAUDE_WORKING_MARKER="\([0-9][0-9 hms]*[hms].*(esc to interrupt|tokens|thinking)|(esc to interrupt|tokens|thinking).*\([0-9][0-9 hms]*[hms]"
+HARNESS_CLAUDE_IDLE_MARKER="accept edits on|bypass permissions on"
 
 # opencode — OpenCode Go TUI. Models via opencode-go provider (mimo/glm/kimi/qwen).
 # May spawn as "node" or "opencode" depending on launch path; regex covers both.
@@ -77,6 +127,14 @@ HARNESS_OPENCODE_PASTE_ENTER_DELAY="2.5"
 HARNESS_OPENCODE_SKILL_DIR=".config/opencode"
 HARNESS_OPENCODE_NON_INTERACTIVE_FLAG="run"
 HARNESS_OPENCODE_ONESHOT_TEMPLATE="opencode run {prompt}"
+HARNESS_OPENCODE_CAPABILITY_TAGS="code,bulk"
+HARNESS_OPENCODE_COST_TIER="low"
+HARNESS_OPENCODE_AUTONOMY_CLASS="attended"
+HARNESS_OPENCODE_AUTH_REQUIREMENT="account"
+HARNESS_OPENCODE_HEALTH_PROBE=""
+HARNESS_OPENCODE_DRIFT_PINS="med"
+HARNESS_OPENCODE_WORKING_MARKER=""
+HARNESS_OPENCODE_IDLE_MARKER=""
 
 # codex — Codex CLI. Models via --config model=<id> override.
 HARNESS_CODEX_LAUNCH_CMD="codex"
@@ -89,6 +147,14 @@ HARNESS_CODEX_PASTE_ENTER_DELAY="2.0"
 HARNESS_CODEX_SKILL_DIR=".codex"
 HARNESS_CODEX_NON_INTERACTIVE_FLAG="exec"
 HARNESS_CODEX_ONESHOT_TEMPLATE="codex exec {prompt}"
+HARNESS_CODEX_CAPABILITY_TAGS="code,brain"
+HARNESS_CODEX_COST_TIER="high"
+HARNESS_CODEX_AUTONOMY_CLASS="unattended"
+HARNESS_CODEX_AUTH_REQUIREMENT="account"
+HARNESS_CODEX_HEALTH_PROBE=""
+HARNESS_CODEX_DRIFT_PINS="high"
+HARNESS_CODEX_WORKING_MARKER="\([0-9][0-9 hms]*[hms].*(esc to interrupt|tokens|thinking)|(esc to interrupt|tokens|thinking).*\([0-9][0-9 hms]*[hms]"
+HARNESS_CODEX_IDLE_MARKER=""
 
 # cursor-agent — Cursor Agent CLI. Models via --model flag.
 HARNESS_CURSOR_AGENT_LAUNCH_CMD="cursor-agent"
@@ -99,6 +165,14 @@ HARNESS_CURSOR_AGENT_PASTE_ENTER_DELAY="2.0"
 HARNESS_CURSOR_AGENT_SKILL_DIR=""
 HARNESS_CURSOR_AGENT_NON_INTERACTIVE_FLAG="-p"
 HARNESS_CURSOR_AGENT_ONESHOT_TEMPLATE="cursor-agent -p {prompt}"
+HARNESS_CURSOR_AGENT_CAPABILITY_TAGS="code"
+HARNESS_CURSOR_AGENT_COST_TIER="medium"
+HARNESS_CURSOR_AGENT_AUTONOMY_CLASS="attended"
+HARNESS_CURSOR_AGENT_AUTH_REQUIREMENT="account"
+HARNESS_CURSOR_AGENT_HEALTH_PROBE=""
+HARNESS_CURSOR_AGENT_DRIFT_PINS="med"
+HARNESS_CURSOR_AGENT_WORKING_MARKER=""
+HARNESS_CURSOR_AGENT_IDLE_MARKER=""
 
 # hermes — Hermes Agent (NousResearch fork). Python argparse CLI.
 # Interactive: `hermes chat --tui` (accepts -m/--model and --yolo).
@@ -111,6 +185,14 @@ HARNESS_HERMES_PASTE_ENTER_DELAY="2.0"
 HARNESS_HERMES_SKILL_DIR=".hermes/skills"
 HARNESS_HERMES_NON_INTERACTIVE_FLAG="-z"
 HARNESS_HERMES_ONESHOT_TEMPLATE="hermes -z {prompt}"
+HARNESS_HERMES_CAPABILITY_TAGS="code,experiment"
+HARNESS_HERMES_COST_TIER="medium"
+HARNESS_HERMES_AUTONOMY_CLASS="unattended"
+HARNESS_HERMES_AUTH_REQUIREMENT="account"
+HARNESS_HERMES_HEALTH_PROBE=""
+HARNESS_HERMES_DRIFT_PINS="high"
+HARNESS_HERMES_WORKING_MARKER=""
+HARNESS_HERMES_IDLE_MARKER=""
 
 # droid — Factory's coding agent. Interactive `droid`; model + autonomy
 # (--auto low|medium|high) are exec-only flags, so the interactive lane reads
@@ -123,6 +205,14 @@ HARNESS_DROID_PASTE_ENTER_DELAY="2.0"
 HARNESS_DROID_SKILL_DIR=""
 HARNESS_DROID_NON_INTERACTIVE_FLAG="exec"
 HARNESS_DROID_ONESHOT_TEMPLATE="droid exec {prompt}"
+HARNESS_DROID_CAPABILITY_TAGS="code"
+HARNESS_DROID_COST_TIER="medium"
+HARNESS_DROID_AUTONOMY_CLASS="attended"
+HARNESS_DROID_AUTH_REQUIREMENT="account"
+HARNESS_DROID_HEALTH_PROBE=""
+HARNESS_DROID_DRIFT_PINS="med"
+HARNESS_DROID_WORKING_MARKER=""
+HARNESS_DROID_IDLE_MARKER=""
 
 # forge — Forge agent CLI (Rust). Interactive by default; model/agent selected
 # via `forge config`/agent (model_flag=config). One-shot is `forge -p <prompt>`.
@@ -134,6 +224,14 @@ HARNESS_FORGE_PASTE_ENTER_DELAY="2.0"
 HARNESS_FORGE_SKILL_DIR=""
 HARNESS_FORGE_NON_INTERACTIVE_FLAG="-p"
 HARNESS_FORGE_ONESHOT_TEMPLATE="forge -p {prompt}"
+HARNESS_FORGE_CAPABILITY_TAGS="code"
+HARNESS_FORGE_COST_TIER="low"
+HARNESS_FORGE_AUTONOMY_CLASS="attended"
+HARNESS_FORGE_AUTH_REQUIREMENT="account"
+HARNESS_FORGE_HEALTH_PROBE=""
+HARNESS_FORGE_DRIFT_PINS="med"
+HARNESS_FORGE_WORKING_MARKER=""
+HARNESS_FORGE_IDLE_MARKER=""
 
 # amp — Sourcegraph Amp. Auto-selects models via --mode (no model id), so
 # model_flag=skip. Auto-approve is --dangerously-allow-all; one-shot is `amp -x`.
@@ -145,6 +243,14 @@ HARNESS_AMP_PASTE_ENTER_DELAY="2.0"
 HARNESS_AMP_SKILL_DIR=""
 HARNESS_AMP_NON_INTERACTIVE_FLAG="-x"
 HARNESS_AMP_ONESHOT_TEMPLATE="amp -x {prompt}"
+HARNESS_AMP_CAPABILITY_TAGS="search,research"
+HARNESS_AMP_COST_TIER="high"
+HARNESS_AMP_AUTONOMY_CLASS="unattended"
+HARNESS_AMP_AUTH_REQUIREMENT="account"
+HARNESS_AMP_HEALTH_PROBE=""
+HARNESS_AMP_DRIFT_PINS="high"
+HARNESS_AMP_WORKING_MARKER=""
+HARNESS_AMP_IDLE_MARKER=""
 
 # openclaw — OpenClaw gateway runtime. The interactive entrypoint is
 # `openclaw tui` (a terminal UI to the running Gateway). Model + approvals are
@@ -157,6 +263,14 @@ HARNESS_OPENCLAW_PASTE_ENTER_DELAY="2.5"
 HARNESS_OPENCLAW_SKILL_DIR=""
 HARNESS_OPENCLAW_NON_INTERACTIVE_FLAG="agent"
 HARNESS_OPENCLAW_ONESHOT_TEMPLATE="openclaw agent --message {prompt}"
+HARNESS_OPENCLAW_CAPABILITY_TAGS="ops,fleet"
+HARNESS_OPENCLAW_COST_TIER="medium"
+HARNESS_OPENCLAW_AUTONOMY_CLASS="attended"
+HARNESS_OPENCLAW_AUTH_REQUIREMENT="gateway"
+HARNESS_OPENCLAW_HEALTH_PROBE=""
+HARNESS_OPENCLAW_DRIFT_PINS="med"
+HARNESS_OPENCLAW_WORKING_MARKER=""
+HARNESS_OPENCLAW_IDLE_MARKER=""
 
 # mprocs — process-group dashboard. Not an LLM harness, but lanes can run it.
 HARNESS_MPROCS_LAUNCH_CMD="mprocs"
@@ -167,6 +281,14 @@ HARNESS_MPROCS_PASTE_ENTER_DELAY="0"
 HARNESS_MPROCS_SKILL_DIR=""
 HARNESS_MPROCS_NON_INTERACTIVE_FLAG=""
 HARNESS_MPROCS_ONESHOT_TEMPLATE=""
+HARNESS_MPROCS_CAPABILITY_TAGS="dashboard"
+HARNESS_MPROCS_COST_TIER="none"
+HARNESS_MPROCS_AUTONOMY_CLASS="none"
+HARNESS_MPROCS_AUTH_REQUIREMENT="none"
+HARNESS_MPROCS_HEALTH_PROBE=""
+HARNESS_MPROCS_DRIFT_PINS="none"
+HARNESS_MPROCS_WORKING_MARKER=""
+HARNESS_MPROCS_IDLE_MARKER=""
 
 # shell — bare shell lane (e.g. ops-top runs a watch command). No harness invocation.
 HARNESS_SHELL_LAUNCH_CMD=""
@@ -177,10 +299,18 @@ HARNESS_SHELL_PASTE_ENTER_DELAY="0"
 HARNESS_SHELL_SKILL_DIR=""
 HARNESS_SHELL_NON_INTERACTIVE_FLAG=""
 HARNESS_SHELL_ONESHOT_TEMPLATE=""
+HARNESS_SHELL_CAPABILITY_TAGS="probe,watch"
+HARNESS_SHELL_COST_TIER="none"
+HARNESS_SHELL_AUTONOMY_CLASS="none"
+HARNESS_SHELL_AUTH_REQUIREMENT="none"
+HARNESS_SHELL_HEALTH_PROBE=""
+HARNESS_SHELL_DRIFT_PINS="none"
+HARNESS_SHELL_WORKING_MARKER=""
+HARNESS_SHELL_IDLE_MARKER=""
 
 # Ordered list — order matters for `list` output.
 HARNESS_REGISTRY_NAMES=(pi claude opencode codex cursor-agent hermes droid forge amp openclaw mprocs shell)
-HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template)
+HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins working_marker idle_marker)
 
 # ─── Lookup helpers ──────────────────────────────────────────────────────
 
@@ -287,6 +417,52 @@ harness_resolve_launch() {
   esac
 }
 
+# harness_present <name> — exit 0 if the harness can spawn on this host:
+# its binary resolves on PATH, or it needs no binary at all (shell lanes).
+harness_present() {
+  local name="$1"
+  local launch
+  launch="$(harness_field "$name" launch_cmd)" || return 1
+  [[ -z "$launch" ]] && return 0
+  [[ -n "$(harness_binary_path "$name" 2>/dev/null)" ]]
+}
+
+# harness_health <name> — print exactly one of ok|missing|unauthenticated|
+# unhealthy on stdout (single-word, mirroring the lane-status contract style).
+# Exit 0 only for ok. Health beyond the PATH check comes from the harness's
+# declared health_probe command; with no probe declared ("" — the registry
+# default), health degrades to the PATH check, which is today's behavior.
+# A failing probe reads as unauthenticated when the harness declares an
+# account/gateway auth_requirement, unhealthy otherwise.
+harness_health() {
+  local name="$1"
+  if ! harness_known "$name"; then
+    echo "harness-registry: unknown harness '$name'" >&2
+    return 1
+  fi
+  if ! harness_present "$name"; then
+    echo "missing"
+    return 1
+  fi
+  local probe
+  probe="$(harness_field "$name" health_probe)"
+  if [[ -z "$probe" ]]; then
+    echo "ok"
+    return 0
+  fi
+  if bash -c "$probe" >/dev/null 2>&1; then
+    echo "ok"
+    return 0
+  fi
+  local auth
+  auth="$(harness_field "$name" auth_requirement)"
+  case "$auth" in
+    account|gateway) echo "unauthenticated" ;;
+    *) echo "unhealthy" ;;
+  esac
+  return 1
+}
+
 # ─── CLI mode ────────────────────────────────────────────────────────────
 # When invoked directly (not sourced), expose a small CLI for inspection.
 
@@ -358,6 +534,56 @@ _harness_registry_cli() {
       printf 'binary:            NOT FOUND on PATH\n' >&2
       return 1
       ;;
+    roster)
+      # Governance roster: every registered harness with its governance
+      # fields and a `present` flag (binary resolves on PATH, or no binary
+      # needed). Additive surface — probe/field/oneshot untouched.
+      local json=0
+      [[ "${1:-}" == "--json" ]] && json=1
+      local n present
+      if (( json )); then
+        printf '{\n  "contract_version": 1,\n  "harnesses": [\n'
+        local first=1
+        for n in "${HARNESS_REGISTRY_NAMES[@]}"; do
+          present=false
+          harness_present "$n" && present=true
+          (( first )) || printf ',\n'
+          first=0
+          # Registry values are static identifiers/short phrases (no quotes,
+          # backslashes, or newlines — oneshot_template carries spaces and a
+          # {prompt} token but no JSON metacharacters), so plain printf
+          # interpolation is JSON-safe here. oneshot_template is exposed so the
+          # engine gate can tell an agent lane (non-empty template) from a
+          # non-agent shell/dashboard lane (empty) — F1 dispatch-target check.
+          printf '    {"name": "%s", "present": %s, "capability_tags": "%s", "cost_tier": "%s", "autonomy_class": "%s", "auth_requirement": "%s", "health_probe": "%s", "drift_pins": "%s", "oneshot_template": "%s"}' \
+            "$n" "$present" \
+            "$(harness_field "$n" capability_tags)" \
+            "$(harness_field "$n" cost_tier)" \
+            "$(harness_field "$n" autonomy_class)" \
+            "$(harness_field "$n" auth_requirement)" \
+            "$(harness_field "$n" health_probe)" \
+            "$(harness_field "$n" drift_pins)" \
+            "$(harness_field "$n" oneshot_template)"
+        done
+        printf '\n  ]\n}\n'
+      else
+        for n in "${HARNESS_REGISTRY_NAMES[@]}"; do
+          present=missing
+          harness_present "$n" && present=present
+          printf '%-14s %-8s %-22s %-7s %-11s %-8s %s\n' \
+            "$n" "$present" \
+            "$(harness_field "$n" capability_tags)" \
+            "$(harness_field "$n" cost_tier)" \
+            "$(harness_field "$n" autonomy_class)" \
+            "$(harness_field "$n" auth_requirement)" \
+            "$(harness_field "$n" drift_pins)"
+        done
+      fi
+      ;;
+    health)
+      local name="${1:?usage: health <name>}"
+      harness_health "$name"
+      ;;
     -h|--help|help|"")
       cat <<'EOF'
 harness-registry — per-harness contract lookup
@@ -368,9 +594,11 @@ Usage:
   harness-registry.sh field  <name> <field>
   harness-registry.sh oneshot <name>
   harness-registry.sh probe  <name> [model]
+  harness-registry.sh roster [--json]
+  harness-registry.sh health <name>
 
 Known harnesses (see HARNESS_REGISTRY_NAMES): pi, claude, opencode, codex, cursor-agent, hermes, droid, forge, amp, openclaw, mprocs, shell
-Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template
+Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins working_marker idle_marker
 
 When sourced from another script, exposes:
   harness_known <name>

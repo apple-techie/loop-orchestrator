@@ -30,6 +30,27 @@
 # (add-lane) window; unresolvable fixed lanes are skipped, not errors.
 set -euo pipefail
 
+# Optional harness registry, for declared readiness markers (Phase 2). Resolve
+# this script's real directory (symlink-aware, since it's installed onto PATH as
+# a symlink) and source the sibling lib/harness-registry.sh if present. When it
+# is absent the script stays fully standalone — marker preference is simply
+# skipped and the built-in heuristics run unchanged.
+_lane_status_script_dir() {
+  local src="${BASH_SOURCE[0]}" d
+  while [[ -h "$src" ]]; do
+    d="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$d/$src"
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+HARNESS_REGISTRY_AVAILABLE=0
+_HR_PATH="$(_lane_status_script_dir)/lib/harness-registry.sh"
+if [[ -f "$_HR_PATH" ]]; then
+  # shellcheck source=lib/harness-registry.sh
+  source "$_HR_PATH" && HARNESS_REGISTRY_AVAILABLE=1
+fi
+
 usage() {
   cat <<'EOF' >&2
 Usage:
@@ -47,35 +68,45 @@ EOF
 JSON=0
 ALL=0
 PRINT_TARGET=0
+CLASSIFY_STDIN=0
+CLASSIFY_HARNESS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --json)         JSON=1; shift ;;
     --all)          ALL=1; shift ;;
     --print-target) PRINT_TARGET=1; shift ;;
+    --classify-stdin)
+      # Diagnostic/test seam: classify a pane tail read from stdin under an
+      # optional declared harness, bypassing tmux. Usage:
+      #   loop-lane-status.sh --classify-stdin [harness] < pane.txt
+      CLASSIFY_STDIN=1; shift; CLASSIFY_HARNESS="${1:-}"; [[ $# -gt 0 ]] && shift
+      break ;;
     -h|--help)      usage ;;
     --*)            echo "Unknown option: $1" >&2; usage ;;
     *)              break ;;
   esac
 done
 
-if [[ "$ALL" -eq 1 && "$JSON" -ne 1 ]]; then
-  echo "--all requires --json" >&2
-  usage
-fi
-if [[ "$PRINT_TARGET" -eq 1 && ( "$JSON" -eq 1 || "$ALL" -eq 1 ) ]]; then
-  echo "--print-target cannot be combined with --json/--all" >&2
-  usage
-fi
+if [[ "$CLASSIFY_STDIN" -ne 1 ]]; then
+  if [[ "$ALL" -eq 1 && "$JSON" -ne 1 ]]; then
+    echo "--all requires --json" >&2
+    usage
+  fi
+  if [[ "$PRINT_TARGET" -eq 1 && ( "$JSON" -eq 1 || "$ALL" -eq 1 ) ]]; then
+    echo "--print-target cannot be combined with --json/--all" >&2
+    usage
+  fi
 
-if [[ "$ALL" -eq 1 ]]; then
-  [[ $# -eq 1 ]] || usage
-  SESSION_NAME="$1"
-  LANE=""
-else
-  [[ $# -eq 2 ]] || usage
-  SESSION_NAME="$1"
-  LANE="$2"
+  if [[ "$ALL" -eq 1 ]]; then
+    [[ $# -eq 1 ]] || usage
+    SESSION_NAME="$1"
+    LANE=""
+  else
+    [[ $# -eq 2 ]] || usage
+    SESSION_NAME="$1"
+    LANE="$2"
+  fi
 fi
 
 # Lane → tmux target resolution. Kept inline (not sourced) so this script
@@ -126,13 +157,20 @@ resolve_lane() {
   esac
 }
 
-# classify_target <target> — capture the pane and print one status word.
-# This is the original top-level rule chain, hoisted into a function so the
-# --json --all sweep can classify N lanes in one process. Behavior of the
-# default <session> <lane> form is unchanged.
+# harness_for_target <target> — the lane's declared @loop_lane_harness window
+# option, or "" when unset/unresolvable. tmux -w resolves the pane's window
+# options, so this works for both fixed (session:win.pane) and dynamic
+# (%paneid) targets.
+harness_for_target() {
+  tmux show-options -wqv -t "$1" @loop_lane_harness 2>/dev/null || true
+}
+
+# classify_target <target> — capture the pane + its declared harness and print
+# one status word. Thin wrapper over classify_text so the --json --all sweep
+# and the single-lane form share one rule chain. Behavior of the default
+# <session> <lane> form is unchanged.
 classify_target() {
   local target="$1"
-
   # Last 40 lines is enough to see both the prompt area (bottom ~5) and any
   # active-work chrome (~15 above). We don't strip ANSI — tmux capture-pane
   # already returns plaintext from a rendered buffer.
@@ -141,9 +179,30 @@ classify_target() {
   # --all sweep, where one dead pane must not kill the whole fleet report).
   local TAIL
   TAIL="$(tmux capture-pane -t "$target" -p 2>/dev/null | tail -40 || true)"
+  classify_text "$TAIL" "$(harness_for_target "$target")"
+}
+
+# classify_text <tail> [harness] — the pure rule chain over a captured pane
+# tail, optionally PREFERRING the harness's declared readiness markers
+# (Phase 2) over the built-in heuristics. With harness="" (or no registry, or
+# a marker left empty) the relevant rule falls back to today's heuristic
+# exactly, so every existing case classifies identically. The single-word
+# output contract (working|awaiting-approval|idle|errored|unknown) is unchanged.
+classify_text() {
+  local TAIL="$1"
+  local harness="${2:-}"
   if [[ -z "$TAIL" ]]; then
     echo "unknown"
     return 0
+  fi
+
+  # Declared readiness markers for this harness (empty when unset / no registry
+  # / unknown harness). Matched as extended regexes; an empty marker means the
+  # corresponding rule uses its heuristic.
+  local working_marker="" idle_marker=""
+  if [[ -n "$harness" && "$HARNESS_REGISTRY_AVAILABLE" -eq 1 ]] && harness_known "$harness"; then
+    working_marker="$(harness_field "$harness" working_marker 2>/dev/null || true)"
+    idle_marker="$(harness_field "$harness" idle_marker 2>/dev/null || true)"
   fi
 
   # Errored and approval checks only look at the LAST ~5 lines so stale
@@ -195,24 +254,27 @@ classify_target() {
   # lane. Braille spinner frames only render while generation is active, and the
   # `^` anchor ignores echoed "Web: ⠙ …" status lines, so matching them across
   # the full tail is safe.
-  # A line carrying a LIVE elapsed timer "(Ns" / "(1m 36s" co-occurring with an
-  # active-generation marker is the cross-harness "generating now" signal:
-  # Codex shows "Working (1m 36s • esc to interrupt)"; Claude shows
-  # "✶ …ing… (5m 7s · ↓ N tokens · thinking)". Matched full-tail because the
-  # active line sits ABOVE the persistent composer/footer.
-  # The TIMER requirement is load-bearing: Claude Code's IDLE composer footer
-  # carries a bare "esc to interrupt" hint with NO timer, so a bare-string match
-  # read every idle Claude lane as working and STALLED the loop (the working→idle
-  # transition never fired). Requiring a co-occurring timer excludes that footer
-  # ("(shift+tab to cycle)" has no digit) while still catching live generation.
-  # The echoed-line guard below filters a coord pane mirroring another lane.
-  # Bottom-slice verb spinners + a full-tail braille spinner cover Pi etc.
+  # `esc to interrupt` is a LIVE-only marker (cleared the instant generation
+  # ends), so it is matched across the FULL tail, not just the bottom slice —
+  # Codex renders "• Working (Xs • esc to interrupt)" ABOVE its persistent
+  # composer/footer, out of the bottom slice, so a bottom-only check misses a
+  # working Codex lane and the footer then trips Rule 4 idle. The echoed-line
+  # guard below still filters a coord pane mirroring another lane's tail.
+  # When the harness declares a working_marker, PREFER it: a declared marker is
+  # a vetted live-only signal, so we trust it across the full tail and drop the
+  # noisier verb-spinner heuristic for this harness. With no declared marker we
+  # fall back to the built-in signals (esc-to-interrupt full tail, verb spinners
+  # in the bottom slice, braille spinner full tail) — today's behavior exactly.
   local SPINNER_LINES
-  SPINNER_LINES="$(
-    grep -E '\([0-9][0-9 hms]*[hms]' <<<"$TAIL" | grep -E 'esc to interrupt|tokens|thinking|Working|Thinking|Generating|Reasoning' || true
-    grep -E 'Working\.\.\.|Thinking\.\.\.|Orbiting|Planning\.\.\.|Searching\.\.\.|Envisioning|Analyzing\.\.\.|Inspecting\.\.\.|Running\.\.\.|Reading file|Reasoning\.\.\.|Computing\.\.\.|Generating\.\.\.|Loading\.\.\.' <<<"$TAIL_BOTTOM" || true
-    grep -E '^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' <<<"$TAIL" || true
-  )"
+  if [[ -n "$working_marker" ]]; then
+    SPINNER_LINES="$(grep -E "$working_marker" <<<"$TAIL" || true)"
+  else
+    SPINNER_LINES="$(
+      grep -E '\([0-9][0-9 hms]*[hms]' <<<"$TAIL" | grep -E 'esc to interrupt|tokens|thinking|Working|Thinking|Generating|Reasoning' || true
+      grep -E 'Working\.\.\.|Thinking\.\.\.|Orbiting|Planning\.\.\.|Searching\.\.\.|Envisioning|Analyzing\.\.\.|Inspecting\.\.\.|Running\.\.\.|Reading file|Reasoning\.\.\.|Computing\.\.\.|Generating\.\.\.|Loading\.\.\.' <<<"$TAIL_BOTTOM" || true
+      grep -E '^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' <<<"$TAIL" || true
+    )"
+  fi
   if [[ -n "$SPINNER_LINES" ]]; then
     # Reject matches that look like echoed status lines (e.g. "Web: ... ⠼
     # Working...") rather than live spinners — but check ONLY the spinner-matching
@@ -247,7 +309,16 @@ classify_target() {
   # hardcoding it. This is safe because a *working* lane is already caught by the
   # braille-spinner check in Rule 2 above, which runs first — so reaching here with
   # a home footer means no live spinner, i.e. genuinely idle.
-  local idle_home_chrome='accept edits on|bypass permissions on'
+  # PREFER the harness's declared idle_marker as the home-chrome pattern; with
+  # none declared, fall back to claude's home chrome (today's hardcoded
+  # default). The bare/themed shell-prompt checks below are harness-agnostic and
+  # always run, so a declared marker extends — never narrows — idle detection.
+  local idle_home_chrome
+  if [[ -n "$idle_marker" ]]; then
+    idle_home_chrome="$idle_marker"
+  else
+    idle_home_chrome='accept edits on|bypass permissions on'
+  fi
   [[ -n "${LOOP_LANE_IDLE_HOME_PATTERN:-}" ]] && idle_home_chrome+="|${LOOP_LANE_IDLE_HOME_PATTERN}"
   # Themed shell prompts (oh-my-zsh `➜`, a `git:(branch)` segment, a starship/
   # powerlevel `❯` at the line end) mean an idle shell waiting for input — the
@@ -294,6 +365,13 @@ print(json.dumps({
 
 US=$'\x1f'
 FIXED_LANES="coord web infra validate-left validate-right ops-top ops-bottom docs"
+
+# --classify-stdin: classify pane text piped on stdin (no tmux). Handled here,
+# after classify_text is defined.
+if [[ "$CLASSIFY_STDIN" -eq 1 ]]; then
+  classify_text "$(cat)" "$CLASSIFY_HARNESS"
+  exit 0
+fi
 
 if [[ "$ALL" -eq 1 ]]; then
   if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then

@@ -23,6 +23,17 @@ case "${1:-}" in
       *) exit 1 ;;
     esac
     ;;
+  roster)
+    # Unstubbed = empty roster = today's behavior (governance pass-through).
+    if [ -n "${FAKE_ROSTER_JSON:-}" ]; then
+      printf '%s\n' "$FAKE_ROSTER_JSON"
+    else
+      printf '{"contract_version": 1, "harnesses": []}\n'
+    fi
+    ;;
+  health)
+    printf '%s\n' "${FAKE_HEALTH:-ok}"
+    ;;
   *)
     exit 1
     ;;

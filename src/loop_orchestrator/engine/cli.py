@@ -23,7 +23,7 @@ from .brain import BrainError
 from .config import load_config
 from .decisions import DecisionStateError
 from .events import EventLog
-from .loop import action_line, run_once
+from .loop import action_line, run_once, validate_boot_config
 from .observe import Observer
 from .watch import Watch, pid_alive, restart, stale_daemon_warning
 
@@ -123,9 +123,21 @@ def _parse_indices(raw: str | None) -> list[int] | None:
         raise SystemExit(2) from None
 
 
+def _boot_check(config, root: Path, session: str) -> int:
+    """Fail fast (plan A.2): a misconfigured brain/ingest harness aborts at
+    boot with the reasons, instead of raising on the first cycle. Returns 0
+    when boot is clean, 2 otherwise."""
+    failures = validate_boot_config(config, Substrate(root, session))
+    for failure in failures:
+        print(f"error: {failure}", file=sys.stderr)
+    return 2 if failures else 0
+
+
 def cmd_once(args: argparse.Namespace, root: Path) -> int:
     session = _session(args)
     config = load_config(root)
+    if _boot_check(config, root, session):
+        return 2
     return run_once(
         root,
         session,
@@ -271,12 +283,16 @@ def cmd_cycle_now(args: argparse.Namespace, root: Path) -> int:
 def cmd_watch(args: argparse.Namespace, root: Path) -> int:
     session = _session(args)
     config = load_config(root)
+    if _boot_check(config, root, session):
+        return 2
     return Watch(root, session, config).run()
 
 
 def cmd_restart(args: argparse.Namespace, root: Path) -> int:
     session = _session(args)
     config = load_config(root)
+    if _boot_check(config, root, session):
+        return 2
     return restart(root, session, config, timeout_s=args.timeout)
 
 

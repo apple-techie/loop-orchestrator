@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from loop_orchestrator.engine import config as config_mod
-from loop_orchestrator.engine.config import EngineConfig, load_config
+from loop_orchestrator.engine.config import EngineConfig, HarnessPolicy, load_config
 
 
 def test_defaults_with_no_file(tmp_path):
@@ -91,3 +91,87 @@ lanes:
         encoding="utf-8",
     )
     assert load_config(tmp_path) == EngineConfig()
+
+
+def test_harness_policy_defaults_to_pass_through(tmp_path):
+    cfg = load_config(tmp_path)
+    assert cfg.harness_policy == HarnessPolicy()
+    assert cfg.harness_policy.allow == []
+    assert cfg.harness_policy.deny == []
+    assert cfg.harness_policy.cost_ceiling == ""
+    assert cfg.harness_policy.autonomy_cap == ""
+    assert cfg.harness_policy.role_tag_map == {}
+
+
+def test_harness_policy_parsed(tmp_path):
+    (tmp_path / "lane-config.yaml").write_text(
+        """
+engine:
+  harness_policy:
+    allow: [claude, pi, codex]
+    deny: [amp]
+    cost_ceiling: medium
+    autonomy_cap: attended
+    role_tag_map:
+      infra: [ops, code]
+      web: [product, synthesis]
+""",
+        encoding="utf-8",
+    )
+    policy = load_config(tmp_path).harness_policy
+    assert policy.allow == ["claude", "pi", "codex"]
+    assert policy.deny == ["amp"]
+    assert policy.cost_ceiling == "medium"
+    assert policy.autonomy_cap == "attended"
+    assert policy.role_tag_map == {"infra": ["ops", "code"], "web": ["product", "synthesis"]}
+
+
+def test_harness_policy_governance_fields_parsed(tmp_path):
+    (tmp_path / "lane-config.yaml").write_text(
+        """
+engine:
+  harness_policy:
+    role_defaults:
+      infra: claude
+    high_risk_roles: [infra, ops]
+""",
+        encoding="utf-8",
+    )
+    policy = load_config(tmp_path).harness_policy
+    assert policy.role_defaults == {"infra": "claude"}
+    assert policy.high_risk_roles == ["infra", "ops"]
+    # defaults: no role rewrites declared, infra is the high-risk role
+    assert HarnessPolicy().role_defaults == {}
+    assert HarnessPolicy().high_risk_roles == ["infra"]
+    assert HarnessPolicy().brain_allow == []  # empty = any harness may be brain
+
+
+def test_harness_policy_brain_allow_parsed(tmp_path):
+    (tmp_path / "lane-config.yaml").write_text(
+        """
+engine:
+  harness_policy:
+    brain_allow: [claude, codex]
+""",
+        encoding="utf-8",
+    )
+    assert load_config(tmp_path).harness_policy.brain_allow == ["claude", "codex"]
+
+
+def test_harness_policy_partial_keeps_defaults(tmp_path):
+    (tmp_path / "lane-config.yaml").write_text(
+        """
+engine:
+  harness_policy:
+    cost_ceiling: high
+    unknown_policy_key: ignored
+""",
+        encoding="utf-8",
+    )
+    cfg = load_config(tmp_path)
+    assert cfg.harness_policy.cost_ceiling == "high"
+    assert cfg.harness_policy.allow == []
+    assert cfg.harness_policy.role_tag_map == {}
+    # the rest of the engine config is untouched by a policy-only file
+    assert cfg.brain.harness == "claude"
+    assert cfg.approval_mode == "manual"
