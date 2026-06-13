@@ -213,7 +213,7 @@ _lane_default_session() {
 # <timeout>s; warns and returns on timeout rather than blocking forever. Avoids
 # the race where a paste lands before a slow TUI (e.g. Claude Code) is ready.
 _lane_wait_ready() {
-  local session="$1" window="$2" wid="$3" timeout="$4" elapsed=0 proc status
+  local session="$1" window="$2" wid="$3" timeout="$4" harness="${5:-}" elapsed=0 proc status
   while (( elapsed < timeout )); do
     proc="$(tmux display-message -p -t "$wid" '#{pane_current_command}' 2>/dev/null || echo "")"
     case "$proc" in zsh|bash|sh|fish|"") : ;; *) break ;; esac
@@ -228,6 +228,19 @@ _lane_wait_ready() {
     [[ "$status" == "idle" ]] && { echo "[loop-tmux] add-lane: lane '$window' ready"; return 0; }
     sleep 1; elapsed=$((elapsed + 1))
   done
+  # Readiness timed out (T0016). Binary-on-PATH is NOT auth/liveness, so a lane
+  # whose harness binary vanished or whose auth/gateway is down would otherwise
+  # have a brief pasted into a dead shell. Probe health OUT-OF-BAND: a non-ok
+  # result (missing binary, or a declared health_probe that fails) surfaces
+  # 'errored' loudly instead of silently proceeding. An 'ok' probe (or no probe
+  # declared) keeps today's slow-but-live "proceeding" behavior.
+  local health=""
+  [[ -n "$harness" && -f "$HARNESS_REGISTRY" ]] && \
+    health="$(bash "$HARNESS_REGISTRY" health "$harness" 2>/dev/null || echo unknown)"
+  if [[ -n "$health" && "$health" != "ok" ]]; then
+    echo "[loop-tmux] add-lane: lane '$window' errored — harness '$harness' health=$health (not ready within ${timeout}s; not safe to dispatch a brief)" >&2
+    return 0
+  fi
   echo "[loop-tmux] add-lane: lane '$window' not confirmed ready within ${timeout}s (proceeding)" >&2
   return 0
 }
@@ -341,7 +354,7 @@ _lane_subcommand_add() {
   # harness lanes (a shell/cmd lane is ready as soon as it is created).
   if [[ "$wait_ready" -eq 1 && -z "$cmd_override" \
         && "$meta_harness" != "cmd" && "$meta_harness" != "shell" && "$meta_harness" != "mprocs" ]]; then
-    _lane_wait_ready "$session" "$window" "$wid" "$ready_timeout"
+    _lane_wait_ready "$session" "$window" "$wid" "$ready_timeout" "$meta_harness"
   fi
 }
 
