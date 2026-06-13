@@ -195,15 +195,21 @@ classify_target() {
   # lane. Braille spinner frames only render while generation is active, and the
   # `^` anchor ignores echoed "Web: ⠙ …" status lines, so matching them across
   # the full tail is safe.
-  # `esc to interrupt` is a LIVE-only marker (cleared the instant generation
-  # ends), so it is matched across the FULL tail, not just the bottom slice —
-  # Codex renders "• Working (Xs • esc to interrupt)" ABOVE its persistent
-  # composer/footer, out of the bottom slice, so a bottom-only check misses a
-  # working Codex lane and the footer then trips Rule 4 idle. The echoed-line
-  # guard below still filters a coord pane mirroring another lane's tail.
+  # A line carrying a LIVE elapsed timer "(Ns" / "(1m 36s" co-occurring with an
+  # active-generation marker is the cross-harness "generating now" signal:
+  # Codex shows "Working (1m 36s • esc to interrupt)"; Claude shows
+  # "✶ …ing… (5m 7s · ↓ N tokens · thinking)". Matched full-tail because the
+  # active line sits ABOVE the persistent composer/footer.
+  # The TIMER requirement is load-bearing: Claude Code's IDLE composer footer
+  # carries a bare "esc to interrupt" hint with NO timer, so a bare-string match
+  # read every idle Claude lane as working and STALLED the loop (the working→idle
+  # transition never fired). Requiring a co-occurring timer excludes that footer
+  # ("(shift+tab to cycle)" has no digit) while still catching live generation.
+  # The echoed-line guard below filters a coord pane mirroring another lane.
+  # Bottom-slice verb spinners + a full-tail braille spinner cover Pi etc.
   local SPINNER_LINES
   SPINNER_LINES="$(
-    grep -E 'esc to interrupt' <<<"$TAIL" || true
+    grep -E '\([0-9][0-9 hms]*[hms]' <<<"$TAIL" | grep -E 'esc to interrupt|tokens|thinking|Working|Thinking|Generating|Reasoning' || true
     grep -E 'Working\.\.\.|Thinking\.\.\.|Orbiting|Planning\.\.\.|Searching\.\.\.|Envisioning|Analyzing\.\.\.|Inspecting\.\.\.|Running\.\.\.|Reading file|Reasoning\.\.\.|Computing\.\.\.|Generating\.\.\.|Loading\.\.\.' <<<"$TAIL_BOTTOM" || true
     grep -E '^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]' <<<"$TAIL" || true
   )"
