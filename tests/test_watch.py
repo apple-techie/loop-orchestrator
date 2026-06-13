@@ -745,6 +745,36 @@ def test_quota_backoff_falls_back_to_config_minutes(project, monkeypatch):
     assert set_events and set_events[-1]["source"] == "config-default"
 
 
+def test_model_unavailable_failure_sets_backoff_and_next_tick_skips(project, monkeypatch):
+    # F3 (T0018): the model-unavailable notice prints to STDOUT, then exit 1.
+    # The cycle ends rc=1 model-unavailable -> arm the brain backoff (no
+    # retry-into-the-wall) and surface a distinct, human-actionable event.
+    bad_brain = project / "model-down-brain"
+    bad_brain.write_text(
+        '#!/bin/sh\necho "Error: model claude-fable-5 is currently unavailable"\nexit 1\n',
+        encoding="utf-8",
+    )
+    bad_brain.chmod(0o755)
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(bad_brain))
+
+    w = _watch(project)  # real run_once
+    w._last_cycle_start = time.time()
+
+    now = time.time()
+    w.tick(now)  # mailbox-new trigger -> real cycle -> model-unavailable failure
+
+    assert w._quota_backoff_until is not None and w._quota_backoff_until > now
+    set_events = [e for e in _events(project) if e["event"] == "model-unavailable-backoff-set"]
+    assert set_events  # distinct from quota-backoff-set
+    assert "model_failover" in set_events[-1]  # declared failover surfaced (may be "")
+
+    # the NEXT tick is gated with a model-unavailable-specific skip reason.
+    w.paths.cycle_now_path.touch()
+    w.tick(time.time())
+    skips = [e for e in _events(project) if e["event"] == "cycle-skip"]
+    assert skips and skips[-1]["reason"] == "model-unavailable-backoff"
+
+
 # ── OPS GUARD C: stale-daemon warning ───────────────────────────────────────
 
 

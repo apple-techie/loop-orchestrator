@@ -224,11 +224,15 @@ class Watch:
         self._seen_replies: set[str] = set()
         self._paused_skip_logged = False
         self._last_skip: tuple | None = None
-        # Quota-aware backoff: epoch until which the BRAIN is suppressed after a
-        # failure_kind=="quota" failure (observation/PM keep running). None = no
-        # active backoff. Seeded from a prior brain-failed so a daemon restart
-        # inside the window does not immediately burn another quota'd call.
+        # Brain-suppression backoff: epoch until which the BRAIN is suppressed
+        # after a failure that must NOT be retried into the wall — failure_kind
+        # "quota" (usage/session limit) or "model-unavailable" (F3: requested
+        # model down). observation/PM keep running. None = no active backoff.
+        # Seeded from a prior brain-failed so a daemon restart inside the window
+        # does not immediately burn another doomed call. (Field name kept for
+        # back-compat; _backoff_reason records which cause is in force.)
         self._quota_backoff_until: float | None = None
+        self._backoff_reason: str = "quota-backoff"
 
     # ── lifecycle ─────────────────────────────────────────────────────────
 
@@ -362,13 +366,15 @@ class Watch:
             return False
         if now >= deadline:
             self._quota_backoff_until = None
-            self.events.append("quota-backoff-cleared", deadline=_fmt_mtime(int(deadline * 1e9)))
+            self.events.append(
+                f"{self._backoff_reason}-cleared", deadline=_fmt_mtime(int(deadline * 1e9))
+            )
             return False
-        sig = ("quota-backoff", round(deadline))
+        sig = (self._backoff_reason, round(deadline))
         if sig != self._last_skip:
             self.events.append(
                 "cycle-skip",
-                reason="quota-backoff",
+                reason=self._backoff_reason,
                 triggers=reasons,
                 deadline=_fmt_mtime(int(deadline * 1e9)),
             )
@@ -406,29 +412,52 @@ class Watch:
                 self.events.append("metrics", after_cycle=True, rc=rc)
 
     def _maybe_arm_quota_backoff(self, now: float, rc: int) -> None:
-        """When the cycle just ended on a brain failure classified 'quota', arm
-        the backoff: do NOT keep burning brain calls into the wall. The deadline
-        is parsed from the stderr excerpt's 'resets <time>' hint when present,
-        else config.brain.quota_backoff_minutes from now. rc==1 is the
-        brain-failed cycle outcome (loop.run_once)."""
+        """When the cycle just ended on a brain failure that must NOT be retried
+        into the wall, arm the brain backoff. Two cases (rc==1 is the
+        brain-failed cycle outcome from loop.run_once):
+
+        - 'quota' (usage/session limit): deadline from the stderr 'resets <time>'
+          hint when present, else config.brain.quota_backoff_minutes.
+        - 'model-unavailable' (F3: the requested model is down): no reset hint,
+          so the config window; the set event carries the declared
+          model_failover so a human/the deck can re-pin instead of waiting.
+        """
         if rc != 1:
             return
         failed = self._last_brain_failed()
-        if failed is None or failed.get("failure_kind") != "quota":
+        if failed is None:
             return
-        excerpt = str(failed.get("stderr_excerpt") or "")
-        deadline = parse_reset_deadline(excerpt, now)
-        source = "stderr-reset"
-        if deadline is None:
+        kind = failed.get("failure_kind")
+        if kind == "quota":
+            excerpt = str(failed.get("stderr_excerpt") or "")
+            deadline = parse_reset_deadline(excerpt, now)
+            source = "stderr-reset"
+            if deadline is None:
+                deadline = now + self.config.brain.quota_backoff_minutes * 60
+                source = "config-default"
+            self._backoff_reason = "quota-backoff"
+            self._quota_backoff_until = deadline
+            self._last_skip = None  # let the first backoff skip log fresh
+            self.events.append(
+                "quota-backoff-set",
+                deadline=_fmt_mtime(int(deadline * 1e9)),
+                source=source,
+            )
+        elif kind == "model-unavailable":
             deadline = now + self.config.brain.quota_backoff_minutes * 60
-            source = "config-default"
-        self._quota_backoff_until = deadline
-        self._last_skip = None  # let the first quota-backoff skip log fresh
-        self.events.append(
-            "quota-backoff-set",
-            deadline=_fmt_mtime(int(deadline * 1e9)),
-            source=source,
-        )
+            try:
+                failover = self.substrate.harness_field(self.config.brain.harness, "model_failover")
+            except SubstrateError:
+                failover = ""
+            self._backoff_reason = "model-unavailable-backoff"
+            self._quota_backoff_until = deadline
+            self._last_skip = None
+            self.events.append(
+                "model-unavailable-backoff-set",
+                deadline=_fmt_mtime(int(deadline * 1e9)),
+                harness=self.config.brain.harness,
+                model_failover=failover,
+            )
 
     def _last_brain_failed(self) -> dict | None:
         for event in reversed(self.events.tail(20)):

@@ -39,14 +39,33 @@ _READ_CHUNK = 65536
 # A quota/usage-limit stderr must never be misdiagnosed as a slow generation:
 # the cure is to back off until the window resets, not to keep retrying.
 _QUOTA_RE = re.compile(r"session.?limit|usage.?limit|\bquota\b|rate.?limit", re.IGNORECASE)
+# F3 (live Fable-5 outage): the requested model going unavailable is its OWN
+# failure class — back off / escalate, never retry into the wall. The notice
+# printed to STDOUT (not stderr), which is why it was mislabeled 'exit'; both
+# streams are inspected. Kept specific (the word 'model' near 'unavailable', or
+# the standard '(currently|temporarily) unavailable' phrasings) so an ordinary
+# error mentioning a file is not swept in.
+_MODEL_UNAVAILABLE_RE = re.compile(
+    r"\bmodel\b[^\n]{0,60}\bunavailable\b"
+    r"|\bunavailable\b[^\n]{0,60}\bmodel\b"
+    r"|model[^\n]{0,40}\b(?:not available|no longer available)\b"
+    r"|currently unavailable"
+    r"|temporarily unavailable",
+    re.IGNORECASE,
+)
 # Length-capped excerpt of the stderr tail carried on the failure event so the
 # watch loop (and the miner) can read the reset hint without re-opening files.
 _STDERR_EXCERPT_LEN = 280
 
 
-def classify_failure(stderr: str, timed_out: bool) -> str:
-    """failure_kind for a brain/one-shot failure: 'quota' (session/usage limit
-    — back off, do not retry), 'timeout' (the deadline kill), else 'exit'."""
+def classify_failure(stderr: str, stdout: str, timed_out: bool) -> str:
+    """failure_kind for a brain/one-shot failure: 'model-unavailable' (the
+    requested model is down — back off or escalate, never retry; the notice can
+    print to STDOUT, so both streams are checked), 'quota' (session/usage limit
+    — back off until the window resets), 'timeout' (the deadline kill), else
+    'exit'."""
+    if _MODEL_UNAVAILABLE_RE.search(stdout or "") or _MODEL_UNAVAILABLE_RE.search(stderr or ""):
+        return "model-unavailable"
     if _QUOTA_RE.search(stderr or ""):
         return "quota"
     if timed_out:
@@ -71,9 +90,9 @@ class BrainBudgetError(BrainError):
 class BrainInvocationError(BrainError):
     """Every allowed attempt exited non-zero, timed out, or failed to spawn.
 
-    Carries the classified `failure_kind` ('quota' | 'timeout' | 'exit') and a
-    capped `stderr_excerpt` so the watch loop can apply quota-aware backoff
-    without re-reading events.jsonl.
+    Carries the classified `failure_kind` ('model-unavailable' | 'quota' |
+    'timeout' | 'exit') and a capped `stderr_excerpt` so the watch loop can
+    apply backoff without re-reading events.jsonl.
     """
 
     def __init__(self, message: str, failure_kind: str = "exit", stderr_excerpt: str = ""):
@@ -337,10 +356,13 @@ def run_oneshot(
             returncode, stdout = _run_attempt(argv, timeout_s, cwd, response_path, renderer)
         except subprocess.TimeoutExpired:
             last_error = f"timed out after {timeout_s}s"
-            # A quota notice on stderr can land before the deadline kill — read
-            # the tail so a quota-then-timeout is still classified 'quota'.
+            # A quota/model-unavailable notice can land before the deadline kill
+            # — read the stderr tail AND the partial stdout transcript so a
+            # quota-then-timeout stays 'quota' and a model-unavailable notice
+            # (which prints to stdout) is not mislabeled 'timeout'.
             stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
-            last_failure_kind = classify_failure(stderr_text, timed_out=True)
+            stdout_text = _read_text(response_path)
+            last_failure_kind = classify_failure(stderr_text, stdout_text, timed_out=True)
             last_excerpt = _stderr_excerpt(stderr_text)
             events.append(
                 f"{kind_prefix}-timeout",
@@ -360,7 +382,9 @@ def run_oneshot(
                 return stdout
             stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
             last_error = f"exit {returncode}: {stderr_text.strip()[:500]}"
-            last_failure_kind = classify_failure(stderr_text, timed_out=False)
+            # stdout carries the model-unavailable notice (F3); the response
+            # transcript already holds it, but `stdout` is the authoritative copy.
+            last_failure_kind = classify_failure(stderr_text, stdout, timed_out=False)
             last_excerpt = _stderr_excerpt(stderr_text)
         if attempt < attempts:
             events.append(f"{kind_prefix}-retry", attempt=attempt, error=last_error)
