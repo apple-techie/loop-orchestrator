@@ -438,3 +438,116 @@ def test_action_line_truncates_long_payload():
     second = action_line(action).split("\n")[1]
     assert "payload=" + "x" * 200 + "…" in second
     assert "x" * 201 not in second
+
+
+# ── boot validation + brain-prompt roster rubric (T0014) ───────────────────
+
+from loop_orchestrator.engine.config import HarnessPolicy  # noqa: E402
+from loop_orchestrator.engine.loop import _assemble_prompt, validate_boot_config  # noqa: E402
+from loop_orchestrator.engine.observe import Observer  # noqa: E402
+from loop_orchestrator.substrate import Substrate  # noqa: E402
+
+
+def _sub(project: Path) -> Substrate:
+    return Substrate(project, "demo")
+
+
+def test_boot_validation_clean_defaults(project, monkeypatch):
+    # No env override: the registry one-shot template is actually consulted.
+    monkeypatch.delenv("LOOP_ENGINE_BRAIN_CMD", raising=False)
+    assert validate_boot_config(EngineConfig(), _sub(project)) == []
+
+
+def test_boot_validation_rejects_oneshotless_brain(project, monkeypatch):
+    monkeypatch.delenv("LOOP_ENGINE_BRAIN_CMD", raising=False)
+    from loop_orchestrator.engine.config import BrainConfig
+
+    cfg = EngineConfig(brain=BrainConfig(harness="pi"))
+    failures = validate_boot_config(cfg, _sub(project))
+    assert len(failures) == 1 and "brain.harness 'pi'" in failures[0]
+
+
+def test_boot_validation_env_override_skips_oneshot_check(project):
+    # project fixture sets LOOP_ENGINE_BRAIN_CMD: a oneshot-less brain boots.
+    from loop_orchestrator.engine.config import BrainConfig
+
+    cfg = EngineConfig(brain=BrainConfig(harness="pi"))
+    assert validate_boot_config(cfg, _sub(project)) == []
+
+
+def test_boot_validation_brain_allow(project):
+    cfg = EngineConfig(harness_policy=HarnessPolicy(brain_allow=["codex"]))
+    failures = validate_boot_config(cfg, _sub(project))
+    assert len(failures) == 1
+    assert "brain_allow" in failures[0] and "'claude'" in failures[0]
+
+
+def test_boot_validation_checks_headless_ingest(project, monkeypatch):
+    monkeypatch.delenv("LOOP_ENGINE_BRAIN_CMD", raising=False)
+    monkeypatch.delenv("LOOP_ENGINE_INGEST_CMD", raising=False)
+    from loop_orchestrator.engine.config import IngestConfig
+
+    cfg = EngineConfig(ingest=IngestConfig(mode="headless", harness="pi"))
+    failures = validate_boot_config(cfg, _sub(project))
+    assert len(failures) == 1 and "ingest.harness 'pi'" in failures[0]
+    # lane mode never validates the ingest harness
+    cfg = EngineConfig(ingest=IngestConfig(mode="lane", harness="pi"))
+    assert validate_boot_config(cfg, _sub(project)) == []
+
+
+def test_cli_once_fails_fast_on_bad_brain(project, call_log, capsys, monkeypatch):
+    monkeypatch.delenv("LOOP_ENGINE_BRAIN_CMD", raising=False)
+    (project / "lane-config.yaml").write_text(
+        "engine:\n  brain:\n    harness: pi\n", encoding="utf-8"
+    )
+    rc = cli.main(["--project-root", str(project), "--session", "demo", "once", "--dry-run"])
+    assert rc == 2
+    assert "brain.harness 'pi'" in capsys.readouterr().err
+    assert _brain_calls(call_log) == []
+    # fail-fast: no cycle started, no events file written
+    assert not SessionPaths(project, "demo").events_path.exists()
+
+
+ROSTER_FIXTURE = {
+    "claude": {
+        "name": "claude",
+        "present": True,
+        "capability_tags": "brain,ingest,code,ops",
+        "cost_tier": "high",
+        "autonomy_class": "unattended",
+        "drift_pins": "low",
+    },
+    "amp": {
+        "name": "amp",
+        "present": True,
+        "capability_tags": "search,research",
+        "cost_tier": "high",
+        "autonomy_class": "unattended",
+        "drift_pins": "high",
+    },
+    "droid": {"name": "droid", "present": False, "capability_tags": "code"},
+}
+
+
+def test_prompt_roster_block_filtered_and_rubric(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    sub = _sub(project)
+    snap = Observer(sub, paths).snapshot()
+    cfg = EngineConfig(harness_policy=HarnessPolicy(deny=["amp"]))
+    prompt = _assemble_prompt(sub, snap, paths, config=cfg, roster=ROSTER_FIXTURE)
+    assert "--- harness roster (allowed + present + healthy) ---" in prompt
+    assert "\nclaude tags=brain,ingest,code,ops cost=high" in prompt
+    assert "\namp tags=" not in prompt  # denied
+    assert "\ndroid tags=" not in prompt  # not present
+    assert "--- harness selection rubric (first match wins) ---" in prompt
+
+
+def test_prompt_unchanged_without_roster(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    sub = _sub(project)
+    snap = Observer(sub, paths).snapshot()
+    prompt = _assemble_prompt(sub, snap, paths)
+    assert "harness roster" not in prompt
+    assert "selection rubric" not in prompt

@@ -86,6 +86,8 @@ class HarnessPolicy:
     # human approval (plan A.2). Only consulted once a policy is written —
     # the empty policy never reaches the gate's harness pass.
     high_risk_roles: list[str] = field(default_factory=lambda: ["infra"])
+    # Harnesses allowed as the brain / headless-ingest one-shot; empty = any.
+    brain_allow: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

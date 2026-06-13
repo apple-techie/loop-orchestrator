@@ -143,6 +143,19 @@ engine:
     # defaults: no role rewrites declared, infra is the high-risk role
     assert HarnessPolicy().role_defaults == {}
     assert HarnessPolicy().high_risk_roles == ["infra"]
+    assert HarnessPolicy().brain_allow == []  # empty = any harness may be brain
+
+
+def test_harness_policy_brain_allow_parsed(tmp_path):
+    (tmp_path / "lane-config.yaml").write_text(
+        """
+engine:
+  harness_policy:
+    brain_allow: [claude, codex]
+""",
+        encoding="utf-8",
+    )
+    assert load_config(tmp_path).harness_policy.brain_allow == ["claude", "codex"]
 
 
 def test_harness_policy_partial_keeps_defaults(tmp_path):

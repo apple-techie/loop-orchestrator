@@ -74,8 +74,64 @@ def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
     return lines or ["(none)"]
 
 
-def _assemble_prompt(substrate: Substrate, snap: EngineSnapshot, paths: SessionPaths) -> str:
-    """checkpoint_prompt(packaged header) + lane status + restarts tail + asks."""
+# Condensed plan-A.4 selection rubric, appended to the brain prompt alongside
+# the roster (only once a harness_policy is written — the empty policy keeps
+# the prompt byte-identical to today). ~700 chars, far under the 24000-token
+# checkpoint warn threshold.
+_HARNESS_RUBRIC = """\
+--- harness selection rubric (first match wins) ---
+brain / headless ingest: claude (codex fallback, brain_allow-gated)
+high-risk infra: claude interactive (codex pinned fallback)
+product reasoning / spec / UX: pi (claude fallback)
+synthesis / docs / wiki: pi (claude fallback)
+agentic codebase search: amp (claude when model pinning matters)
+cheap bulk / parallel grunt edits: opencode (forge fallback)
+fast one-shot burst, latency-sensitive: forge (droid exec fallback)
+headless autonomous coding burst: droid (codex exec fallback)
+cursor-model-specific edits: cursor-agent (skip if loop skills needed)
+gateway-mediated / fleet task: openclaw (hermes fallback)
+agent-platform experiment: hermes (claude fallback)
+watcher / probe / log tail: shell; process dashboard: mprocs
+tie-breakers: reproducibility required -> exclude amp (cannot pin a model);
+unattended-destructive -> only claude/codex/hermes/amp; high drift +
+unattended + high-risk role -> the gate forces human approval."""
+
+
+def _roster_lines(roster: dict[str, dict], config: EngineConfig) -> list[str]:
+    """Brain-prompt roster block: allowed + present + healthy harnesses only,
+    so the brain physically cannot propose a bad one (the gate stays the
+    backstop, not the primary funnel)."""
+    policy = config.harness_policy
+    lines = ["--- harness roster (allowed + present + healthy) ---"]
+    for name, entry in roster.items():
+        if name in policy.deny:
+            continue
+        if policy.allow and name not in policy.allow:
+            continue
+        if entry.get("present") is False:
+            continue
+        if str(entry.get("health", "")) in ("missing", "unauthenticated", "unhealthy"):
+            continue
+        lines.append(
+            f"{name} tags={entry.get('capability_tags', '')} "
+            f"cost={entry.get('cost_tier', '')} autonomy={entry.get('autonomy_class', '')} "
+            f"drift={entry.get('drift_pins', '')}"
+        )
+    if len(lines) == 1:
+        lines.append("(none)")
+    lines.append(_HARNESS_RUBRIC)
+    return lines
+
+
+def _assemble_prompt(
+    substrate: Substrate,
+    snap: EngineSnapshot,
+    paths: SessionPaths,
+    config: EngineConfig | None = None,
+    roster: dict[str, dict] | None = None,
+) -> str:
+    """checkpoint_prompt(packaged header) + lane status + restarts tail + asks
+    (+ governance roster and selection rubric when a roster was resolved)."""
     resource = resources.files("loop_orchestrator.engine").joinpath(*_HEADER_RESOURCE)
     with resources.as_file(resource) as header:
         prompt = substrate.checkpoint_prompt(header_file=header)
@@ -90,7 +146,45 @@ def _assemble_prompt(substrate: Substrate, snap: EngineSnapshot, paths: SessionP
         lines.append("(none)")
     lines.append("--- outstanding asks ---")
     lines.extend(_ask_lines(actions_mod.load_asks(paths), datetime.now(timezone.utc)))
+    if roster is not None and config is not None:
+        lines.extend(_roster_lines(roster, config))
     return "\n".join(lines) + "\n"
+
+
+def validate_boot_config(config: EngineConfig, substrate: Substrate) -> list[str]:
+    """Fail-fast boot checks (plan A.2): the brain harness — and the ingest
+    harness when ingest runs headless — must be allowed by
+    harness_policy.brain_allow (empty list = unrestricted) and must have a
+    non-empty registry oneshot_template. Returns human-readable failure
+    messages; empty list = boot OK. An env override (LOOP_ENGINE_BRAIN_CMD /
+    LOOP_ENGINE_INGEST_CMD) replaces the registry one-shot, so the template
+    check is skipped for that role."""
+    failures: list[str] = []
+    allow = config.harness_policy.brain_allow
+    checks = [("brain", config.brain.harness, "LOOP_ENGINE_BRAIN_CMD")]
+    if config.ingest.mode == "headless":
+        checks.append(
+            ("ingest", config.ingest.harness or config.brain.harness, "LOOP_ENGINE_INGEST_CMD")
+        )
+    for label, harness, override_var in checks:
+        if allow and harness not in allow:
+            failures.append(
+                f"{label}.harness {harness!r} is not in harness_policy.brain_allow "
+                f"{allow} (lane-config.yaml)"
+            )
+        if os.environ.get(override_var):
+            continue
+        try:
+            template = substrate.harness_field(harness, "oneshot_template")
+        except SubstrateError:
+            failures.append(f"{label}.harness {harness!r} is not a registered harness")
+            continue
+        if not template:
+            failures.append(
+                f"{label}.harness {harness!r} has no one-shot mode (empty "
+                f"oneshot_template) — it cannot run as the {label}"
+            )
+    return failures
 
 
 def _ingest_protocol(project_root: Path) -> str:
@@ -339,7 +433,19 @@ def run_once(
     if pm_adapters:
         _pm_sync(pm_adapters, "pull", paths.tasks_dir, events, dry_run=dry_run)
 
-    prompt = _assemble_prompt(substrate, snap, paths)
+    # Harness governance (plan A.2): one roster snapshot per cycle, shared by
+    # the brain prompt and the gate. Only when a policy is actually written —
+    # the empty policy is a pass-through, so skip the subprocess and keep both
+    # the prompt and the call profile identical to today. A roster failure
+    # degrades to None (pass-through) with an event; it never aborts the cycle.
+    roster = None
+    if config.harness_policy != HarnessPolicy():
+        try:
+            roster = substrate.harness_roster()
+        except SubstrateError as exc:
+            events.append("error", kind="roster-failed", error=str(exc))
+
+    prompt = _assemble_prompt(substrate, snap, paths, config=config, roster=roster)
 
     if dry_run:
         print(f"dry-run: prompt {len(prompt)} bytes (~{len(prompt) // 4} tokens)")
@@ -374,17 +480,6 @@ def run_once(
             return _file_needs_human(paths, events, approval, second_error, reply)
 
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
-    # Harness governance (plan A.2): resolve a per-cycle roster snapshot and
-    # thread it into the gate. Only when a policy is actually written — the
-    # empty policy is a pass-through, so skip the subprocess and keep the
-    # call profile identical to today. A roster failure degrades to None
-    # (pass-through) with an event; it never aborts the cycle.
-    roster = None
-    if config.harness_policy != HarnessPolicy():
-        try:
-            roster = substrate.harness_roster()
-        except SubstrateError as exc:
-            events.append("error", kind="roster-failed", error=str(exc))
     governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)
     for governance_event in governance_events:
         events.append("governance", **governance_event)
