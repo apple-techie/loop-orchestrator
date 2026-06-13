@@ -15,6 +15,7 @@ from loop_orchestrator.engine.brain import (
     BrainBudgetError,
     BrainInvocationError,
     StreamRenderer,
+    classify_failure,
     oneshot_argv,
     run_oneshot,
     stream_argv,
@@ -168,6 +169,41 @@ def test_brain_failed_plain_exit_is_not_quota(tmp_path, env, monkeypatch):
     assert excinfo.value.failure_kind == "exit"
     failed = [e for e in events.tail(20) if e["event"] == "brain-failed"]
     assert failed and failed[-1]["failure_kind"] == "exit"
+
+
+# ── F3: model-unavailable failure kind (T0018) ──────────────────────────────
+
+
+def test_classify_failure_model_unavailable_both_streams():
+    # The F3 notice prints to STDOUT (why it was mislabeled), so both streams
+    # are checked; model-unavailable outranks quota/timeout.
+    assert classify_failure("", "the model is currently unavailable", False) == "model-unavailable"
+    assert classify_failure("model foo is no longer available", "", False) == "model-unavailable"
+    assert classify_failure("", "model unavailable", True) == "model-unavailable"  # beats timeout
+    # regression: the existing kinds are unchanged.
+    assert classify_failure("usage limit reached", "", False) == "quota"
+    assert classify_failure("", "", True) == "timeout"
+    assert classify_failure("generic boom", "ok output", False) == "exit"
+    # no false positive on an ordinary error that merely mentions a file.
+    assert classify_failure("cannot read file model.txt: not found", "", False) == "exit"
+
+
+def test_brain_failed_records_model_unavailable_from_stdout(tmp_path, env, monkeypatch):
+    paths, events = env
+    # the notice prints to STDOUT then a non-zero exit — the exact F3 shape that
+    # was mislabeled 'exit' before stdout was inspected.
+    script = _script(
+        tmp_path, "brain", 'echo "Error: model claude-fable-5 is currently unavailable"\nexit 1\n'
+    )
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(max_retries=0)), None, paths, events)
+
+    with pytest.raises(BrainInvocationError) as excinfo:
+        brain.invoke("p")
+
+    assert excinfo.value.failure_kind == "model-unavailable"
+    failed = [e for e in events.tail(20) if e["event"] == "brain-failed"]
+    assert failed and failed[-1]["failure_kind"] == "model-unavailable"
 
 
 # ── run_oneshot reuse (the headless-ingest path shares this machinery) ──────

@@ -159,6 +159,19 @@ def test_fields_verb_includes_readiness_rows():
     assert "idle_marker" in proc.stdout
 
 
+# ── model_failover field (T0018, F3) ────────────────────────────────────────
+
+
+def test_model_failover_field_resolves_and_empty_safe():
+    # Declared fallback-model slot (F3). Operator-supplied per environment, so
+    # the default is empty everywhere (empty-safe), and the field resolves for
+    # every harness.
+    for name in HARNESSES:
+        assert field_value(name, "model_failover") == ""
+    proc = run_cli("fields", "claude")
+    assert "model_failover" in proc.stdout
+
+
 # ── roster + health verbs (T0011) ──────────────────────────────────────────
 
 
