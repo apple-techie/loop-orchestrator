@@ -49,6 +49,8 @@
 #   harness-registry.sh field <name> <field>          # print one field
 #   harness-registry.sh oneshot <name>                # print one-shot command template
 #   harness-registry.sh probe <name>                  # verify binary exists, print resolved launch
+#   harness-registry.sh roster [--json]               # every harness + governance fields + present flag
+#   harness-registry.sh health <name>                 # ok | missing | unauthenticated | unhealthy
 #
 # This file MUST be POSIX-bash compatible (no zsh-isms) so it sources cleanly
 # under tmux-spawned shells.
@@ -377,6 +379,52 @@ harness_resolve_launch() {
   esac
 }
 
+# harness_present <name> — exit 0 if the harness can spawn on this host:
+# its binary resolves on PATH, or it needs no binary at all (shell lanes).
+harness_present() {
+  local name="$1"
+  local launch
+  launch="$(harness_field "$name" launch_cmd)" || return 1
+  [[ -z "$launch" ]] && return 0
+  [[ -n "$(harness_binary_path "$name" 2>/dev/null)" ]]
+}
+
+# harness_health <name> — print exactly one of ok|missing|unauthenticated|
+# unhealthy on stdout (single-word, mirroring the lane-status contract style).
+# Exit 0 only for ok. Health beyond the PATH check comes from the harness's
+# declared health_probe command; with no probe declared ("" — the registry
+# default), health degrades to the PATH check, which is today's behavior.
+# A failing probe reads as unauthenticated when the harness declares an
+# account/gateway auth_requirement, unhealthy otherwise.
+harness_health() {
+  local name="$1"
+  if ! harness_known "$name"; then
+    echo "harness-registry: unknown harness '$name'" >&2
+    return 1
+  fi
+  if ! harness_present "$name"; then
+    echo "missing"
+    return 1
+  fi
+  local probe
+  probe="$(harness_field "$name" health_probe)"
+  if [[ -z "$probe" ]]; then
+    echo "ok"
+    return 0
+  fi
+  if bash -c "$probe" >/dev/null 2>&1; then
+    echo "ok"
+    return 0
+  fi
+  local auth
+  auth="$(harness_field "$name" auth_requirement)"
+  case "$auth" in
+    account|gateway) echo "unauthenticated" ;;
+    *) echo "unhealthy" ;;
+  esac
+  return 1
+}
+
 # ─── CLI mode ────────────────────────────────────────────────────────────
 # When invoked directly (not sourced), expose a small CLI for inspection.
 
@@ -448,6 +496,52 @@ _harness_registry_cli() {
       printf 'binary:            NOT FOUND on PATH\n' >&2
       return 1
       ;;
+    roster)
+      # Governance roster: every registered harness with its governance
+      # fields and a `present` flag (binary resolves on PATH, or no binary
+      # needed). Additive surface — probe/field/oneshot untouched.
+      local json=0
+      [[ "${1:-}" == "--json" ]] && json=1
+      local n present
+      if (( json )); then
+        printf '{\n  "contract_version": 1,\n  "harnesses": [\n'
+        local first=1
+        for n in "${HARNESS_REGISTRY_NAMES[@]}"; do
+          present=false
+          harness_present "$n" && present=true
+          (( first )) || printf ',\n'
+          first=0
+          # Registry values are static identifiers/short phrases (no quotes,
+          # backslashes, or newlines), so plain printf interpolation is
+          # JSON-safe here.
+          printf '    {"name": "%s", "present": %s, "capability_tags": "%s", "cost_tier": "%s", "autonomy_class": "%s", "auth_requirement": "%s", "health_probe": "%s", "drift_pins": "%s"}' \
+            "$n" "$present" \
+            "$(harness_field "$n" capability_tags)" \
+            "$(harness_field "$n" cost_tier)" \
+            "$(harness_field "$n" autonomy_class)" \
+            "$(harness_field "$n" auth_requirement)" \
+            "$(harness_field "$n" health_probe)" \
+            "$(harness_field "$n" drift_pins)"
+        done
+        printf '\n  ]\n}\n'
+      else
+        for n in "${HARNESS_REGISTRY_NAMES[@]}"; do
+          present=missing
+          harness_present "$n" && present=present
+          printf '%-14s %-8s %-22s %-7s %-11s %-8s %s\n' \
+            "$n" "$present" \
+            "$(harness_field "$n" capability_tags)" \
+            "$(harness_field "$n" cost_tier)" \
+            "$(harness_field "$n" autonomy_class)" \
+            "$(harness_field "$n" auth_requirement)" \
+            "$(harness_field "$n" drift_pins)"
+        done
+      fi
+      ;;
+    health)
+      local name="${1:?usage: health <name>}"
+      harness_health "$name"
+      ;;
     -h|--help|help|"")
       cat <<'EOF'
 harness-registry — per-harness contract lookup
@@ -458,6 +552,8 @@ Usage:
   harness-registry.sh field  <name> <field>
   harness-registry.sh oneshot <name>
   harness-registry.sh probe  <name> [model]
+  harness-registry.sh roster [--json]
+  harness-registry.sh health <name>
 
 Known harnesses (see HARNESS_REGISTRY_NAMES): pi, claude, opencode, codex, cursor-agent, hermes, droid, forge, amp, openclaw, mprocs, shell
 Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins

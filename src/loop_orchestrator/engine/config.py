@@ -81,6 +81,11 @@ class HarnessPolicy:
     cost_ceiling: str = ""  # max registry cost_tier (low|medium|high); "" = no ceiling
     autonomy_cap: str = ""  # max registry autonomy_class (none|attended|unattended); "" = no cap
     role_tag_map: dict[str, list[str]] = field(default_factory=dict)  # role -> capability tags
+    role_defaults: dict[str, str] = field(default_factory=dict)  # role -> rewrite-to harness
+    # Roles where a high-drift harness running unattended is forced through
+    # human approval (plan A.2). Only consulted once a policy is written —
+    # the empty policy never reaches the gate's harness pass.
+    high_risk_roles: list[str] = field(default_factory=lambda: ["infra"])
 
 
 @dataclass(frozen=True)

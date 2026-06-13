@@ -285,6 +285,13 @@ class Substrate:
         harness has no one-shot mode (registry exits 1)."""
         return self._run("harness-registry", "oneshot", name, timeout=10).stdout.strip()
 
+    def harness_roster(self) -> dict[str, dict]:
+        """Governance roster snapshot keyed by harness name (`harness-registry
+        roster --json`): per-harness governance fields + a `present` flag.
+        Never cached — `present` reflects the host's PATH right now."""
+        doc = self._run_json("harness-registry", "roster", "--json", timeout=15)
+        return {entry["name"]: entry for entry in doc.get("harnesses", [])}
+
     # ── deck support ──────────────────────────────────────────────────────
     # The deck is a NON-WRITER: every mutation it triggers goes through the
     # same audited CLIs a human would use. These wrappers exist so the deck

@@ -9,6 +9,7 @@ after one corrective re-prompt (needs-human doc filed), 5 paused.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shlex
@@ -26,7 +27,7 @@ from . import actions as actions_mod
 from . import decision as decision_mod
 from . import decisions, gate, wiki
 from .brain import Brain, BrainError, oneshot_argv, run_oneshot
-from .config import EngineConfig
+from .config import EngineConfig, HarnessPolicy
 from .decision import DecisionError
 from .events import EventLog, parse_ts
 from .observe import EngineSnapshot, Observer
@@ -373,7 +374,23 @@ def run_once(
             return _file_needs_human(paths, events, approval, second_error, reply)
 
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
-    classifications = gate.classify_batch(parsed.actions, len(snap.lanes), config)
+    # Harness governance (plan A.2): resolve a per-cycle roster snapshot and
+    # thread it into the gate. Only when a policy is actually written — the
+    # empty policy is a pass-through, so skip the subprocess and keep the
+    # call profile identical to today. A roster failure degrades to None
+    # (pass-through) with an event; it never aborts the cycle.
+    roster = None
+    if config.harness_policy != HarnessPolicy():
+        try:
+            roster = substrate.harness_roster()
+        except SubstrateError as exc:
+            events.append("error", kind="roster-failed", error=str(exc))
+    governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)
+    for governance_event in governance_events:
+        events.append("governance", **governance_event)
+    if governance_events:
+        parsed = dataclasses.replace(parsed, actions=governed)
+    classifications = gate.classify_batch(parsed.actions, len(snap.lanes), config, roster)
     events.append("gate", id=parsed.id, classifications=classifications)
 
     doc = decisions.create(parsed, classifications, approval, paths)

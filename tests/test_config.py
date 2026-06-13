@@ -126,6 +126,25 @@ engine:
     assert policy.role_tag_map == {"infra": ["ops", "code"], "web": ["product", "synthesis"]}
 
 
+def test_harness_policy_governance_fields_parsed(tmp_path):
+    (tmp_path / "lane-config.yaml").write_text(
+        """
+engine:
+  harness_policy:
+    role_defaults:
+      infra: claude
+    high_risk_roles: [infra, ops]
+""",
+        encoding="utf-8",
+    )
+    policy = load_config(tmp_path).harness_policy
+    assert policy.role_defaults == {"infra": "claude"}
+    assert policy.high_risk_roles == ["infra", "ops"]
+    # defaults: no role rewrites declared, infra is the high-risk role
+    assert HarnessPolicy().role_defaults == {}
+    assert HarnessPolicy().high_risk_roles == ["infra"]
+
+
 def test_harness_policy_partial_keeps_defaults(tmp_path):
     (tmp_path / "lane-config.yaml").write_text(
         """

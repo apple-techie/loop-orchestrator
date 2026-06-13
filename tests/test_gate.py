@@ -158,3 +158,172 @@ def test_batch_upgrade_spares_non_dispatch_and_keeps_blocked():
         "destructive",
         "safe",
     ]
+
+
+# ── harness governance pass (T0013, plan A.2) ──────────────────────────────
+# These use the REAL EngineConfig/HarnessPolicy (the _Config stand-in above
+# predates governance and is only touched on the roster=None path).
+
+from loop_orchestrator.engine.config import EngineConfig, HarnessPolicy  # noqa: E402
+from loop_orchestrator.engine.gate import classify_harness, govern_add_lanes  # noqa: E402
+
+
+def _entry(name, present=True, tags="code", cost="medium", autonomy="attended", drift="med"):
+    return {
+        "name": name,
+        "present": present,
+        "capability_tags": tags,
+        "cost_tier": cost,
+        "autonomy_class": autonomy,
+        "auth_requirement": "account",
+        "health_probe": "",
+        "drift_pins": drift,
+    }
+
+
+ROSTER = {
+    "claude": _entry(
+        "claude", tags="brain,ingest,code,ops", cost="high", autonomy="unattended", drift="low"
+    ),
+    "codex": _entry("codex", tags="code,brain", cost="high", autonomy="unattended", drift="high"),
+    "pi": _entry("pi", tags="product,synthesis"),
+    "amp": _entry("amp", tags="search,research", cost="high", autonomy="unattended", drift="high"),
+    "droid": _entry("droid", present=False),
+}
+
+
+def policy_cfg(**kwargs) -> EngineConfig:
+    return EngineConfig(harness_policy=HarnessPolicy(**kwargs))
+
+
+def role_lane(harness="claude", role="infra", auto_approve=False, window="gov-1"):
+    return AddLaneAction(
+        window=window,
+        harness=harness,
+        brief="b",
+        rationale="r",
+        role=role,
+        auto_approve=auto_approve,
+    )
+
+
+def test_roster_none_is_pass_through_even_with_policy():
+    cfg = policy_cfg(deny=["claude"])
+    assert classify(role_lane("claude"), 1, cfg) == "safe"
+    assert classify_harness(role_lane("claude"), cfg, None) is None
+
+
+def test_empty_policy_is_pass_through_even_with_roster():
+    cfg = EngineConfig()
+    assert classify(role_lane("amp", auto_approve=True), 1, cfg, ROSTER) == "safe"
+    assert classify_harness(role_lane("amp"), cfg, ROSTER) is None
+    assert govern_add_lanes([role_lane("amp")], cfg, ROSTER) == ([role_lane("amp")], [])
+
+
+def test_denied_harness_blocked():
+    cfg = policy_cfg(deny=["amp"])
+    assert classify(role_lane("amp"), 1, cfg, ROSTER) == "blocked"
+
+
+def test_unknown_to_roster_blocked():
+    cfg = policy_cfg(allow=["claude"])
+    # the registry-typo case: 'cluade' never reaches the bash boundary
+    assert classify(role_lane("cluade"), 1, cfg, ROSTER) == "blocked"
+
+
+def test_not_in_allowlist_blocked_without_role_default():
+    cfg = policy_cfg(allow=["claude", "pi"])
+    assert classify(role_lane("codex"), 1, cfg, ROSTER) == "blocked"
+
+
+def test_allowlisted_harness_safe():
+    cfg = policy_cfg(allow=["claude", "pi"])
+    assert classify(role_lane("claude"), 1, cfg, ROSTER) == "safe"
+
+
+def test_role_tag_map_mismatch_blocked():
+    cfg = policy_cfg(role_tag_map={"infra": ["ops", "code"]})
+    assert classify(role_lane("pi", role="infra"), 1, cfg, ROSTER) == "blocked"
+    # unmapped role: no tag constraint
+    assert classify(role_lane("pi", role="product"), 1, cfg, ROSTER) == "safe"
+
+
+def test_rewrite_to_role_default():
+    cfg = policy_cfg(role_tag_map={"infra": ["ops"]}, role_defaults={"infra": "claude"})
+    actions, events = govern_add_lanes([role_lane("pi", role="infra")], cfg, ROSTER)
+    assert len(actions) == 1
+    assert actions[0].harness == "claude"
+    assert events == [
+        {
+            "event": "harness-rewrite",
+            "window": "gov-1",
+            "role": "infra",
+            "from_harness": "pi",
+            "to_harness": "claude",
+        }
+    ]
+    # the rewritten action then classifies clean
+    assert classify(actions[0], 1, cfg, ROSTER) == "safe"
+
+
+def test_no_rewrite_when_default_itself_not_allowed():
+    cfg = policy_cfg(
+        role_tag_map={"infra": ["ops"]}, role_defaults={"infra": "pi"}, deny=["claude"]
+    )
+    actions, events = govern_add_lanes([role_lane("codex", role="infra")], cfg, ROSTER)
+    assert actions[0].harness == "codex"  # untouched: pi has no 'ops' tag either
+    assert events == []
+    assert classify(actions[0], 1, cfg, ROSTER) == "blocked"
+
+
+def test_cost_ceiling_exceeded_destructive():
+    cfg = policy_cfg(cost_ceiling="medium")
+    assert classify(role_lane("claude"), 1, cfg, ROSTER) == "destructive"
+    assert classify(role_lane("pi"), 1, cfg, ROSTER) == "safe"
+
+
+def test_autonomy_cap_exceeded_destructive():
+    cfg = policy_cfg(autonomy_cap="attended")
+    assert classify(role_lane("codex"), 1, cfg, ROSTER) == "destructive"
+    assert classify(role_lane("pi"), 1, cfg, ROSTER) == "safe"
+
+
+def test_roster_missing_harness_destructive():
+    cfg = policy_cfg(allow=["droid", "claude"])
+    assert classify(role_lane("droid"), 1, cfg, ROSTER) == "destructive"
+
+
+def test_roster_health_word_destructive():
+    cfg = policy_cfg(allow=["codex", "claude"])
+    sick = {**ROSTER, "codex": {**ROSTER["codex"], "health": "unauthenticated"}}
+    assert classify(role_lane("codex"), 1, cfg, sick) == "destructive"
+
+
+def test_high_drift_unattended_high_risk_destructive():
+    cfg = policy_cfg(allow=["codex", "claude"])  # high_risk_roles defaults to ["infra"]
+    assert classify(role_lane("codex", role="infra", auto_approve=True), 1, cfg, ROSTER) == (
+        "destructive"
+    )
+    # attended, or a low-risk role, stays safe
+    assert classify(role_lane("codex", role="infra"), 1, cfg, ROSTER) == "safe"
+    assert classify(role_lane("codex", role="search", auto_approve=True), 1, cfg, ROSTER) == "safe"
+
+
+def test_blocked_beats_harness_destructive_and_shape_rules_survive():
+    cfg = policy_cfg(deny=["amp"])
+    # denied + raw cmd: blocked wins over the cmd shape rule
+    denied_with_cmd = AddLaneAction(
+        window="gov-2", harness="amp", cmd="python w.py", brief="b", rationale="r"
+    )
+    assert classify(denied_with_cmd, 1, cfg, ROSTER) == "blocked"
+    # allowed harness + raw cmd: the shape rule still fires
+    allowed_with_cmd = AddLaneAction(
+        window="gov-3", harness="claude", cmd="python w.py", brief="b", rationale="r"
+    )
+    assert classify(allowed_with_cmd, 1, cfg, ROSTER) == "destructive"
+
+
+def test_classify_batch_threads_roster():
+    cfg = policy_cfg(deny=["amp"])
+    actions = [role_lane("amp", window="gov-4"), dispatch("run tests")]
+    assert classify_batch(actions, 1, cfg, ROSTER) == ["blocked", "safe"]

@@ -33,6 +33,8 @@ def fakes_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         "FAKE_BRAIN_MODE",
         "FAKE_METRICS_FAIL",
         "FAKE_LINT_FAIL",
+        "FAKE_ROSTER_JSON",
+        "FAKE_HEALTH",
     ):
         monkeypatch.delenv(var, raising=False)
     return log

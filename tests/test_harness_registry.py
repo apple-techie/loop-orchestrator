@@ -129,3 +129,89 @@ def test_probe_output_untouched_by_governance_fields():
     assert proc.returncode == 0
     for field in GOVERNANCE_FIELDS:
         assert field not in proc.stdout
+
+
+# ── roster + health verbs (T0011) ──────────────────────────────────────────
+
+
+def test_roster_json_contract():
+    import json
+
+    proc = run_cli("roster", "--json")
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads(proc.stdout)
+    assert doc["contract_version"] == 1
+    entries = {h["name"]: h for h in doc["harnesses"]}
+    assert list(entries) == HARNESSES
+    for entry in entries.values():
+        assert isinstance(entry["present"], bool)
+        for field in GOVERNANCE_FIELDS:
+            assert field in entry
+    assert entries["claude"]["drift_pins"] == "low"
+    # shell needs no binary, so it is always present.
+    assert entries["shell"]["present"] is True
+
+
+def test_roster_plain_lists_every_harness():
+    proc = run_cli("roster")
+    assert proc.returncode == 0
+    lines = proc.stdout.splitlines()
+    assert len(lines) == len(HARNESSES)
+    assert [line.split()[0] for line in lines] == HARNESSES
+
+
+def test_health_shell_ok():
+    # shell has no binary and no probe: always ok, exit 0.
+    proc = run_cli("health", "shell")
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "ok"
+
+
+def test_health_unknown_harness():
+    proc = run_cli("health", "nosuch")
+    assert proc.returncode == 1
+    assert "unknown harness" in proc.stderr
+    assert proc.stdout == ""
+
+
+def test_health_missing_binary():
+    import os
+
+    # A PATH without the codex binary (but with bash) must read missing.
+    env = {**os.environ, "PATH": "/usr/bin:/bin"}
+    proc = subprocess.run(
+        ["bash", str(REGISTRY), "health", "codex"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 1
+    assert proc.stdout.strip() == "missing"
+
+
+def _health_with_overrides(overrides: str) -> subprocess.CompletedProcess[str]:
+    # Drive the probe paths hermetically: source the registry, override the
+    # target harness's governance vars in-shell, then call the CLI entrypoint.
+    script = f'source "{REGISTRY}"; {overrides}; _harness_registry_cli health shell'
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+
+
+def test_health_probe_pass_is_ok():
+    proc = _health_with_overrides("HARNESS_SHELL_HEALTH_PROBE=true")
+    assert proc.returncode == 0
+    assert proc.stdout.strip() == "ok"
+
+
+def test_health_probe_fail_reads_unhealthy_without_auth():
+    proc = _health_with_overrides("HARNESS_SHELL_HEALTH_PROBE=false")
+    assert proc.returncode == 1
+    assert proc.stdout.strip() == "unhealthy"
+
+
+def test_health_probe_fail_reads_unauthenticated_with_auth():
+    proc = _health_with_overrides(
+        "HARNESS_SHELL_HEALTH_PROBE=false; HARNESS_SHELL_AUTH_REQUIREMENT=account"
+    )
+    assert proc.returncode == 1
+    assert proc.stdout.strip() == "unauthenticated"
