@@ -55,3 +55,19 @@ retro` and the Confluence page._
   `mode:text` dispatch to a non-agent (shell) lane should classify DESTRUCTIVE
   or BLOCKED, and a health-aware `wait_ready` should refuse to paste an agent
   brief into a shell lane. This is the build motivating its own next test.
+
+- **F3 — model-unavailable failover (live, 2026-06-13).** Mid-build, the brain
+  harness's model ("Claude Fable 5") went unavailable; `claude -p` exited 1
+  printing the notice to STDOUT, so classify_failure mislabeled it `exit` (not
+  quota/timeout) and stderr_excerpt was empty — endless retries with no
+  backoff. Failover required pinning an available model (claude-opus-4-8) via
+  ANTHROPIC_MODEL + a project .claude/settings.json, because the claude
+  MODEL_FLAG is "config" and brain.model is NOT wired into the oneshot template.
+  **Refinements:** (1) classify_failure needs a `model-unavailable` kind (match
+  the notice; check STDOUT too) that arms a backoff or escalate, not retries;
+  (2) the registry should wire a per-harness model override into the oneshot/
+  launch so failover is a config change, not an env hack; (3) governance should
+  support model-level failover (a fallback model per harness), not only
+  harness-level. Codex was simultaneously down too, so the only failover was a
+  model pin within claude — underscoring that availability is per (harness,
+  model), a fact the roster/health probe should carry.
