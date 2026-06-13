@@ -29,10 +29,10 @@ policy = today's behavior), gate-green per batch, no reinstall, no push.
 
 | Issue | Title | Status (from tasks/) |
 |-------|-------|----------------------|
-| T0010 | registry governance fields            | open |
-| T0011 | roster + health verbs                 | open |
-| T0012 | HarnessPolicy config                  | open |
-| T0013 | classify_harness gate                 | open |
+| T0010 | registry governance fields            | done |
+| T0011 | roster + health verbs                 | done |
+| T0012 | HarnessPolicy config                  | done |
+| T0013 | classify_harness gate                 | done |
 | T0014 | boot validation + brain-prompt rubric | open |
 
 Status is mirrored from each task file's frontmatter (the source of truth);
@@ -55,6 +55,16 @@ retro` and the Confluence page._
   `mode:text` dispatch to a non-agent (shell) lane should classify DESTRUCTIVE
   or BLOCKED, and a health-aware `wait_ready` should refuse to paste an agent
   brief into a shell lane. This is the build motivating its own next test.
+
+- **F2 — content unrecoverable post-relaunch (recorded 2026-06-13).** F2 was a
+  finding logged to this board during andrew's pre-outage session, but the
+  Fable 5 relaunch lost the F2 (and F3) board entries. F3 was recovered from the
+  loop page (`ops-wiki/loops/harness-governance.md`) and re-logged below; **F2's
+  content is not recoverable** — an exhaustive search (git history, the loop
+  page, checkpoint, log, coord lane, and all processed mailbox messages under
+  `.loop/messages/processed/`) found only references to "F2 lost/unconfirmed",
+  never its substance. Recorded here so the gap is explicit rather than silent;
+  if andrew recalls the original F2, it can be re-logged.
 
 - **F3 — model-unavailable failover (live, 2026-06-13).** Mid-build, the brain
   harness's model ("Claude Fable 5") went unavailable; `claude -p` exited 1
