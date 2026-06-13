@@ -550,16 +550,20 @@ _harness_registry_cli() {
           (( first )) || printf ',\n'
           first=0
           # Registry values are static identifiers/short phrases (no quotes,
-          # backslashes, or newlines), so plain printf interpolation is
-          # JSON-safe here.
-          printf '    {"name": "%s", "present": %s, "capability_tags": "%s", "cost_tier": "%s", "autonomy_class": "%s", "auth_requirement": "%s", "health_probe": "%s", "drift_pins": "%s"}' \
+          # backslashes, or newlines — oneshot_template carries spaces and a
+          # {prompt} token but no JSON metacharacters), so plain printf
+          # interpolation is JSON-safe here. oneshot_template is exposed so the
+          # engine gate can tell an agent lane (non-empty template) from a
+          # non-agent shell/dashboard lane (empty) — F1 dispatch-target check.
+          printf '    {"name": "%s", "present": %s, "capability_tags": "%s", "cost_tier": "%s", "autonomy_class": "%s", "auth_requirement": "%s", "health_probe": "%s", "drift_pins": "%s", "oneshot_template": "%s"}' \
             "$n" "$present" \
             "$(harness_field "$n" capability_tags)" \
             "$(harness_field "$n" cost_tier)" \
             "$(harness_field "$n" autonomy_class)" \
             "$(harness_field "$n" auth_requirement)" \
             "$(harness_field "$n" health_probe)" \
-            "$(harness_field "$n" drift_pins)"
+            "$(harness_field "$n" drift_pins)" \
+            "$(harness_field "$n" oneshot_template)"
         done
         printf '\n  ]\n}\n'
       else

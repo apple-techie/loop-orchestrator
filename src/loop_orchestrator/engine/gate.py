@@ -137,17 +137,63 @@ def govern_add_lanes(
     return rewritten, events
 
 
+def _classify_dispatch_target(
+    action: Action, roster: Roster | None, lane_harnesses: dict[str, str] | None
+) -> str | None:
+    """F1 (Phase 2): govern the TARGET of a dispatch/steer, not the add_lane
+    harness choice. A `mode='text'` dispatch/steer is an agent BRIEF — it only
+    does anything on a lane whose harness can act on prose. Returns:
+
+      - BLOCKED      the target lane is unknown to the per-cycle lane snapshot,
+                     or runs a harness unknown to the roster (cannot verify it
+                     is an agent at all);
+      - DESTRUCTIVE  the target runs a non-agent harness (shell/mprocs — empty
+                     `oneshot_template`, or the `shell` harness): an agent brief
+                     there is the silent no-op the F1 finding caught, so a human
+                     must confirm;
+      - None         no opinion — no lane snapshot threaded, not a text
+                     dispatch/steer, or the target is a genuine agent lane.
+
+    `mode='command'` is never F1's concern (running a shell command on a shell
+    lane is exactly what command mode is for) — it is left to the existing shape
+    rule. With `lane_harnesses=None` (every pre-F1 caller / empty policy) this is
+    inert, so existing behavior is unchanged.
+    """
+    if lane_harnesses is None or action.kind not in ("dispatch", "steer"):
+        return None
+    if getattr(action, "mode", "text") != "text":
+        return None
+    harness = lane_harnesses.get(action.lane)
+    if harness is None:
+        return BLOCKED  # target lane unknown to the cycle's lane snapshot
+    entry = roster.get(harness) if roster is not None else None
+    if entry is None:
+        return BLOCKED  # target runs a harness unknown to the roster
+    if harness == "shell" or not entry.get("oneshot_template", ""):
+        return DESTRUCTIVE  # agent brief to a non-agent (shell/dashboard) lane
+    return None
+
+
 def classify(
-    action: Action, live_lane_count: int, config: EngineConfig, roster: Roster | None = None
+    action: Action,
+    live_lane_count: int,
+    config: EngineConfig,
+    roster: Roster | None = None,
+    lane_harnesses: dict[str, str] | None = None,
 ) -> str:
     """Classify one action. blocked > destructive > safe.
 
     With a roster threaded in, the harness-governance pass (classify_harness)
-    runs ABOVE the shape rules and merges by severity; with roster=None
-    (the default, and every pre-governance caller) behavior is unchanged.
+    runs ABOVE the shape rules and merges by severity; with a lane snapshot
+    threaded in, the F1 dispatch-target pass (_classify_dispatch_target) does
+    too. With roster=None and lane_harnesses=None (the defaults, and every
+    pre-governance caller) behavior is unchanged.
     """
     harness_verdict = classify_harness(action, config, roster)
     if harness_verdict == BLOCKED:
+        return BLOCKED
+    target_verdict = _classify_dispatch_target(action, roster, lane_harnesses)
+    if target_verdict == BLOCKED:
         return BLOCKED
     target = getattr(action, "lane", None) or getattr(action, "window", None)
     text = getattr(action, "payload", None) or getattr(action, "brief", None)
@@ -181,6 +227,8 @@ def classify(
         return DESTRUCTIVE
     if action.kind == "add_lane" and live_lane_count >= config.destructive.max_lanes:
         return DESTRUCTIVE
+    if target_verdict == DESTRUCTIVE:
+        return DESTRUCTIVE
     if harness_verdict == DESTRUCTIVE:
         return DESTRUCTIVE
     return SAFE
@@ -191,11 +239,14 @@ def classify_batch(
     live_lane_count: int,
     config: EngineConfig,
     roster: Roster | None = None,
+    lane_harnesses: dict[str, str] | None = None,
 ) -> list[str]:
     """Per-action classify, then the fan-out guard: when the batch carries more
     dispatch+steer than max_dispatches_per_cycle, every 'safe' dispatch/steer
     in it is upgraded to 'destructive' (the whole burst needs approval)."""
-    results = [classify(action, live_lane_count, config, roster) for action in actions]
+    results = [
+        classify(action, live_lane_count, config, roster, lane_harnesses) for action in actions
+    ]
     fan_out = sum(1 for action in actions if action.kind in ("dispatch", "steer"))
     if fan_out > config.destructive.max_dispatches_per_cycle:
         results = [

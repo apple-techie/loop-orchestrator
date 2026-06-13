@@ -327,3 +327,79 @@ def test_classify_batch_threads_roster():
     cfg = policy_cfg(deny=["amp"])
     actions = [role_lane("amp", window="gov-4"), dispatch("run tests")]
     assert classify_batch(actions, 1, cfg, ROSTER) == ["blocked", "safe"]
+
+
+# ── F1 dispatch-target governance pass (T0017, Phase 2) ─────────────────────
+# A mode='text' dispatch/steer (an agent BRIEF) is governed by the TARGET
+# lane's harness: agent lanes are fine; non-agent (shell/mprocs — empty
+# oneshot_template) lanes gate (destructive); a target unknown to the lane
+# snapshot or to the roster is blocked. mode='command' is never F1's concern.
+# Activation rides on the per-cycle lane snapshot, which the loop resolves only
+# under a non-empty policy — so lane_harnesses=None (the default) is inert.
+
+# roster entries carry oneshot_template (added to the roster JSON for F1): a
+# non-empty template => the harness can act on a brief (agent lane).
+F1_ROSTER = {
+    "claude": {"name": "claude", "present": True, "oneshot_template": "claude -p {prompt}"},
+    "shell": {"name": "shell", "present": True, "oneshot_template": ""},
+    "mprocs": {"name": "mprocs", "present": True, "oneshot_template": ""},
+}
+# lane -> harness: the per-cycle snapshot the loop builds from substrate.lanes().
+F1_LANES = {"web": "claude", "docs": "shell", "ops-top": "mprocs"}
+F1_CFG = EngineConfig()
+
+
+def test_f1_text_brief_to_agent_lane_is_safe():
+    assert classify(dispatch(lane="web"), 1, F1_CFG, F1_ROSTER, F1_LANES) == "safe"
+    assert classify(steer(lane="web"), 1, F1_CFG, F1_ROSTER, F1_LANES) == "safe"
+
+
+def test_f1_text_brief_to_shell_lane_is_destructive():
+    assert classify(dispatch(lane="docs"), 1, F1_CFG, F1_ROSTER, F1_LANES) == "destructive"
+    assert classify(steer(lane="docs"), 1, F1_CFG, F1_ROSTER, F1_LANES) == "destructive"
+
+
+def test_f1_text_brief_to_dashboard_lane_is_destructive():
+    assert classify(dispatch(lane="ops-top"), 1, F1_CFG, F1_ROSTER, F1_LANES) == "destructive"
+
+
+def test_f1_command_to_shell_lane_stays_destructive_not_blocked():
+    # command mode to a shell lane is how you run shell commands — left to the
+    # existing shape rule (destructive), never F1-gated.
+    assert (
+        classify(dispatch(lane="docs", mode="command"), 1, F1_CFG, F1_ROSTER, F1_LANES)
+        == "destructive"
+    )
+
+
+def test_f1_unknown_target_lane_is_blocked():
+    assert classify(dispatch(lane="ghost"), 1, F1_CFG, F1_ROSTER, F1_LANES) == "blocked"
+
+
+def test_f1_target_harness_unknown_to_roster_is_blocked():
+    lanes = {"web": "claude", "weird": "nosuch"}
+    assert classify(dispatch(lane="weird"), 1, F1_CFG, F1_ROSTER, lanes) == "blocked"
+
+
+def test_f1_inert_without_lane_snapshot():
+    # roster threaded but no lane snapshot, or neither: no F1 opinion (today).
+    assert classify(dispatch(lane="docs"), 1, F1_CFG, F1_ROSTER, None) == "safe"
+    assert classify(dispatch(lane="docs"), 1, F1_CFG) == "safe"
+
+
+def test_f1_command_to_unknown_lane_is_not_blocked():
+    # F1's block applies to text briefs only; command to an unknown lane stays
+    # on the shape rule (destructive), not blocked.
+    assert (
+        classify(dispatch(lane="ghost", mode="command"), 1, F1_CFG, F1_ROSTER, F1_LANES)
+        == "destructive"
+    )
+
+
+def test_f1_classify_batch_threads_lane_harnesses():
+    actions = [dispatch(lane="web"), dispatch(lane="docs"), dispatch(lane="ghost")]
+    assert classify_batch(actions, 1, F1_CFG, F1_ROSTER, F1_LANES) == [
+        "safe",
+        "destructive",
+        "blocked",
+    ]

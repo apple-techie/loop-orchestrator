@@ -439,11 +439,22 @@ def run_once(
     # the prompt and the call profile identical to today. A roster failure
     # degrades to None (pass-through) with an event; it never aborts the cycle.
     roster = None
+    lane_harnesses = None
     if config.harness_policy != HarnessPolicy():
         try:
             roster = substrate.harness_roster()
         except SubstrateError as exc:
             events.append("error", kind="roster-failed", error=str(exc))
+        # F1 dispatch-target governance (Phase 2): the per-cycle lane->harness
+        # map, resolved only under a non-empty policy so the empty policy keeps
+        # today's call profile. A failure degrades to None (the F1 gate pass
+        # goes inert) with an event; it never aborts the cycle.
+        try:
+            lane_harnesses = {
+                info.window: info.harness for info in substrate.lanes() if info.harness
+            }
+        except SubstrateError as exc:
+            events.append("error", kind="lanes-failed", error=str(exc))
 
     prompt = _assemble_prompt(substrate, snap, paths, config=config, roster=roster)
 
@@ -485,7 +496,9 @@ def run_once(
         events.append("governance", **governance_event)
     if governance_events:
         parsed = dataclasses.replace(parsed, actions=governed)
-    classifications = gate.classify_batch(parsed.actions, len(snap.lanes), config, roster)
+    classifications = gate.classify_batch(
+        parsed.actions, len(snap.lanes), config, roster, lane_harnesses
+    )
     events.append("gate", id=parsed.id, classifications=classifications)
 
     doc = decisions.create(parsed, classifications, approval, paths)

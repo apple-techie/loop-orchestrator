@@ -178,6 +178,11 @@ def test_roster_json_contract():
     assert entries["claude"]["drift_pins"] == "low"
     # shell needs no binary, so it is always present.
     assert entries["shell"]["present"] is True
+    # oneshot_template is exposed (T0017 F1): agent lanes have a non-empty
+    # template, non-agent shell/dashboard lanes are empty.
+    assert entries["claude"]["oneshot_template"] == "claude -p {prompt}"
+    assert entries["shell"]["oneshot_template"] == ""
+    assert entries["mprocs"]["oneshot_template"] == ""
 
 
 def test_roster_plain_lists_every_harness():
