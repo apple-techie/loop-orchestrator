@@ -131,6 +131,34 @@ def test_probe_output_untouched_by_governance_fields():
         assert field not in proc.stdout
 
 
+# ── readiness marker fields (T0015) ─────────────────────────────────────────
+
+
+def test_readiness_marker_fields_resolve_and_empty_safe():
+    # working_marker / idle_marker are declared, regex-valued, and empty-safe.
+    assert field_value("claude", "working_marker") == "esc to interrupt"
+    assert field_value("claude", "idle_marker") == "accept edits on|bypass permissions on"
+    assert field_value("codex", "working_marker") == "esc to interrupt"
+    assert "esc to interrupt" in field_value("pi", "working_marker")
+    # Harnesses with no declared marker return "" (heuristics only), exit 0.
+    assert field_value("amp", "working_marker") == ""
+    assert field_value("shell", "working_marker") == ""
+    assert field_value("shell", "idle_marker") == ""
+
+
+def test_readiness_markers_resolve_for_every_harness():
+    for name in HARNESSES:
+        field_value(name, "working_marker")  # asserts exit 0 internally
+        field_value(name, "idle_marker")
+
+
+def test_fields_verb_includes_readiness_rows():
+    proc = run_cli("fields", "claude")
+    assert proc.returncode == 0
+    assert "working_marker" in proc.stdout
+    assert "idle_marker" in proc.stdout
+
+
 # ── roster + health verbs (T0011) ──────────────────────────────────────────
 
 
