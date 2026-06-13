@@ -92,3 +92,17 @@ retro` and the Confluence page._
   destructive shape. **Refinement:** governance/objective-fences should make
   crossing into an explicitly-deferred phase an escalate-or-block, not a brain
   judgment call. Operator interrupted the lane and forced the escalate.
+
+## Sprint: "Govern P2 — readiness/health" (green-lit 2026-06-13)
+Goal: the per-harness readiness/health contract + the dispatch-target (F1) and
+model-availability (F3) governance gaps. Additive; frozen status output.
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| T0015 | harness-aware lane readiness markers | open |
+| T0016 | real health probe + health-aware wait_ready | open |
+| T0017 | F1 — validate dispatch/steer targets are agent lanes | open |
+| T0018 | F3 — model-unavailable failure kind + model failover | open |
+
+(Migration map unchanged — when Jira is added these replay as a new epic +
+sprint via the loop-pm jira verbs; task files are the source of truth.)
