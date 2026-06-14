@@ -14,7 +14,7 @@ from pathlib import Path
 from ..locking import atomic_write_json
 from ..paths import SessionPaths
 from ..substrate import Substrate, SubstrateError
-from .events import utc_now
+from .events import parse_ts, utc_now
 
 
 @dataclass
@@ -29,6 +29,22 @@ class EngineSnapshot:
 
     def to_dict(self) -> dict:
         return {"contract_version": 1, **asdict(self)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> EngineSnapshot:
+        """Rebuild a snapshot from its persisted form (snapshot.json) — the
+        inverse of to_dict(). Tolerates the extra contract_version key and any
+        missing/unknown field (old or partial snapshots degrade to empty
+        defaults) so a stale-fallback read never raises on schema drift."""
+        return cls(
+            generated_at=str(data.get("generated_at") or ""),
+            lanes=data.get("lanes") or {},
+            loops=data.get("loops") or {},
+            mailbox_pending=list(data.get("mailbox_pending") or []),
+            processed_count=int(data.get("processed_count") or 0),
+            restarts_tail=list(data.get("restarts_tail") or []),
+            checkpoint_tokens=data.get("checkpoint_tokens"),
+        )
 
 
 def _restarts_tail(path: Path, n: int = 10) -> list[dict]:
@@ -52,6 +68,57 @@ def _restarts_tail(path: Path, n: int = 10) -> list[dict]:
             out.append(obj)
     out.reverse()
     return out
+
+
+# F7 (T0029): observe must degrade gracefully when the all-lanes fan-out is slow
+# under load instead of aborting the cycle. A flat 30s starved large sessions
+# (every pane captured at once); the timeout should scale with the lane count,
+# and on a fan-out failure the engine reuses the last good snapshot.json rather
+# than failing the whole cycle.
+FANOUT_BASE_TIMEOUT_S = 30.0
+FANOUT_PER_LANE_TIMEOUT_S = 5.0
+FANOUT_TIMEOUT_CAP_S = 120.0
+
+
+def adaptive_timeout(
+    lane_count: int,
+    base: float = FANOUT_BASE_TIMEOUT_S,
+    per_lane: float = FANOUT_PER_LANE_TIMEOUT_S,
+    cap: float = FANOUT_TIMEOUT_CAP_S,
+) -> float:
+    """Fan-out timeout that scales with lane count, bounded by `cap` — a large
+    session's all-pane capture needs more than a flat base, but never unbounded.
+    Pure; lane_count <= 0 yields the base."""
+    return min(cap, base + per_lane * max(0, lane_count))
+
+
+def _age_seconds(generated_at: str, now: str) -> float | None:
+    """Seconds between a snapshot's generated_at and `now` (both contract TS),
+    clamped at 0; None when either timestamp is absent or unparseable."""
+    if not generated_at:
+        return None
+    try:
+        delta_s = (parse_ts(now) - parse_ts(generated_at)).total_seconds()
+    except ValueError:
+        return None
+    return max(0.0, delta_s)
+
+
+def load_last_snapshot(snapshot_path: Path) -> EngineSnapshot | None:
+    """The last persisted snapshot (snapshot.json) as an EngineSnapshot, or None
+    when it is absent/empty/corrupt — the stale-fallback source on a fan-out
+    failure."""
+    try:
+        raw = snapshot_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return EngineSnapshot.from_dict(data)
 
 
 class Observer:
@@ -87,6 +154,21 @@ class Observer:
         )
         atomic_write_json(self.paths.snapshot_path, snap.to_dict())
         return snap
+
+    def snapshot_or_stale(self) -> tuple[EngineSnapshot, bool, float | None]:
+        """A fresh snapshot, or — when the all-lanes fan-out fails (e.g. a
+        transient load spike times it out) — the last good snapshot reused so the
+        cycle proceeds on known state instead of aborting. Returns
+        (snapshot, stale, age_s): (fresh, False, None) on success; (last, True,
+        age_seconds) on fallback. Re-raises the SubstrateError only when there is
+        no prior snapshot to fall back to (nothing safe to proceed on)."""
+        try:
+            return self.snapshot(), False, None
+        except SubstrateError:
+            last = load_last_snapshot(self.paths.snapshot_path)
+            if last is None:
+                raise
+            return last, True, _age_seconds(last.generated_at, utc_now())
 
 
 def delta(prev_dict: dict | None, cur_dict: dict) -> list[tuple[str, dict]]:

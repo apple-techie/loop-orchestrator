@@ -175,6 +175,49 @@ def test_paused_returns_5_without_brain(project, call_log):
     assert "paused" in [e["event"] for e in _events(paths)]
 
 
+def test_observe_stale_proceeds_when_fanout_fails(project, call_log, monkeypatch):
+    # F7 (T0029): a first cycle seeds snapshot.json; when the next fan-out fails,
+    # observe reuses it (observe-stale) and the cycle proceeds to the brain in
+    # auto mode instead of aborting.
+    from loop_orchestrator.engine.observe import Observer
+    from loop_orchestrator.substrate import SubstrateError
+
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+    paths = SessionPaths(project, "demo")
+    assert paths.snapshot_path.exists()
+    before = len(_brain_calls(call_log))
+
+    def boom(self):
+        raise SubstrateError(["loop-lane-status", "--json", "--all"], None, "timed out after 30s")
+
+    monkeypatch.setattr(Observer, "snapshot", boom)
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+
+    kinds = [e["event"] for e in _events(paths)]
+    assert "observe-stale" in kinds  # degraded, not aborted
+    stale = [e for e in _events(paths) if e["event"] == "observe-stale"][-1]
+    assert stale["age_s"] is not None and "adaptive_timeout_s" in stale
+    assert len(_brain_calls(call_log)) == before + 1  # cycle proceeded
+
+
+def test_observe_failed_skips_cycle_without_prior_snapshot(project, call_log, monkeypatch):
+    # No prior snapshot.json to fall back to => skip the cycle (return 6,
+    # observe-failed) rather than crash; the brain is never called.
+    from loop_orchestrator.engine.observe import Observer
+    from loop_orchestrator.substrate import SubstrateError
+
+    def boom(self):
+        raise SubstrateError(["loop-lane-status", "--json", "--all"], None, "timed out after 30s")
+
+    monkeypatch.setattr(Observer, "snapshot", boom)
+    assert run_once(project, "demo", EngineConfig()) == 6
+
+    paths = SessionPaths(project, "demo")
+    kinds = [e["event"] for e in _events(paths)]
+    assert "observe-failed" in kinds
+    assert _brain_calls(call_log) == []  # never reached the brain
+
+
 def test_cli_once_dry_run(project, call_log, capsys):
     rc = cli.main(["--project-root", str(project), "--session", "demo", "once", "--dry-run"])
 
