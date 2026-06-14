@@ -133,6 +133,32 @@ def file_decision(
     )
 
 
+def append_handoff(lane_page: Path, window: str, harness: str, pane_tail: str, now: str) -> None:
+    """Append-only `## Handoff state` breadcrumb to a lane page (T0023), creating
+    the page (and lanes/ dir) if absent. The engine stamps what it can — as-of,
+    harness, the shared working tree — plus the idle agent's captured pane tail,
+    which holds the in-flight step/touched/blocked-on/assumptions as the agent
+    left them. The pane is indented (not fenced) so a ``` in the capture can't
+    break the block. A drop_lane swap thus always leaves an observable signal."""
+    indented = "\n".join("    " + line for line in pane_tail.rstrip("\n").splitlines()) or "    "
+    block = (
+        "\n## Handoff state\n"
+        f"### [{now}] {window} handoff — {harness} (drop_lane flush)\n"
+        f"- as-of: {now}\n"
+        f"- harness: {harness}\n"
+        "- working-tree: shared project root (per-lane isolation deferred to Phase 5)\n"
+        "- step / touched / blocked-on / assumptions — as the agent left the lane pane:\n\n"
+        f"{indented}\n"
+    )
+    try:
+        existing = lane_page.read_text(encoding="utf-8")
+    except OSError:
+        existing = ""
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    _write_replace(lane_page, existing + block)
+
+
 def render_decision_entry(doc: dict) -> str:
     """Markdown entry for a pending-decision document (see decisions.py)."""
     ts = doc.get("decided_at") or doc.get("created_at") or ""

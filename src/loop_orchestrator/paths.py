@@ -50,6 +50,9 @@ class SessionPaths:
     def checkpoint_page(self) -> Path:
         return self.ops_wiki / "checkpoint.md"
 
+    def lane_page(self, window: str) -> Path:
+        return self.ops_wiki / "lanes" / f"{window}.md"
+
     @property
     def tasks_dir(self) -> Path:
         return self.project_root / "tasks"

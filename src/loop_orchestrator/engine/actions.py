@@ -18,6 +18,7 @@ from pathlib import Path
 from ..locking import atomic_write_json, file_lock, read_json
 from ..paths import SessionPaths
 from ..substrate import Substrate, SubstrateError
+from . import wiki
 from .config import EngineConfig
 from .decisions import mark_action
 from .events import EventLog, utc_now
@@ -84,6 +85,44 @@ def _wait_for_idle(substrate: Substrate, lane: str) -> bool:
         time.sleep(IDLE_POLL_INTERVAL_S)
 
 
+def _is_agent_harness(substrate: Substrate, harness: str | None) -> bool:
+    """An agent lane holds in-flight work in its pane; shell/mprocs do not, and
+    an unknown harness (raises from harness_field) reads as non-agent too."""
+    if not harness or harness in ("shell", "mprocs"):
+        return False
+    try:
+        substrate.harness_field(harness, "oneshot_template")  # raises if unknown
+    except SubstrateError:
+        return False
+    return True
+
+
+def _flush_handoff(
+    window: str, substrate: Substrate, events: EventLog, paths: SessionPaths | None
+) -> None:
+    """T0023: before a drop_lane teardown, leave a `## Handoff state` breadcrumb
+    on the lane page — but ONLY for a verified-idle agent lane, so the capture is
+    a complete state, never a mid-generation paste/read. Non-agent / unknown /
+    not-verified-idle lanes SKIP. Best-effort: any failure logs a skip and never
+    blocks the teardown."""
+    if paths is None:
+        return
+    try:
+        harness = next((i.harness for i in substrate.lanes() if i.window == window), None)
+        if not _is_agent_harness(substrate, harness):
+            events.append("handoff-skip", window=window, reason="non-agent")
+            return
+        if substrate.lane_status(window) != "idle":
+            events.append("handoff-skip", window=window, reason="not-verified-idle")
+            return
+        wiki.append_handoff(
+            paths.lane_page(window), window, harness, substrate.capture_pane(window), utc_now()
+        )
+        events.append("handoff-flush", window=window, harness=harness)
+    except SubstrateError as exc:
+        events.append("handoff-skip", window=window, reason="error", error=str(exc))
+
+
 def execute(
     action: dict,
     substrate: Substrate,
@@ -112,6 +151,7 @@ def execute(
         )
         substrate.dispatch(action["window"], action["brief"], wait_ready=True)
     elif kind == "drop_lane":
+        _flush_handoff(action["window"], substrate, events, paths)
         substrate.drop_lane(action["window"])
     elif kind == "steer":
         if action.get("wait_for_idle"):
