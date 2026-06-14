@@ -1,7 +1,10 @@
 ---
 id: T0020
 title: "demand-provision-reuse-retire HarnessPolicy + HARD reuse-before-spawn gate"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "440/0"
+commit: 2ee52d7
 depends_on: [T0019]
 scope: src/loop_orchestrator/engine/{config.py,gate.py,loop.py} + contracts/checkpoint-header.md + ooLEO/govern lane-config (starter policy + role-vocab) + tests ONLY; ADDITIVE; empty policy = today; frozen status untouched; no reinstall; no git push
 loop: harness-governance
