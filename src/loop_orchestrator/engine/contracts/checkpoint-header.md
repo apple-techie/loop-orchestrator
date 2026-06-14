@@ -55,6 +55,13 @@ Action kinds and fields (optional fields shown with their defaults):
   adding a duplicate — the gate classifies a duplicate-idle-worker add_lane
   `destructive` (reuse is the default; a role's `concurrency_allowance` is the
   only escape hatch). Choose the harness from the role's `preferred_harness`.
+  ISOLATION is automatic and conditional: a NEW code-writer lane gets its own
+  git worktree only while parallelism is real (another code-writer is already
+  live, or a peer holds dirty state); a lone serialized writer stays SHARED on
+  the project root. You do not request this — the engine decides per the rule
+  ("shared only while serialized"). When 3+ code-writers run concurrently,
+  provision ONE integration lane (its own worktree, the sole writer of `main`)
+  to reconcile their branches, rather than letting them collide on the tree.
 - drop_lane — remove a dynamic lane:
   `{kind: drop_lane, window: <live lane>, rationale: <why>}`
 - steer — redirect a lane that is mid-task:

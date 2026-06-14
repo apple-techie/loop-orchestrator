@@ -30,7 +30,12 @@ section in this file.
   there (`@loop_lane_isolation=worktree`, `@loop_lane_branch=<branch>`). DEFAULT
   is `shared` (the lane inherits the repo root — byte-identical to today); a
   harness may also declare `isolation: worktree` in the registry. Worktree
-  applies only to code-writer agent lanes (never cmd/shell/mprocs).
+  applies only to code-writer agent lanes (never cmd/shell/mprocs). T0026: the
+  engine ALSO sets `--worktree` automatically and conditionally — only once a
+  second code-writer lane is concurrent (or a peer is dirty); a lone serialized
+  writer stays shared (DORMANT at concurrency=1). At >=3 concurrent code-writers
+  the engine emits an `integration-lane-recommended` event (a dedicated
+  integration lane should own `main`); lane creation stays brain/operator-driven.
 - `drop-lane --session <s> --window <w> [--force]` — refuses non-dynamic
   windows without `--force`. Automation must NEVER pass `--force`. A worktree
   lane's tree is torn down on drop and NEVER orphaned: a clean tree is removed

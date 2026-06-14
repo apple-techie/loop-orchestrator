@@ -443,6 +443,7 @@ def run_once(
     lane_harnesses = None
     lane_kinds = None
     role_workers = None
+    code_writers = None
     if config.harness_policy != HarnessPolicy():
         try:
             roster = substrate.harness_roster()
@@ -460,6 +461,10 @@ def run_once(
             lane_harnesses = {info.window: info.harness for info in lane_infos if info.harness}
             lane_kinds = {info.window: info.kind for info in lane_infos if info.kind}
             role_workers = {}
+            # T0026: count live CODE-WRITER lanes (worker kind + an agent
+            # harness — never shell/mprocs). Drives conditional worktree
+            # provisioning; DORMANT at concurrency=1 (the rule resolves shared).
+            code_writers = 0
             for info in lane_infos:
                 if info.kind != "worker":
                     continue
@@ -467,6 +472,12 @@ def run_once(
                 bucket["live"] += 1
                 if (snap.lanes.get(info.window) or {}).get("status") == "idle":
                     bucket["idle"] += 1
+                if info.harness and info.harness not in ("shell", "mprocs"):
+                    code_writers += 1
+            # Surface the N>=3 integration-lane recommendation (plan C.3) — an
+            # observable signal the brain/operator acts on; never engine-spawned.
+            if gate.needs_integration_lane(code_writers):
+                events.append("integration-lane-recommended", code_writers=code_writers)
         except SubstrateError as exc:
             events.append("error", kind="lanes-failed", error=str(exc))
 
@@ -528,7 +539,9 @@ def run_once(
         for action in autos:
             action["status"] = "auto"
         _persist(paths, doc)
-        doc = actions_mod.execute_batch(doc, substrate, events, config, paths=paths)
+        doc = actions_mod.execute_batch(
+            doc, substrate, events, config, paths=paths, code_writers=code_writers
+        )
         _persist(paths, doc)
 
     awaiting = [a for a in doc["actions"] if a["status"] == "awaiting-approval"]

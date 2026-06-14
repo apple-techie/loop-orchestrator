@@ -18,7 +18,7 @@ from pathlib import Path
 from ..locking import atomic_write_json, file_lock, read_json
 from ..paths import SessionPaths
 from ..substrate import Substrate, SubstrateError
-from . import wiki
+from . import gate, wiki
 from .config import EngineConfig
 from .decisions import mark_action
 from .events import EventLog, utc_now
@@ -130,8 +130,13 @@ def execute(
     config: EngineConfig,
     ask_id: str = "",
     paths: SessionPaths | None = None,
+    code_writers: int | None = None,
 ) -> None:
-    """One action's side effects; raises SubstrateError on delivery failure."""
+    """One action's side effects; raises SubstrateError on delivery failure.
+
+    `code_writers` is the per-cycle count of live code-writer lanes the loop
+    resolves (None on the pre-T0026 / cli path = no conditional provisioning =
+    shared, byte-identical)."""
     kind = action["kind"]
     if kind == "dispatch":
         substrate.dispatch(
@@ -141,6 +146,17 @@ def execute(
             wait_ready=bool(action.get("wait_ready", False)),
         )
     elif kind == "add_lane":
+        # T0025 gives the explicit opt-in; T0026 adds the conditional rule —
+        # DORMANT at concurrency=1. The rule only applies to a code-writer lane
+        # (agent harness, no raw cmd) and only when the loop threaded a count;
+        # at code_writers in {None, 0} it resolves False -> shared, byte-identical.
+        new_harness = action.get("harness")
+        is_code_writer = (
+            bool(new_harness) and new_harness not in ("shell", "mprocs") and not action.get("cmd")
+        )
+        worktree = bool(action.get("worktree", False))
+        if not worktree and is_code_writer and code_writers is not None:
+            worktree = gate.should_provision_worktree(code_writers)
         substrate.add_lane(
             action["window"],
             harness=action.get("harness"),
@@ -148,9 +164,7 @@ def execute(
             model=action.get("model"),
             role=action.get("role"),
             auto_approve=bool(action.get("auto_approve", False)),
-            # T0025: opt-in worktree isolation. Inert today (AddLaneAction carries
-            # no such field); loop-tmux also resolves it from the harness registry.
-            worktree=bool(action.get("worktree", False)),
+            worktree=worktree,
         )
         substrate.dispatch(action["window"], action["brief"], wait_ready=True)
     elif kind == "drop_lane":
@@ -191,12 +205,15 @@ def execute_batch(
     events: EventLog,
     config: EngineConfig,
     paths: SessionPaths | None = None,
+    code_writers: int | None = None,
 ) -> dict:
     """Run every 'approved'/'auto' action in the doc; continue past failures.
 
     Success marks the action 'executed' (+ action event); SubstrateError marks
     it 'failed' (+ action-failed event). Steer asks get id '<decision_id>-<idx>'
-    and are recorded in asks.json when `paths` is given. Returns the updated
+    and are recorded in asks.json when `paths` is given. `code_writers` (the
+    loop's per-cycle live code-writer count) drives T0026 conditional worktree
+    provisioning; None (cli path) = shared, byte-identical. Returns the updated
     doc — persistence is the caller's job.
     """
     for action in doc.get("actions") or []:
@@ -211,6 +228,7 @@ def execute_batch(
                 config,
                 ask_id=f"{doc.get('id', '')}-{idx}",
                 paths=paths,
+                code_writers=code_writers,
             )
         except SubstrateError as exc:
             mark_action(doc, idx, "failed")
