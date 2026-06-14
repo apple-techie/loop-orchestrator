@@ -3,7 +3,25 @@ from __future__ import annotations
 import pytest
 
 from loop_orchestrator.engine import wiki
-from loop_orchestrator.engine.wiki import MARKER, file_decision, render_decision_entry
+from loop_orchestrator.engine.wiki import (
+    MARKER,
+    append_handoff,
+    file_decision,
+    has_handoff_state,
+    render_decision_entry,
+)
+
+
+def test_has_handoff_state(tmp_path):
+    # T0028: a lane page is a "successor" signal iff it carries `## Handoff state`.
+    page = tmp_path / "lanes" / "w.md"
+    assert has_handoff_state(page) is False  # missing page
+    page.parent.mkdir(parents=True)
+    page.write_text("# lane: w\n\n## Role\nworker\n", encoding="utf-8")
+    assert has_handoff_state(page) is False  # no handoff section
+    append_handoff(page, "w", "claude", "pane tail\n", "2026-06-14T00:00Z")
+    assert has_handoff_state(page) is True  # flushed -> successor recovers
+
 
 COMPILED = "# Checkpoint\n\ncompiled state, docs-owned\n"
 

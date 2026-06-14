@@ -120,16 +120,17 @@ def test_handoff_breadcrumb_is_append_only(tmp_path):
 class AddLaneSub:
     def __init__(self):
         self.calls: list[dict] = []
+        self.dispatched: list[tuple] = []
 
     def add_lane(self, window, **kwargs):
         self.calls.append({"window": window, **kwargs})
 
-    def dispatch(self, *a, **k):
-        pass
+    def dispatch(self, lane, payload, **k):
+        self.dispatched.append((lane, payload))
 
 
-def _add(harness="claude", cmd=None):
-    a = {"kind": "add_lane", "window": "w", "harness": harness, "brief": "b", "rationale": "r"}
+def _add(harness="claude", cmd=None, window="w", brief="b"):
+    a = {"kind": "add_lane", "window": window, "harness": harness, "brief": brief, "rationale": "r"}
     if cmd:
         a["cmd"] = cmd
     return a
@@ -170,3 +171,66 @@ def test_add_lane_explicit_worktree_field_still_honored(tmp_path):
     action = {**_add(), "worktree": True}
     actions.execute(action, sub, events, EngineConfig(), paths=paths, code_writers=0)
     assert sub.calls[0]["worktree"] is True  # explicit T0025 opt-in preserved
+
+
+# ── T0028 full lane-handoff (recovery brief + ack + worktree carry) ──────────
+
+import json  # noqa: E402
+
+from loop_orchestrator.engine import wiki  # noqa: E402
+
+
+def _seed_handoff(paths, window="w"):
+    page = paths.lane_page(window)
+    page.parent.mkdir(parents=True, exist_ok=True)
+    wiki.append_handoff(page, window, "claude", "last step: wiring the gate\n", "2026-06-14T00:00Z")
+
+
+def test_handoff_ack_subject_format():
+    assert actions.handoff_ack_subject("worker-3") == "re:handoff:worker-3"
+
+
+def test_cold_add_brief_unchanged(tmp_path):
+    # No predecessor handoff state => the dispatched brief is the original, verbatim.
+    paths, events = _env(tmp_path)
+    sub = AddLaneSub()
+    actions.execute(_add(brief="do the thing"), sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("w", "do the thing")]
+
+
+def test_successor_gets_recovery_brief(tmp_path):
+    # A window with a `## Handoff state` page => the successor's brief is augmented.
+    paths, events = _env(tmp_path)
+    _seed_handoff(paths, "w")
+    sub = AddLaneSub()
+    actions.execute(_add(brief="do the thing"), sub, events, EngineConfig(), paths=paths)
+    _, payload = sub.dispatched[0]
+    assert "Handoff recovery" in payload
+    assert "ops-wiki/lanes/w.md" in payload
+    assert "subject: re:handoff:w" in payload  # ack instruction
+    assert payload.endswith("do the thing")  # original brief preserved
+    assert any(e["event"] == "handoff-recovery" for e in events.tail(10))
+
+
+def test_successor_carries_predecessor_worktree(tmp_path):
+    # Predecessor was worktree-isolated (branch in the ledger) => carry it.
+    paths, events = _env(tmp_path)
+    _seed_handoff(paths, "w")
+    paths.state_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.state_file.write_text(
+        json.dumps({"loops": {"w": {"branch": "loop/demo/w"}}}), encoding="utf-8"
+    )
+    sub = AddLaneSub()
+    actions.execute(_add(brief="resume"), sub, events, EngineConfig(), paths=paths, code_writers=0)
+    assert sub.calls[0]["worktree"] is True  # carried despite code_writers=0
+    _, payload = sub.dispatched[0]
+    assert "loop/demo/w" in payload  # the carried branch is named in the brief
+
+
+def test_successor_without_predecessor_branch_no_carry(tmp_path):
+    # Handoff state but no recorded branch (shared predecessor) => no worktree carry.
+    paths, events = _env(tmp_path)
+    _seed_handoff(paths, "w")
+    sub = AddLaneSub()
+    actions.execute(_add(brief="resume"), sub, events, EngineConfig(), paths=paths, code_writers=0)
+    assert sub.calls[0]["worktree"] is False
