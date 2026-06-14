@@ -441,19 +441,21 @@ def run_once(
     # degrades to None (pass-through) with an event; it never aborts the cycle.
     roster = None
     lane_harnesses = None
+    lane_kinds = None
     if config.harness_policy != HarnessPolicy():
         try:
             roster = substrate.harness_roster()
         except SubstrateError as exc:
             events.append("error", kind="roster-failed", error=str(exc))
-        # F1 dispatch-target governance (Phase 2): the per-cycle lane->harness
-        # map, resolved only under a non-empty policy so the empty policy keeps
-        # today's call profile. A failure degrades to None (the F1 gate pass
-        # goes inert) with an event; it never aborts the cycle.
+        # Per-cycle lane snapshot, resolved only under a non-empty policy so the
+        # empty policy keeps today's call profile. One substrate.lanes() call
+        # feeds both the F1 dispatch-target map (lane->harness) and the T0019
+        # standing-lane drop guard (lane->kind). A failure degrades both to None
+        # (the gate passes go inert) with an event; it never aborts the cycle.
         try:
-            lane_harnesses = {
-                info.window: info.harness for info in substrate.lanes() if info.harness
-            }
+            lane_infos = substrate.lanes()
+            lane_harnesses = {info.window: info.harness for info in lane_infos if info.harness}
+            lane_kinds = {info.window: info.kind for info in lane_infos if info.kind}
         except SubstrateError as exc:
             events.append("error", kind="lanes-failed", error=str(exc))
 
@@ -500,7 +502,7 @@ def run_once(
     if governance_events:
         parsed = dataclasses.replace(parsed, actions=governed)
     classifications = gate.classify_batch(
-        parsed.actions, len(snap.lanes), config, roster, lane_harnesses
+        parsed.actions, len(snap.lanes), config, roster, lane_harnesses, lane_kinds
     )
     events.append("gate", id=parsed.id, classifications=classifications)
 

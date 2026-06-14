@@ -180,14 +180,16 @@ def classify(
     config: EngineConfig,
     roster: Roster | None = None,
     lane_harnesses: dict[str, str] | None = None,
+    lane_kinds: dict[str, str] | None = None,
 ) -> str:
     """Classify one action. blocked > destructive > safe.
 
     With a roster threaded in, the harness-governance pass (classify_harness)
     runs ABOVE the shape rules and merges by severity; with a lane snapshot
-    threaded in, the F1 dispatch-target pass (_classify_dispatch_target) does
-    too. With roster=None and lane_harnesses=None (the defaults, and every
-    pre-governance caller) behavior is unchanged.
+    threaded in, the F1 dispatch-target pass (_classify_dispatch_target) and the
+    T0019 standing-lane drop guard do too. With roster=None, lane_harnesses=None,
+    and lane_kinds=None (the defaults, and every pre-governance caller) behavior
+    is unchanged.
     """
     harness_verdict = classify_harness(action, config, roster)
     if harness_verdict == BLOCKED:
@@ -202,6 +204,12 @@ def classify(
     if text is not None and _ADR_ACCEPT_RE.search(text):
         return BLOCKED
     if action.kind == "drop_lane":
+        # T0019: a declared 'standing' lane is never auto-dropped — the engine
+        # never passes --force, and dropping coord/ops/docs or a long-lived
+        # writer must be a human action. With no lane snapshot threaded
+        # (lane_kinds=None) this falls back to today's DESTRUCTIVE.
+        if lane_kinds is not None and lane_kinds.get(getattr(action, "window", None)) == "standing":
+            return BLOCKED
         return DESTRUCTIVE
     if action.kind == "steer" and action.interrupt:
         return DESTRUCTIVE
@@ -240,12 +248,14 @@ def classify_batch(
     config: EngineConfig,
     roster: Roster | None = None,
     lane_harnesses: dict[str, str] | None = None,
+    lane_kinds: dict[str, str] | None = None,
 ) -> list[str]:
     """Per-action classify, then the fan-out guard: when the batch carries more
     dispatch+steer than max_dispatches_per_cycle, every 'safe' dispatch/steer
     in it is upgraded to 'destructive' (the whole burst needs approval)."""
     results = [
-        classify(action, live_lane_count, config, roster, lane_harnesses) for action in actions
+        classify(action, live_lane_count, config, roster, lane_harnesses, lane_kinds)
+        for action in actions
     ]
     fan_out = sum(1 for action in actions if action.kind in ("dispatch", "steer"))
     if fan_out > config.destructive.max_dispatches_per_cycle:

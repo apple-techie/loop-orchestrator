@@ -19,14 +19,20 @@ section in this file.
 - `up` flags incl. `--no-attach`, `--boot-check` (exit non-zero if an AI lane
   fell back to a bare shell), `--print-cmds` (dry-run, no tmux).
 - `add-lane --session <s> --window <w> (--harness <h> | --cmd <c>) [--model m]
-  [--repo p] [--role r] [--auto-approve] [--wait-ready [--ready-timeout s]]`
+  [--repo p] [--role r] [--kind standing|worker] [--auto-approve]
+  [--wait-ready [--ready-timeout s]]`
   — exit 0 = window created (and, with `--wait-ready`, best-effort readiness).
+  `--kind` declares the lane lifecycle (stored as the `@loop_lane_kind` window
+  option); default = inferred (an add-lane window is dynamic, so `worker`).
 - `drop-lane --session <s> --window <w> [--force]` — refuses non-dynamic
   windows without `--force`. Automation must NEVER pass `--force`.
 - `list-lanes --session <s>` — human table (do not machine-parse).
 - `list-lanes --session <s> --json` — `{contract_version, session,
-  generated_at, lanes: [{window, harness, model, role, cmd, base}]}`.
-  `base: true` = not created by add-lane. Null fields = option unset.
+  generated_at, lanes: [{window, harness, model, role, cmd, base, kind}]}`.
+  `base: true` = not created by add-lane. `kind: standing|worker` is the declared
+  lane lifecycle (`@loop_lane_kind`), else inferred (`base`→`standing`,
+  dynamic→`worker`); a `standing` lane is never auto-dropped. Null fields =
+  option unset.
 
 ### loop-dispatch.sh
 - `[--session <s>] [--mode command|text] [--no-enter] [--verify]

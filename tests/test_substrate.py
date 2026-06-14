@@ -35,9 +35,16 @@ def test_lanes_parses_canned_json(sub, call_log):
     lanes = sub.lanes()
     assert [lane.window for lane in lanes] == ["coord", "web", "docs", "helper"]
     assert lanes[3] == LaneInfo(
-        window="helper", harness="claude", model=None, role="impl", cmd="claude", base=False
+        window="helper",
+        harness="claude",
+        model=None,
+        role="impl",
+        cmd="claude",
+        base=False,
+        kind="worker",  # T0019: dynamic lane resolves to worker
     )
     assert all(lane.base for lane in lanes[:3])
+    assert all(lane.kind == "standing" for lane in lanes[:3])  # T0019: base -> standing
     assert call_log() == ["loop-tmux list-lanes --session demo --json"]
 
 

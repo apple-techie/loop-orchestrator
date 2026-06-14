@@ -403,3 +403,37 @@ def test_f1_classify_batch_threads_lane_harnesses():
         "destructive",
         "blocked",
     ]
+
+
+# ── T0019 standing-lane drop guard (Phase 3) ────────────────────────────────
+# A drop_lane targeting a declared 'standing' lane is BLOCKED; worker/unknown
+# stay DESTRUCTIVE. Activation rides on the per-cycle lane snapshot (lane_kinds),
+# which the loop resolves only under a non-empty policy — None = today's behavior.
+
+T0019_KINDS = {"coord": "standing", "web": "standing", "helper": "worker"}
+
+
+def _drop(window="helper"):
+    return DropLaneAction(window=window, rationale="r")
+
+
+def test_t0019_drop_standing_lane_is_blocked():
+    assert classify(_drop("web"), 1, F1_CFG, None, None, T0019_KINDS) == "blocked"
+
+
+def test_t0019_drop_worker_lane_is_destructive():
+    assert classify(_drop("helper"), 1, F1_CFG, None, None, T0019_KINDS) == "destructive"
+
+
+def test_t0019_drop_unknown_lane_is_destructive():
+    assert classify(_drop("ghost"), 1, F1_CFG, None, None, T0019_KINDS) == "destructive"
+
+
+def test_t0019_drop_without_lane_snapshot_is_destructive():
+    # no lane_kinds threaded (e.g. empty policy) => today's behavior, unchanged.
+    assert classify(_drop("web"), 1, F1_CFG) == "destructive"
+
+
+def test_t0019_classify_batch_threads_lane_kinds():
+    actions = [_drop("web"), _drop("helper")]
+    assert classify_batch(actions, 1, F1_CFG, None, None, T0019_KINDS) == ["blocked", "destructive"]

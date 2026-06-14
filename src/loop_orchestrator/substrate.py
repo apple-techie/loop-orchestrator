@@ -68,6 +68,10 @@ class LaneInfo:
     role: str | None
     cmd: str | None
     base: bool
+    # T0019: declared lane kind ('standing' | 'worker'). list-lanes resolves it
+    # (explicit @loop_lane_kind, else base->standing / dynamic->worker), so it is
+    # always populated from a live snapshot; None only for a pre-T0019 payload.
+    kind: str | None = None
 
 
 class Substrate:
@@ -143,6 +147,7 @@ class Substrate:
                 role=lane.get("role"),
                 cmd=lane.get("cmd"),
                 base=bool(lane.get("base")),
+                kind=lane.get("kind"),
             )
             for lane in doc.get("lanes", [])
         ]
