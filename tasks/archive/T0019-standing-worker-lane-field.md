@@ -1,7 +1,8 @@
 ---
 id: T0019
 title: "standing/worker declared lane field — base-lane protection + demand-provision substrate"
-status: open
+status: done
+accepted: 2026-06-14
 depends_on: []
 scope: lane-config schema + lib/lane-config-resolver.sh + loop-tmux.sh (add-lane/drop-lane) + src/loop_orchestrator/engine/ + CONTRACT.md + tests ONLY; ADDITIVE; absent field = today's base/dynamic inference; frozen lane-status output untouched; do NOT reinstall or touch running daemons; no git push
 loop: harness-governance
