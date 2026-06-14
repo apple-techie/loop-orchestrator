@@ -174,20 +174,49 @@ def _classify_dispatch_target(
     return None
 
 
+def _classify_reuse_before_spawn(
+    action: Action, config: EngineConfig, role_workers: dict[str, dict] | None
+) -> str | None:
+    """T0020 reuse-before-spawn HARD rule: an add_lane for a role that already
+    has an idle worker lane is DESTRUCTIVE (prefer reuse over a duplicate),
+    until the role's `concurrency_allowance` (default 1) permits more live
+    workers. `role_workers` is the per-cycle {role: {"idle": n, "live": n}}
+    snapshot the loop resolves (worker-kind lanes only). None / empty policy /
+    no role / no workers for the role = no opinion (today's behavior)."""
+    if role_workers is None or not isinstance(action, AddLaneAction):
+        return None
+    policy = config.harness_policy
+    if policy == _EMPTY_POLICY:
+        return None
+    role = action.role
+    if not role:
+        return None
+    counts = role_workers.get(role)
+    if not counts:
+        return None
+    allowance = policy.role_rules.get(role, {}).get("concurrency_allowance", 1)
+    if counts.get("idle", 0) >= 1 and counts.get("live", 0) >= allowance:
+        return DESTRUCTIVE
+    return None
+
+
 def classify(
     action: Action,
     live_lane_count: int,
     config: EngineConfig,
     roster: Roster | None = None,
     lane_harnesses: dict[str, str] | None = None,
+    lane_kinds: dict[str, str] | None = None,
+    role_workers: dict[str, dict] | None = None,
 ) -> str:
     """Classify one action. blocked > destructive > safe.
 
     With a roster threaded in, the harness-governance pass (classify_harness)
     runs ABOVE the shape rules and merges by severity; with a lane snapshot
-    threaded in, the F1 dispatch-target pass (_classify_dispatch_target) does
-    too. With roster=None and lane_harnesses=None (the defaults, and every
-    pre-governance caller) behavior is unchanged.
+    threaded in, the F1 dispatch-target pass (_classify_dispatch_target) and the
+    T0019 standing-lane drop guard do too. With roster=None, lane_harnesses=None,
+    and lane_kinds=None (the defaults, and every pre-governance caller) behavior
+    is unchanged.
     """
     harness_verdict = classify_harness(action, config, roster)
     if harness_verdict == BLOCKED:
@@ -195,6 +224,7 @@ def classify(
     target_verdict = _classify_dispatch_target(action, roster, lane_harnesses)
     if target_verdict == BLOCKED:
         return BLOCKED
+    reuse_verdict = _classify_reuse_before_spawn(action, config, role_workers)
     target = getattr(action, "lane", None) or getattr(action, "window", None)
     text = getattr(action, "payload", None) or getattr(action, "brief", None)
     if target == "coord":
@@ -202,6 +232,12 @@ def classify(
     if text is not None and _ADR_ACCEPT_RE.search(text):
         return BLOCKED
     if action.kind == "drop_lane":
+        # T0019: a declared 'standing' lane is never auto-dropped — the engine
+        # never passes --force, and dropping coord/ops/docs or a long-lived
+        # writer must be a human action. With no lane snapshot threaded
+        # (lane_kinds=None) this falls back to today's DESTRUCTIVE.
+        if lane_kinds is not None and lane_kinds.get(getattr(action, "window", None)) == "standing":
+            return BLOCKED
         return DESTRUCTIVE
     if action.kind == "steer" and action.interrupt:
         return DESTRUCTIVE
@@ -227,6 +263,8 @@ def classify(
         return DESTRUCTIVE
     if action.kind == "add_lane" and live_lane_count >= config.destructive.max_lanes:
         return DESTRUCTIVE
+    if reuse_verdict == DESTRUCTIVE:
+        return DESTRUCTIVE
     if target_verdict == DESTRUCTIVE:
         return DESTRUCTIVE
     if harness_verdict == DESTRUCTIVE:
@@ -240,12 +278,15 @@ def classify_batch(
     config: EngineConfig,
     roster: Roster | None = None,
     lane_harnesses: dict[str, str] | None = None,
+    lane_kinds: dict[str, str] | None = None,
+    role_workers: dict[str, dict] | None = None,
 ) -> list[str]:
     """Per-action classify, then the fan-out guard: when the batch carries more
     dispatch+steer than max_dispatches_per_cycle, every 'safe' dispatch/steer
     in it is upgraded to 'destructive' (the whole burst needs approval)."""
     results = [
-        classify(action, live_lane_count, config, roster, lane_harnesses) for action in actions
+        classify(action, live_lane_count, config, roster, lane_harnesses, lane_kinds, role_workers)
+        for action in actions
     ]
     fan_out = sum(1 for action in actions if action.kind in ("dispatch", "steer"))
     if fan_out > config.destructive.max_dispatches_per_cycle:

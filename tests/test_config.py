@@ -158,6 +158,34 @@ engine:
     assert load_config(tmp_path).harness_policy.brain_allow == ["claude", "codex"]
 
 
+def test_role_rules_default_empty_and_parsed(tmp_path):
+    # T0020 per-role demand-provisioning rules.
+    assert EngineConfig().harness_policy.role_rules == {}
+    (tmp_path / "lane-config.yaml").write_text(
+        "engine:\n"
+        "  harness_policy:\n"
+        "    role_rules:\n"
+        "      routes-and-flows:\n"
+        "        preferred_harness: claude\n"
+        "        fallback: [codex]\n"
+        "        concurrency_allowance: 2\n",
+        encoding="utf-8",
+    )
+    rules = load_config(tmp_path).harness_policy.role_rules
+    assert rules["routes-and-flows"]["preferred_harness"] == "claude"
+    assert rules["routes-and-flows"]["fallback"] == ["codex"]
+    assert rules["routes-and-flows"]["concurrency_allowance"] == 2
+
+
+def test_checkpoint_keep_decisions_default_and_parsed(tmp_path):
+    # default decision-log retention (T0022)
+    assert EngineConfig().checkpoint.keep_decisions == 10
+    (tmp_path / "lane-config.yaml").write_text(
+        "engine:\n  checkpoint:\n    keep_decisions: 25\n", encoding="utf-8"
+    )
+    assert load_config(tmp_path).checkpoint.keep_decisions == 25
+
+
 def test_harness_policy_partial_keeps_defaults(tmp_path):
     (tmp_path / "lane-config.yaml").write_text(
         """

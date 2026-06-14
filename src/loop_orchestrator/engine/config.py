@@ -68,6 +68,14 @@ class LintConfig:
 
 
 @dataclass(frozen=True)
+class CheckpointConfig:
+    # Decision-log retention (T0022): file_decision keeps the last N decision
+    # entries below the coord-decisions marker and rotates the overflow into
+    # ops-wiki/decisions-archive.md, so the boot checkpoint stays bounded.
+    keep_decisions: int = 10
+
+
+@dataclass(frozen=True)
 class HarnessPolicy:
     """Harness governance policy (harness-governance plan A.1).
 
@@ -88,6 +96,19 @@ class HarnessPolicy:
     high_risk_roles: list[str] = field(default_factory=lambda: ["infra"])
     # Harnesses allowed as the brain / headless-ingest one-shot; empty = any.
     brain_allow: list[str] = field(default_factory=list)
+    # Per-role demand-provisioning rules (T0020), keyed by role. Each value is a
+    # plain mapping (forward-compatible; read with .get + defaults) with keys:
+    #   preferred_harness: str          — harness to provision for this role
+    #   fallback: list[str]             — ordered fallbacks if preferred is down
+    #   spawn_when: str                 — declared condition (brain guidance):
+    #                                     "unclaimed_brief_and_no_idle_worker"
+    #   retire_after_idle_cycles: int   — declare a retire-candidate after N idle
+    #                                     cycles (T0023 acts; T0020 only declares)
+    #   concurrency_allowance: int      — max concurrent workers of this role
+    #                                     before the gate forces reuse (default 1)
+    # Only the reuse-before-spawn HARD rule (concurrency_allowance) is gate-
+    # enforced here; the rest are declared facts the brain/T0023 consult.
+    role_rules: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -103,6 +124,7 @@ class EngineConfig:
     metrics: MetricsConfig = field(default_factory=MetricsConfig)
     lint: LintConfig = field(default_factory=LintConfig)
     harness_policy: HarnessPolicy = field(default_factory=HarnessPolicy)
+    checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
 
 
 def _merge(cls: type, data: object):

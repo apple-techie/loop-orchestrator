@@ -403,3 +403,89 @@ def test_f1_classify_batch_threads_lane_harnesses():
         "destructive",
         "blocked",
     ]
+
+
+# ── T0019 standing-lane drop guard (Phase 3) ────────────────────────────────
+# A drop_lane targeting a declared 'standing' lane is BLOCKED; worker/unknown
+# stay DESTRUCTIVE. Activation rides on the per-cycle lane snapshot (lane_kinds),
+# which the loop resolves only under a non-empty policy — None = today's behavior.
+
+T0019_KINDS = {"coord": "standing", "web": "standing", "helper": "worker"}
+
+
+def _drop(window="helper"):
+    return DropLaneAction(window=window, rationale="r")
+
+
+def test_t0019_drop_standing_lane_is_blocked():
+    assert classify(_drop("web"), 1, F1_CFG, None, None, T0019_KINDS) == "blocked"
+
+
+def test_t0019_drop_worker_lane_is_destructive():
+    assert classify(_drop("helper"), 1, F1_CFG, None, None, T0019_KINDS) == "destructive"
+
+
+def test_t0019_drop_unknown_lane_is_destructive():
+    assert classify(_drop("ghost"), 1, F1_CFG, None, None, T0019_KINDS) == "destructive"
+
+
+def test_t0019_drop_without_lane_snapshot_is_destructive():
+    # no lane_kinds threaded (e.g. empty policy) => today's behavior, unchanged.
+    assert classify(_drop("web"), 1, F1_CFG) == "destructive"
+
+
+def test_t0019_classify_batch_threads_lane_kinds():
+    actions = [_drop("web"), _drop("helper")]
+    assert classify_batch(actions, 1, F1_CFG, None, None, T0019_KINDS) == ["blocked", "destructive"]
+
+
+# ── T0020 reuse-before-spawn HARD rule (Phase 3) ────────────────────────────
+# add_lane for a role that already has an IDLE worker, at/over the role's
+# concurrency_allowance, classifies DESTRUCTIVE (prefer reuse). role_workers =
+# {role: {"idle": n, "live": n}} from the loop; None / empty policy = no-op.
+
+
+def _addlane(role="routes-and-flows", harness="claude", window="w-new"):
+    return AddLaneAction(window=window, harness=harness, brief="b", rationale="r", role=role)
+
+
+def test_t0020_reuse_before_spawn_is_destructive():
+    cfg = policy_cfg(role_rules={"routes-and-flows": {"concurrency_allowance": 1}})
+    workers = {"routes-and-flows": {"idle": 1, "live": 1}}
+    assert classify(_addlane(), 1, cfg, ROSTER, None, None, workers) == "destructive"
+
+
+def test_t0020_default_allowance_is_one_without_role_rule():
+    cfg = policy_cfg(deny=["amp"])  # non-empty policy, no role_rules -> default 1
+    workers = {"routes-and-flows": {"idle": 1, "live": 1}}
+    assert classify(_addlane(), 1, cfg, ROSTER, None, None, workers) == "destructive"
+
+
+def test_t0020_under_concurrency_allowance_is_safe():
+    cfg = policy_cfg(role_rules={"checks": {"concurrency_allowance": 2}})
+    workers = {"checks": {"idle": 1, "live": 1}}  # live(1) < allowance(2): room to spawn
+    assert classify(_addlane(role="checks"), 1, cfg, ROSTER, None, None, workers) == "safe"
+
+
+def test_t0020_busy_worker_does_not_force_reuse():
+    cfg = policy_cfg(role_rules={"routes-and-flows": {"concurrency_allowance": 1}})
+    workers = {"routes-and-flows": {"idle": 0, "live": 1}}  # the worker is busy
+    assert classify(_addlane(), 1, cfg, ROSTER, None, None, workers) == "safe"
+
+
+def test_t0020_reuse_inert_under_empty_policy():
+    workers = {"routes-and-flows": {"idle": 5, "live": 5}}
+    assert classify(_addlane(), 1, EngineConfig(), ROSTER, None, None, workers) == "safe"
+
+
+def test_t0020_reuse_inert_without_worker_snapshot():
+    cfg = policy_cfg(role_rules={"routes-and-flows": {"concurrency_allowance": 1}})
+    assert classify(_addlane(), 1, cfg, ROSTER) == "safe"  # role_workers=None
+
+
+def test_t0020_classify_batch_threads_role_workers():
+    cfg = policy_cfg(role_rules={"routes-and-flows": {"concurrency_allowance": 1}})
+    workers = {"routes-and-flows": {"idle": 1, "live": 1}}
+    actions = [_addlane(window="w1"), _addlane(role="other", window="w2")]
+    # first role has an idle worker -> reuse; second role has none -> safe
+    assert classify_batch(actions, 1, cfg, ROSTER, None, None, workers) == ["destructive", "safe"]

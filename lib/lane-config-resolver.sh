@@ -126,7 +126,7 @@ for lane_name, lane_block in lanes.items():
     if not isinstance(lane_block, dict):
         sys.stderr.write(f"lane-config: lane '{lane_name}' must be a mapping\n")
         sys.exit(2)
-    for field in ('harness', 'model', 'repo', 'role', 'cmd'):
+    for field in ('harness', 'model', 'repo', 'role', 'cmd', 'kind'):
         value = lane_block.get(field, '')
         if value is None:
             value = ''
@@ -325,6 +325,7 @@ lane_config_validate() {
     return 1
   fi
 
+  local kind
   for lane in ${LANE_CONFIG_LANE_NAMES[@]+"${LANE_CONFIG_LANE_NAMES[@]}"}; do
     harness="$(lane_config_field "$lane" harness)"
     if [[ -z "$harness" ]]; then
@@ -334,6 +335,13 @@ lane_config_validate() {
     fi
     if ! harness_known "$harness"; then
       echo "lane '$lane': unknown harness '$harness' (known: ${HARNESS_REGISTRY_NAMES[*]})" >&2
+      errors=$((errors+1))
+    fi
+    # T0019: optional declared kind. Absent = inferred (base/dynamic); when set
+    # it must be standing|worker.
+    kind="$(lane_config_field "$lane" kind)"
+    if [[ -n "$kind" && "$kind" != "standing" && "$kind" != "worker" ]]; then
+      echo "lane '$lane': invalid kind '$kind' (use standing|worker, or omit)" >&2
       errors=$((errors+1))
     fi
   done

@@ -258,7 +258,7 @@ _lane_window_id() {
 
 _lane_subcommand_add() {
   local session="" window="" harness="" model="" repo="" role="" auto_approve=0 cmd_override=""
-  local wait_ready=0 ready_timeout="${LANE_READY_TIMEOUT:-20}"
+  local wait_ready=0 ready_timeout="${LANE_READY_TIMEOUT:-20}" kind=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --session)        session="${2:?add-lane: --session requires a value}"; shift 2 ;;
@@ -267,6 +267,7 @@ _lane_subcommand_add() {
       --model)          model="${2:?add-lane: --model requires a value}"; shift 2 ;;
       --repo)           repo="${2:?add-lane: --repo requires a value}"; shift 2 ;;
       --role)           role="${2:?add-lane: --role requires a value}"; shift 2 ;;
+      --kind)           kind="${2:?add-lane: --kind requires a value}"; shift 2 ;;
       --auto-approve)   auto_approve=1; shift ;;
       --cmd)            cmd_override="${2:?add-lane: --cmd requires a value}"; shift 2 ;;
       --wait-ready)     wait_ready=1; shift ;;
@@ -275,6 +276,12 @@ _lane_subcommand_add() {
       *) echo "add-lane: unknown arg: $1" >&2; return 1 ;;
     esac
   done
+  # T0019: declared lane kind. Empty = today's inference (an add-lane window is
+  # dynamic, so it reads as 'worker'); declare 'standing' for a long-lived
+  # dynamically-added writer that must never be auto-dropped.
+  if [[ -n "$kind" && "$kind" != "standing" && "$kind" != "worker" ]]; then
+    echo "add-lane: --kind must be 'standing' or 'worker' (got '$kind')" >&2; return 1
+  fi
   [[ -z "$session" ]] && session="$(_lane_default_session)"
   [[ -z "$session" ]] && { echo "add-lane: --session <name> required (or run inside tmux)" >&2; return 1; }
   [[ -z "$window" ]]  && { echo "add-lane: --window <name> required" >&2; return 1; }
@@ -337,6 +344,7 @@ _lane_subcommand_add() {
   tmux set-option -w -t "$wid" @loop_lane_harness "$meta_harness" >/dev/null 2>&1 || true
   [[ -n "$meta_model" ]] && tmux set-option -w -t "$wid" @loop_lane_model "$meta_model" >/dev/null 2>&1 || true
   [[ -n "$role" ]]       && tmux set-option -w -t "$wid" @loop_lane_role "$role" >/dev/null 2>&1 || true
+  [[ -n "$kind" ]]       && tmux set-option -w -t "$wid" @loop_lane_kind "$kind" >/dev/null 2>&1 || true
   tmux set-option -w -t "$wid" @loop_lane_cmd "$launch" >/dev/null 2>&1 || true
 
   _lane_warn_missing_binary "$window" "$launch"
@@ -404,7 +412,7 @@ _lane_subcommand_list() {
   command -v tmux >/dev/null 2>&1 || { echo "list-lanes: tmux not installed or not on PATH" >&2; return 1; }
   tmux has-session -t "$session" 2>/dev/null || { echo "list-lanes: session '$session' does not exist" >&2; return 1; }
   [[ "$json" -eq 0 ]] && printf '%-16s %-4s %-12s %-14s %s\n' WINDOW DYN HARNESS ROLE CMD
-  local wid wname dyn harness model role cmd
+  local wid wname dyn harness model role cmd kind
   # Read by window id so option lookups can't prefix-collide between windows.
   # --json: emit unit-separator records and let python3 do the escaping —
   # the %-16s table is for humans and breaks on long names / cmds with spaces.
@@ -416,8 +424,9 @@ _lane_subcommand_list() {
       model="$(tmux show-options -wqv -t "$wid" @loop_lane_model 2>/dev/null || true)"
       role="$(tmux show-options -wqv -t "$wid" @loop_lane_role 2>/dev/null || true)"
       cmd="$(tmux show-options -wqv -t "$wid" @loop_lane_cmd 2>/dev/null || true)"
+      kind="$(tmux show-options -wqv -t "$wid" @loop_lane_kind 2>/dev/null || true)"
       if [[ "$json" -eq 1 ]]; then
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$wname" "$dyn" "$harness" "$model" "$role" "$cmd"
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "$wname" "$dyn" "$harness" "$model" "$role" "$cmd" "$kind"
       else
         printf '%-16s %-4s %-12s %-14s %s\n' "$wname" "$([[ "$dyn" == "1" ]] && echo yes || echo '-')" "${harness:--}" "${role:--}" "${cmd:--}"
       fi
@@ -432,14 +441,18 @@ for line in sys.stdin:
     line = line.rstrip("\n")
     if not line:
         continue
-    wname, dyn, harness, model, role, cmd = line.split("\x1f")
+    wname, dyn, harness, model, role, cmd, kind = line.split("\x1f")
+    base = dyn != "1"
     lanes.append({
         "window": wname,
         "harness": harness or None,
         "model": model or None,
         "role": role or None,
         "cmd": cmd or None,
-        "base": dyn != "1",
+        "base": base,
+        # T0019: declared lane kind. Explicit @loop_lane_kind wins; absent =
+        # the base/dynamic inference (base -> standing, dynamic -> worker).
+        "kind": kind or ("standing" if base else "worker"),
     })
 
 print(json.dumps({

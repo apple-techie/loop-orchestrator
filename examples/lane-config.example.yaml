@@ -102,3 +102,44 @@ lanes:
 #     payload_patterns: ["git push --force", "rm -rf", "reset --hard"]
 #   pm:
 #     adapters: []                 # e.g. [jira] once an adapter is installed
+#   harness_policy:                # T0020 governance. ANY non-empty field opts
+#                                  # in (empty policy = pass-through = today);
+#                                  # writing this also makes T0017's dispatch-
+#                                  # target gate go LIVE for the session.
+#     allow: []                    # empty = every harness allowed; deny wins
+#     deny: []
+#     cost_ceiling: ""             # low|medium|high; "" = no ceiling
+#     autonomy_cap: ""             # none|attended|unattended; "" = no cap
+#     brain_allow: [claude, codex] # harnesses allowed as brain/headless ingest
+#     high_risk_roles: [infra]
+#     role_tag_map:                # role -> required registry capability tags
+#       routes-and-flows: [code]
+#       data-integration: [code]
+#       design-system:    [code]
+#       build-checks:     [code]
+#       synthesis:        [synthesis, product]
+#     role_defaults:               # role -> rewrite-to harness when not allowed
+#       routes-and-flows: claude
+#       synthesis:        pi
+#     role_rules:                  # T0020 demand-provision-reuse-retire, per role
+#       routes-and-flows:          # the gate ENFORCES concurrency_allowance
+#         preferred_harness: claude
+#         fallback: [codex]
+#         spawn_when: unclaimed_brief_and_no_idle_worker
+#         retire_after_idle_cycles: 3
+#         concurrency_allowance: 1 # >1 idle worker of this role -> add_lane gates
+#       data-integration:
+#         preferred_harness: claude
+#         concurrency_allowance: 1
+#       design-system:
+#         preferred_harness: pi
+#         fallback: [claude]
+#         concurrency_allowance: 1
+#       build-checks:
+#         preferred_harness: shell
+#         concurrency_allowance: 2  # CI fan-out: allow two concurrent checkers
+#       synthesis:
+#         preferred_harness: pi
+#         fallback: [claude]
+#         retire_after_idle_cycles: 5
+#         concurrency_allowance: 1

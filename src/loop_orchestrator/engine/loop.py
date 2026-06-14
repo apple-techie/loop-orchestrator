@@ -360,6 +360,7 @@ def _file_needs_human(
     approval: str,
     error: DecisionError,
     raw_text: str,
+    keep: int = wiki.DEFAULT_KEEP_DECISIONS,
 ) -> int:
     summary = f"brain reply unusable after corrective re-prompt: {error}"
     stub = decision_mod.Decision(
@@ -374,7 +375,7 @@ def _file_needs_human(
     _persist(paths, doc)
     events.append("decision-parse-error", id=doc["id"], error=str(error))
     events.append("escalate", summary=summary)
-    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc))
+    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc), keep=keep)
     print(f"decision {doc['id']} needs a human: {error}")
     events.append("cycle-end", outcome="needs-human")
     return 4
@@ -440,19 +441,32 @@ def run_once(
     # degrades to None (pass-through) with an event; it never aborts the cycle.
     roster = None
     lane_harnesses = None
+    lane_kinds = None
+    role_workers = None
     if config.harness_policy != HarnessPolicy():
         try:
             roster = substrate.harness_roster()
         except SubstrateError as exc:
             events.append("error", kind="roster-failed", error=str(exc))
-        # F1 dispatch-target governance (Phase 2): the per-cycle lane->harness
-        # map, resolved only under a non-empty policy so the empty policy keeps
-        # today's call profile. A failure degrades to None (the F1 gate pass
-        # goes inert) with an event; it never aborts the cycle.
+        # Per-cycle lane snapshot, resolved only under a non-empty policy so the
+        # empty policy keeps today's call profile. One substrate.lanes() call
+        # feeds the F1 dispatch-target map (lane->harness), the T0019 standing-
+        # lane drop guard (lane->kind), and the T0020 reuse-before-spawn rule
+        # (per-role idle/live worker counts, correlated with this cycle's
+        # observed statuses in snap.lanes). A failure degrades all to None (the
+        # gate passes go inert) with an event; it never aborts the cycle.
         try:
-            lane_harnesses = {
-                info.window: info.harness for info in substrate.lanes() if info.harness
-            }
+            lane_infos = substrate.lanes()
+            lane_harnesses = {info.window: info.harness for info in lane_infos if info.harness}
+            lane_kinds = {info.window: info.kind for info in lane_infos if info.kind}
+            role_workers = {}
+            for info in lane_infos:
+                if info.kind != "worker":
+                    continue
+                bucket = role_workers.setdefault(info.role or "", {"idle": 0, "live": 0})
+                bucket["live"] += 1
+                if (snap.lanes.get(info.window) or {}).get("status") == "idle":
+                    bucket["idle"] += 1
         except SubstrateError as exc:
             events.append("error", kind="lanes-failed", error=str(exc))
 
@@ -488,7 +502,9 @@ def run_once(
         try:
             parsed = decision_mod.parse_and_validate(reply, live_lanes)
         except DecisionError as second_error:
-            return _file_needs_human(paths, events, approval, second_error, reply)
+            return _file_needs_human(
+                paths, events, approval, second_error, reply, keep=config.checkpoint.keep_decisions
+            )
 
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
     governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)
@@ -497,7 +513,7 @@ def run_once(
     if governance_events:
         parsed = dataclasses.replace(parsed, actions=governed)
     classifications = gate.classify_batch(
-        parsed.actions, len(snap.lanes), config, roster, lane_harnesses
+        parsed.actions, len(snap.lanes), config, roster, lane_harnesses, lane_kinds, role_workers
     )
     events.append("gate", id=parsed.id, classifications=classifications)
 
@@ -539,6 +555,10 @@ def run_once(
     if pm_adapters:  # after action execution (and in the no-actions path)
         _pm_sync(pm_adapters, "push", paths.tasks_dir, events)
 
-    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc))
+    wiki.file_decision(
+        paths.checkpoint_page,
+        wiki.render_decision_entry(doc),
+        keep=config.checkpoint.keep_decisions,
+    )
     events.append("cycle-end", outcome="pending" if awaiting else "resolved")
     return 0

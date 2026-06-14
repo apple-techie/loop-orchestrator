@@ -221,14 +221,18 @@ def _resolve_and_finish(args: argparse.Namespace, root: Path, approve: bool) -> 
     except DecisionStateError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    config = load_config(root)
     if approve:
         events.append("decision-approved", id=doc["id"], indices=indices)
-        config = load_config(root)
         doc = execute_batch(doc, Substrate(root, session), events, config, paths=paths)
     else:
         events.append("decision-rejected", id=doc["id"], reason=doc.get("reason", ""))
     decisions.archive(paths, doc)
-    wiki.file_decision(paths.checkpoint_page, wiki.render_decision_entry(doc))
+    wiki.file_decision(
+        paths.checkpoint_page,
+        wiki.render_decision_entry(doc),
+        keep=config.checkpoint.keep_decisions,
+    )
     print(f"decision {doc['id']} {doc['status']} and archived:")
     for action in doc.get("actions") or []:
         print(f"  {action_line(action)}")
