@@ -1,7 +1,10 @@
 ---
 id: T0027
 title: "F6 — gate resolves lane harness from lane-config fallback (per-lane, not per-window tmux tag)"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "470/0"
+commit: 854d248
 depends_on: []
 scope: src/loop_orchestrator/engine/{loop.py,gate.py} + substrate.py + tests ONLY; ADDITIVE; must not change behavior for correctly-tagged single-pane sessions; no reinstall; no git push
 loop: harness-governance
