@@ -1,7 +1,10 @@
 ---
 id: T0024
 title: "F5 — ledger projection must be non-destructive per-field (sparse ledger preserves hand-authored)"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "449/0"
+commit: b51ce90
 depends_on: []
 scope: scripts/loop-checkpoint.sh + tests ONLY; ADDITIVE; absent OR sparse ledger must preserve the hand-authored compiled region; no reinstall; no git push
 loop: harness-governance
