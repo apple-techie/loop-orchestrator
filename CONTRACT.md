@@ -94,10 +94,17 @@ section in this file.
 - `loop-wiki-pending.sh [--project-root p] [--quiet]` — `--quiet` prints a
   bare integer pending-message count.
 - `loop-checkpoint.sh (--print | --dispatch [lane]) [--project-root p]
-  [--header-file path]` — `--print` emits the assembled coordinator prompt on
-  stdout; size report goes to stderr (`prompt size: <N> bytes (~<M> tokens,
-  bytes/4)`, warning above 24000 tokens). `--header-file` substitutes the
-  coordinator header; the compiled-state body is byte-identical either way.
+  [--header-file path] [--token-ceiling n]` — `--print` emits the assembled
+  coordinator prompt on stdout; size report goes to stderr (`prompt size: <N>
+  bytes (~<M> tokens, bytes/4)`, warning above 24000 tokens, HARD-refused
+  (exit 3) above the ceiling — `--token-ceiling` / `LOOP_CHECKPOINT_TOKEN_CEILING`,
+  default 48000). `--header-file` substitutes the coordinator header.
+  T0021: the checkpoint COMPILED region (above the `<!-- coord-decisions -->`
+  marker) is projected from `.loop/orchestrator-state.json` (the canonical loop
+  ledger) at assembly time when the ledger is present; the marker line and the
+  coord-owned region below it are preserved byte-for-byte from checkpoint.md. An
+  absent / empty / unparseable ledger falls back to checkpoint.md's hand-authored
+  region (byte-identical default).
 - `loop-task-lint.sh [--tasks-dir d]` — exit 0 = all task files pass; exit 1
   with per-file findings otherwise.
 - `loop-jira-sync.sh (pull|push|both) [--dry-run] [--tasks-dir d]` — exit 64 =
@@ -118,7 +125,12 @@ section in this file.
 ## File conventions (read-only to higher layers unless stated)
 
 - `.loop/orchestrator-state.json` — schema v2 (`schema_version`, `updated_at`,
-  `loops.<id>.{status, branch, artifacts, …}`). Written ONLY by agents.
+  `loops.<id>.{status, branch, blast_radius, artifacts, commits, …}`, and the
+  optional top-level `objective` (string) + `open_conflicts` (list) projected
+  into the checkpoint). T0021: this ledger is the CANONICAL work-state surface;
+  `checkpoint.md`'s compiled region (above the coord-decisions marker) is its
+  projection (see `loop-checkpoint.sh --print`), so the brain boots from a view
+  provably equal to the ledger. Written ONLY by agents.
 - `.loop/messages/` — mailbox, `YYYYMMDD-HHMMSS-<from>-to-<to>.md` with
   `subject:` frontmatter. New messages may be ADDED by any layer following the
   naming convention; never modify or delete existing ones.
