@@ -1,7 +1,10 @@
 ---
 id: T0028
 title: "Phase 5 — full lane-handoff contract (recovery brief + handoff ack + worktree continuity)"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "476/0"
+commit: d6a27939
 depends_on: [T0023, T0025]
 scope: src/loop_orchestrator/engine/{actions.py,wiki.py} + ops-wiki lane-page schema + tests ONLY; ADDITIVE; flush stays gated on verified-idle; no reinstall; no git push
 loop: harness-governance
