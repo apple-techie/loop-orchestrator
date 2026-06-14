@@ -181,6 +181,7 @@ class Substrate:
         role: str | None = None,
         auto_approve: bool = False,
         wait_ready: bool = True,
+        worktree: bool = False,
         timeout: float = 120,
     ) -> None:
         args = ["add-lane", "--session", self.session, "--window", window]
@@ -194,6 +195,10 @@ class Substrate:
             args += ["--role", role]
         if auto_approve:
             args += ["--auto-approve"]
+        # T0025: opt-in git-worktree isolation. Default False = shared (today's
+        # behavior); loop-tmux also honors a worktree harness via the registry.
+        if worktree:
+            args += ["--worktree"]
         if wait_ready:
             args += ["--wait-ready"]
         self._run("loop-tmux", *args, timeout=timeout)

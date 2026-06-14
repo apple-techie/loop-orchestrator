@@ -19,13 +19,23 @@ section in this file.
 - `up` flags incl. `--no-attach`, `--boot-check` (exit non-zero if an AI lane
   fell back to a bare shell), `--print-cmds` (dry-run, no tmux).
 - `add-lane --session <s> --window <w> (--harness <h> | --cmd <c>) [--model m]
-  [--repo p] [--role r] [--kind standing|worker] [--auto-approve]
+  [--repo p] [--role r] [--kind standing|worker] [--worktree] [--auto-approve]
   [--wait-ready [--ready-timeout s]]`
   — exit 0 = window created (and, with `--wait-ready`, best-effort readiness).
   `--kind` declares the lane lifecycle (stored as the `@loop_lane_kind` window
   option); default = inferred (an add-lane window is dynamic, so `worker`).
+  `--worktree` (T0025) provisions a dedicated git worktree for the lane at
+  `<repo>/.loop/worktrees/<session>/<window>` on branch `loop/<session>/<window>`,
+  records that branch in `loops.<window>.branch` of the ledger, and sets cwd
+  there (`@loop_lane_isolation=worktree`, `@loop_lane_branch=<branch>`). DEFAULT
+  is `shared` (the lane inherits the repo root — byte-identical to today); a
+  harness may also declare `isolation: worktree` in the registry. Worktree
+  applies only to code-writer agent lanes (never cmd/shell/mprocs).
 - `drop-lane --session <s> --window <w> [--force]` — refuses non-dynamic
-  windows without `--force`. Automation must NEVER pass `--force`.
+  windows without `--force`. Automation must NEVER pass `--force`. A worktree
+  lane's tree is torn down on drop and NEVER orphaned: a clean tree is removed
+  (+ pruned); a tree with uncommitted work is PRESERVED (left listed, branch
+  recorded) with a warning — never `git worktree remove --force` over real work.
 - `list-lanes --session <s>` — human table (do not machine-parse).
 - `list-lanes --session <s> --json` — `{contract_version, session,
   generated_at, lanes: [{window, harness, model, role, cmd, base, kind}]}`.
@@ -130,7 +140,9 @@ section in this file.
   into the checkpoint). T0021: this ledger is the CANONICAL work-state surface;
   `checkpoint.md`'s compiled region (above the coord-decisions marker) is its
   projection (see `loop-checkpoint.sh --print`), so the brain boots from a view
-  provably equal to the ledger. Written ONLY by agents.
+  provably equal to the ledger. Written by agents; additionally, `loop-tmux
+  add-lane --worktree` records the provisioned `loops.<window>.branch` (T0025)
+  so the digest and a future integration lane find each worktree branch.
 - `.loop/messages/` — mailbox, `YYYYMMDD-HHMMSS-<from>-to-<to>.md` with
   `subject:` frontmatter. New messages may be ADDED by any layer following the
   naming convention; never modify or delete existing ones.

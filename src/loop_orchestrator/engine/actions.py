@@ -148,6 +148,9 @@ def execute(
             model=action.get("model"),
             role=action.get("role"),
             auto_approve=bool(action.get("auto_approve", False)),
+            # T0025: opt-in worktree isolation. Inert today (AddLaneAction carries
+            # no such field); loop-tmux also resolves it from the harness registry.
+            worktree=bool(action.get("worktree", False)),
         )
         substrate.dispatch(action["window"], action["brief"], wait_ready=True)
     elif kind == "drop_lane":

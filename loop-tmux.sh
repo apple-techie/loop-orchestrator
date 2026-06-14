@@ -52,6 +52,7 @@ LIB_DIR="$SCRIPT_DIR/lib"
 LANE_HEALTH_SCRIPT="$LIB_DIR/lane-health.sh"
 LANE_CONFIG_RESOLVER="$LIB_DIR/lane-config-resolver.sh"
 HARNESS_REGISTRY="$LIB_DIR/harness-registry.sh"
+LANE_WORKTREE_LIB="$LIB_DIR/lane-worktree.sh"
 LANE_STATUS_SCRIPT="$SCRIPT_DIR/loop-lane-status.sh"
 
 usage() {
@@ -172,13 +173,19 @@ _lane_usage() {
 Runtime lane management for a live loop-tmux session:
 
   loop-tmux.sh add-lane  --session <s> --window <w> --harness <h> [--model <m>]
-                         [--repo <path>] [--role <r>] [--auto-approve] [--cmd <command>]
+                         [--repo <path>] [--role <r>] [--kind standing|worker]
+                         [--worktree] [--auto-approve] [--cmd <command>]
                          [--wait-ready] [--ready-timeout <secs>]
   loop-tmux.sh drop-lane --session <s> --window <w> [--force]
   loop-tmux.sh list-lanes [--session <s>]
 
   --session defaults to the current session when run inside tmux.
   --cmd runs a literal command instead of a registered harness.
+  --kind declares the lane lifecycle (standing|worker); default inferred.
+  --worktree provisions a dedicated git worktree for the lane (Phase 4 isolation;
+    default is shared = the lane inherits the project root). Code-writer agent
+    lanes only; coord/ops/docs/shell/mprocs/cmd stay shared. drop-lane tears the
+    worktree down without ever orphaning it.
   --auto-approve appends the harness's skip-permissions flag (where it has one).
   --wait-ready blocks until an AI lane is input-ready (loop-lane-status idle),
     up to --ready-timeout secs (default 20; env LANE_READY_TIMEOUT) — so a
@@ -258,7 +265,7 @@ _lane_window_id() {
 
 _lane_subcommand_add() {
   local session="" window="" harness="" model="" repo="" role="" auto_approve=0 cmd_override=""
-  local wait_ready=0 ready_timeout="${LANE_READY_TIMEOUT:-20}" kind=""
+  local wait_ready=0 ready_timeout="${LANE_READY_TIMEOUT:-20}" kind="" want_worktree=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --session)        session="${2:?add-lane: --session requires a value}"; shift 2 ;;
@@ -268,6 +275,7 @@ _lane_subcommand_add() {
       --repo)           repo="${2:?add-lane: --repo requires a value}"; shift 2 ;;
       --role)           role="${2:?add-lane: --role requires a value}"; shift 2 ;;
       --kind)           kind="${2:?add-lane: --kind requires a value}"; shift 2 ;;
+      --worktree)       want_worktree=1; shift ;;
       --auto-approve)   auto_approve=1; shift ;;
       --cmd)            cmd_override="${2:?add-lane: --cmd requires a value}"; shift 2 ;;
       --wait-ready)     wait_ready=1; shift ;;
@@ -321,15 +329,37 @@ _lane_subcommand_add() {
     fi
   fi
 
-  # Deterministic working dir: explicit --repo, else the base (first) window's
+  # Deterministic repo root: explicit --repo, else the base (first) window's
   # path — which stays on the project root — not the session's active window.
-  local cwd="$repo"
-  if [[ -z "$cwd" ]]; then
+  local repo_root="$repo"
+  if [[ -z "$repo_root" ]]; then
     local base_wid; base_wid="$(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null | head -n1)"
-    [[ -n "$base_wid" ]] && cwd="$(tmux display-message -p -t "$base_wid" '#{pane_current_path}' 2>/dev/null || true)"
+    [[ -n "$base_wid" ]] && repo_root="$(tmux display-message -p -t "$base_wid" '#{pane_current_path}' 2>/dev/null || true)"
   fi
-  if [[ -n "$cwd" && ! -d "$cwd" ]]; then
-    echo "add-lane: --repo path does not exist: $cwd" >&2; return 1
+  if [[ -n "$repo_root" && ! -d "$repo_root" ]]; then
+    echo "add-lane: --repo path does not exist: $repo_root" >&2; return 1
+  fi
+
+  # T0025 isolation: explicit --worktree > the harness's registry isolation field
+  # > shared. DORMANT default — shared keeps cwd = repo_root, byte-identical to
+  # today. A worktree resolves only for a code-writer agent lane and provisions a
+  # dedicated git worktree under repo_root (coord/ops/docs/shell/mprocs/cmd never).
+  local isolation="shared" cwd="$repo_root"
+  if [[ "$want_worktree" -eq 1 ]]; then
+    isolation="worktree"
+  elif [[ -z "$cmd_override" ]]; then
+    isolation="$(harness_field "$harness" isolation 2>/dev/null || true)"
+    [[ -z "$isolation" ]] && isolation="shared"
+  fi
+  if [[ "$isolation" == "worktree" && -n "$repo_root" \
+        && "$meta_harness" != "cmd" && "$meta_harness" != "shell" && "$meta_harness" != "mprocs" ]]; then
+    # shellcheck source=lib/lane-worktree.sh
+    source "$LANE_WORKTREE_LIB"
+    if ! cwd="$(lane_worktree_provision "$repo_root" "$session" "$window")"; then
+      echo "add-lane: worktree provision failed for '$window'; not creating the lane" >&2; return 1
+    fi
+  else
+    isolation="shared"
   fi
 
   # Create the window and capture its stable id for all subsequent targeting.
@@ -345,6 +375,10 @@ _lane_subcommand_add() {
   [[ -n "$meta_model" ]] && tmux set-option -w -t "$wid" @loop_lane_model "$meta_model" >/dev/null 2>&1 || true
   [[ -n "$role" ]]       && tmux set-option -w -t "$wid" @loop_lane_role "$role" >/dev/null 2>&1 || true
   [[ -n "$kind" ]]       && tmux set-option -w -t "$wid" @loop_lane_kind "$kind" >/dev/null 2>&1 || true
+  if [[ "$isolation" == "worktree" ]]; then
+    tmux set-option -w -t "$wid" @loop_lane_isolation worktree >/dev/null 2>&1 || true
+    tmux set-option -w -t "$wid" @loop_lane_branch "$(lane_worktree_branch "$session" "$window")" >/dev/null 2>&1 || true
+  fi
   tmux set-option -w -t "$wid" @loop_lane_cmd "$launch" >/dev/null 2>&1 || true
 
   _lane_warn_missing_binary "$window" "$launch"
@@ -393,8 +427,22 @@ _lane_subcommand_drop() {
     echo "drop-lane: window '$window' was not created by add-lane; refusing (pass --force to override)" >&2
     return 1
   fi
+  # T0025: read worktree metadata + the repo root BEFORE the window is gone, so a
+  # worktree lane can be torn down after the kill. Shared lanes have no isolation
+  # option set, so this is a no-op for them (byte-identical to today).
+  local lane_isolation; lane_isolation="$(tmux show-options -wqv -t "$wid" @loop_lane_isolation 2>/dev/null || true)"
+  local wt_root=""
+  if [[ "$lane_isolation" == "worktree" ]]; then
+    local base_wid; base_wid="$(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null | head -n1)"
+    [[ -n "$base_wid" ]] && wt_root="$(tmux display-message -p -t "$base_wid" '#{pane_current_path}' 2>/dev/null || true)"
+  fi
   tmux kill-window -t "$wid"
   echo "[loop-tmux] drop-lane: killed window '$window' ($wid) in '$session'"
+  if [[ "$lane_isolation" == "worktree" && -n "$wt_root" ]]; then
+    # shellcheck source=lib/lane-worktree.sh
+    source "$LANE_WORKTREE_LIB"
+    lane_worktree_teardown "$wt_root" "$session" "$window" || true
+  fi
 }
 
 _lane_subcommand_list() {

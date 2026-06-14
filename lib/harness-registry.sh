@@ -41,6 +41,11 @@
 #                         model goes unavailable (F3). "" = none declared.
 #                         Availability is per-(harness, model): a harness can be
 #                         present + authenticated yet its requested model down.
+#   isolation             Lane working-tree isolation (Phase 4 / T0025):
+#                         shared | worktree. Default shared = an add-lane lane
+#                         inherits PROJECT_ROOT (today's behavior). worktree =
+#                         provision a dedicated git worktree per lane. DORMANT
+#                         until a lane opts in (--worktree or a worktree harness).
 #
 # Readiness fields (harness-governance Phase 2 — declared readiness markers
 # that loop-lane-status.sh PREFERS over its built-in heuristics when a lane's
@@ -99,6 +104,7 @@ HARNESS_PI_AUTH_REQUIREMENT="account"
 HARNESS_PI_HEALTH_PROBE=""
 HARNESS_PI_DRIFT_PINS="med"
 HARNESS_PI_MODEL_FAILOVER=""
+HARNESS_PI_ISOLATION="shared"
 HARNESS_PI_WORKING_MARKER="esc to interrupt|^[[:space:]]*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"
 HARNESS_PI_IDLE_MARKER=""
 
@@ -120,6 +126,7 @@ HARNESS_CLAUDE_AUTH_REQUIREMENT="account"
 HARNESS_CLAUDE_HEALTH_PROBE=""
 HARNESS_CLAUDE_DRIFT_PINS="low"
 HARNESS_CLAUDE_MODEL_FAILOVER=""
+HARNESS_CLAUDE_ISOLATION="shared"
 HARNESS_CLAUDE_WORKING_MARKER="esc to interrupt"
 HARNESS_CLAUDE_IDLE_MARKER="accept edits on|bypass permissions on"
 
@@ -140,6 +147,7 @@ HARNESS_OPENCODE_AUTH_REQUIREMENT="account"
 HARNESS_OPENCODE_HEALTH_PROBE=""
 HARNESS_OPENCODE_DRIFT_PINS="med"
 HARNESS_OPENCODE_MODEL_FAILOVER=""
+HARNESS_OPENCODE_ISOLATION="shared"
 HARNESS_OPENCODE_WORKING_MARKER=""
 HARNESS_OPENCODE_IDLE_MARKER=""
 
@@ -161,6 +169,7 @@ HARNESS_CODEX_AUTH_REQUIREMENT="account"
 HARNESS_CODEX_HEALTH_PROBE=""
 HARNESS_CODEX_DRIFT_PINS="high"
 HARNESS_CODEX_MODEL_FAILOVER=""
+HARNESS_CODEX_ISOLATION="shared"
 HARNESS_CODEX_WORKING_MARKER="esc to interrupt"
 HARNESS_CODEX_IDLE_MARKER=""
 
@@ -180,6 +189,7 @@ HARNESS_CURSOR_AGENT_AUTH_REQUIREMENT="account"
 HARNESS_CURSOR_AGENT_HEALTH_PROBE=""
 HARNESS_CURSOR_AGENT_DRIFT_PINS="med"
 HARNESS_CURSOR_AGENT_MODEL_FAILOVER=""
+HARNESS_CURSOR_AGENT_ISOLATION="shared"
 HARNESS_CURSOR_AGENT_WORKING_MARKER=""
 HARNESS_CURSOR_AGENT_IDLE_MARKER=""
 
@@ -201,6 +211,7 @@ HARNESS_HERMES_AUTH_REQUIREMENT="account"
 HARNESS_HERMES_HEALTH_PROBE=""
 HARNESS_HERMES_DRIFT_PINS="high"
 HARNESS_HERMES_MODEL_FAILOVER=""
+HARNESS_HERMES_ISOLATION="shared"
 HARNESS_HERMES_WORKING_MARKER=""
 HARNESS_HERMES_IDLE_MARKER=""
 
@@ -222,6 +233,7 @@ HARNESS_DROID_AUTH_REQUIREMENT="account"
 HARNESS_DROID_HEALTH_PROBE=""
 HARNESS_DROID_DRIFT_PINS="med"
 HARNESS_DROID_MODEL_FAILOVER=""
+HARNESS_DROID_ISOLATION="shared"
 HARNESS_DROID_WORKING_MARKER=""
 HARNESS_DROID_IDLE_MARKER=""
 
@@ -242,6 +254,7 @@ HARNESS_FORGE_AUTH_REQUIREMENT="account"
 HARNESS_FORGE_HEALTH_PROBE=""
 HARNESS_FORGE_DRIFT_PINS="med"
 HARNESS_FORGE_MODEL_FAILOVER=""
+HARNESS_FORGE_ISOLATION="shared"
 HARNESS_FORGE_WORKING_MARKER=""
 HARNESS_FORGE_IDLE_MARKER=""
 
@@ -262,6 +275,7 @@ HARNESS_AMP_AUTH_REQUIREMENT="account"
 HARNESS_AMP_HEALTH_PROBE=""
 HARNESS_AMP_DRIFT_PINS="high"
 HARNESS_AMP_MODEL_FAILOVER=""
+HARNESS_AMP_ISOLATION="shared"
 HARNESS_AMP_WORKING_MARKER=""
 HARNESS_AMP_IDLE_MARKER=""
 
@@ -283,6 +297,7 @@ HARNESS_OPENCLAW_AUTH_REQUIREMENT="gateway"
 HARNESS_OPENCLAW_HEALTH_PROBE=""
 HARNESS_OPENCLAW_DRIFT_PINS="med"
 HARNESS_OPENCLAW_MODEL_FAILOVER=""
+HARNESS_OPENCLAW_ISOLATION="shared"
 HARNESS_OPENCLAW_WORKING_MARKER=""
 HARNESS_OPENCLAW_IDLE_MARKER=""
 
@@ -302,6 +317,7 @@ HARNESS_MPROCS_AUTH_REQUIREMENT="none"
 HARNESS_MPROCS_HEALTH_PROBE=""
 HARNESS_MPROCS_DRIFT_PINS="none"
 HARNESS_MPROCS_MODEL_FAILOVER=""
+HARNESS_MPROCS_ISOLATION="shared"
 HARNESS_MPROCS_WORKING_MARKER=""
 HARNESS_MPROCS_IDLE_MARKER=""
 
@@ -321,12 +337,13 @@ HARNESS_SHELL_AUTH_REQUIREMENT="none"
 HARNESS_SHELL_HEALTH_PROBE=""
 HARNESS_SHELL_DRIFT_PINS="none"
 HARNESS_SHELL_MODEL_FAILOVER=""
+HARNESS_SHELL_ISOLATION="shared"
 HARNESS_SHELL_WORKING_MARKER=""
 HARNESS_SHELL_IDLE_MARKER=""
 
 # Ordered list — order matters for `list` output.
 HARNESS_REGISTRY_NAMES=(pi claude opencode codex cursor-agent hermes droid forge amp openclaw mprocs shell)
-HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins model_failover working_marker idle_marker)
+HARNESS_REGISTRY_FIELDS=(launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins model_failover isolation working_marker idle_marker)
 
 # ─── Lookup helpers ──────────────────────────────────────────────────────
 
@@ -614,7 +631,7 @@ Usage:
   harness-registry.sh health <name>
 
 Known harnesses (see HARNESS_REGISTRY_NAMES): pi, claude, opencode, codex, cursor-agent, hermes, droid, forge, amp, openclaw, mprocs, shell
-Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins model_failover working_marker idle_marker
+Known fields: launch_cmd model_flag expected_process auto_approve_flag paste_enter_delay skill_dir non_interactive_flag oneshot_template capability_tags cost_tier autonomy_class auth_requirement health_probe drift_pins model_failover isolation working_marker idle_marker
 
 When sourced from another script, exposes:
   harness_known <name>
