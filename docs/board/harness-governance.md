@@ -105,6 +105,18 @@ retro` and the Confluence page._
   (the ledger stays canonical for what it HAS; it preserves any hand-authored field
   it lacks) + a loops-only-ledger regression test.
 
+- **F6 — harness_policy activation blocks dispatches on pre-existing / multi-pane sessions (live, 2026-06-14).**
+  Activating the harness_policy on the live govern + leo daemons STALLED their
+  builds: the gate resolves each lane's harness only from the `@loop_lane_harness`
+  tmux WINDOW tag, which (a) base lanes booted before `loop-tmux.sh:344` lack →
+  `list-lanes` returns `harness=""` → a dispatch even to the claude `web` lane
+  classifies BLOCKED; and (b) multi-pane windows (leo's `validate` = claude +
+  shell) can't represent per-lane. Worked around by manually tagging each running
+  window (govern web=claude / rest=shell; leo agents=claude, ops=shell), which
+  unblocked both. **Fix:** T0027 — resolve lane harness from the lane-config
+  (authoritative), per-lane, with the tmux tag as an optional override, so the
+  policy is safe to activate on any session without manual tagging.
+
 ## Sprint: "Govern P2 — readiness/health" (COMPLETE 2026-06-13)
 Goal: the per-harness readiness/health contract + the dispatch-target (F1) and
 model-availability (F3) governance gaps. Additive; frozen status output.
