@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from loop_orchestrator.engine import config as config_mod
-from loop_orchestrator.engine.config import EngineConfig, HarnessPolicy, load_config
+from loop_orchestrator.engine.config import (
+    EngineConfig,
+    HarnessPolicy,
+    lane_config_harnesses,
+    load_config,
+)
 
 
 def test_defaults_with_no_file(tmp_path):
@@ -203,3 +208,22 @@ engine:
     # the rest of the engine config is untouched by a policy-only file
     assert cfg.brain.harness == "claude"
     assert cfg.approval_mode == "manual"
+
+
+def test_lane_config_harnesses_reads_per_lane(tmp_path):
+    # F6 (T0027): per-lane harness from the `lanes:` section.
+    (tmp_path / "lane-config.yaml").write_text(
+        "lanes:\n"
+        "  web:\n    harness: claude\n    role: impl\n"
+        "  validate-left:\n    harness: claude\n"
+        "  validate-right:\n    harness: shell\n"
+        "  ops-top:\n    role: watch\n",  # no harness key -> omitted
+        encoding="utf-8",
+    )
+    h = lane_config_harnesses(tmp_path)
+    assert h == {"web": "claude", "validate-left": "claude", "validate-right": "shell"}
+
+
+def test_lane_config_harnesses_empty_without_file(tmp_path):
+    # No lane-config => {} => tag-only resolution (today), F6 dormant.
+    assert lane_config_harnesses(tmp_path) == {}

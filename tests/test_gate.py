@@ -521,3 +521,40 @@ def test_t0026_integration_lane_threshold():
     assert needs_integration_lane(3) is True
     assert needs_integration_lane(5) is True
     assert needs_integration_lane(3, threshold=4) is False
+
+
+# ── F6 (T0027): lane harness from lane-config fallback ──────────────────────
+# loop.py builds lane_harnesses = tmux-tag map, then fills gaps from the
+# lane-config (setdefault: tag wins, config is the authoritative per-lane
+# fallback). These tests pin the dispatch-target verdicts on the merged map.
+
+
+def _merge(tag_map: dict, config_map: dict) -> dict:
+    """Mirror loop.py's F6 merge: tag fast-path wins; config fills the gaps."""
+    merged = dict(tag_map)
+    for lane, harness in config_map.items():
+        merged.setdefault(lane, harness)
+    return merged
+
+
+def test_f6_untagged_lane_resolves_from_config_not_blocked():
+    # Pre-existing session: the base lane carries NO tmux tag.
+    tag_only = {}  # web absent -> dispatch would BLOCK (the F6 bug)
+    assert classify(dispatch(lane="web"), 1, F1_CFG, F1_ROSTER, tag_only) == "blocked"
+    # With the config fallback, web resolves to claude (an agent) -> not blocked.
+    merged = _merge(tag_only, {"web": "claude"})
+    assert classify(dispatch(lane="web"), 1, F1_CFG, F1_ROSTER, merged) == "safe"
+
+
+def test_f6_mixed_window_resolves_each_lane_per_lane():
+    # A multi-pane window can't carry per-lane tags; config disambiguates.
+    merged = _merge({}, {"validate-left": "claude", "validate-right": "shell"})
+    assert classify(dispatch(lane="validate-left"), 1, F1_CFG, F1_ROSTER, merged) == "safe"
+    assert classify(dispatch(lane="validate-right"), 1, F1_CFG, F1_ROSTER, merged) == "destructive"
+
+
+def test_f6_correctly_tagged_single_pane_unchanged():
+    # Tag present and agreeing with config: setdefault keeps the tag -> identical.
+    merged = _merge({"web": "claude"}, {"web": "claude"})
+    assert merged == {"web": "claude"}
+    assert classify(dispatch(lane="web"), 1, F1_CFG, F1_ROSTER, merged) == "safe"

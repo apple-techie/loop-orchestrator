@@ -172,3 +172,29 @@ def load_config(project_root: str | Path) -> EngineConfig:
     base = _engine_section(root / "lane-config.yaml")
     override = _engine_section(root / f"lane-config.{_short_hostname()}.yaml")
     return _merge(EngineConfig, {**base, **override})
+
+
+def lane_config_harnesses(project_root: str | Path) -> dict[str, str]:
+    """Per-lane harness declared in lane-config.yaml's `lanes:` section (with the
+    host override applied, lane-level), as {lane: harness} for lanes that name
+    one. F6 (T0027): the AUTHORITATIVE per-lane harness the gate falls back to
+    when a lane has no `@loop_lane_harness` tmux tag (pre-existing sessions) or
+    when a multi-pane window cannot carry a per-lane tag. Returns {} when there
+    is no lane-config — so tag-only resolution (today) is unchanged/dormant."""
+    root = Path(project_root)
+    result: dict[str, str] = {}
+    for path in (root / "lane-config.yaml", root / f"lane-config.{_short_hostname()}.yaml"):
+        if not path.is_file():
+            continue
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            continue
+        lanes = doc.get("lanes") if isinstance(doc, dict) else None
+        if not isinstance(lanes, dict):
+            continue
+        for lane, block in lanes.items():
+            harness = block.get("harness") if isinstance(block, dict) else None
+            if isinstance(harness, str) and harness:
+                result[lane] = harness  # host override replaces the primary
+    return result

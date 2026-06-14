@@ -27,7 +27,7 @@ from . import actions as actions_mod
 from . import decision as decision_mod
 from . import decisions, gate, wiki
 from .brain import Brain, BrainError, oneshot_argv, run_oneshot
-from .config import EngineConfig, HarnessPolicy
+from .config import EngineConfig, HarnessPolicy, lane_config_harnesses
 from .decision import DecisionError
 from .events import EventLog, parse_ts
 from .observe import EngineSnapshot, Observer
@@ -459,6 +459,16 @@ def run_once(
         try:
             lane_infos = substrate.lanes()
             lane_harnesses = {info.window: info.harness for info in lane_infos if info.harness}
+            # F6 (T0027): the tmux tag is a per-window fast-path; the lane-config
+            # is the authoritative per-lane source. Fill any lane the tag map
+            # lacks (untagged pre-existing sessions; multi-pane windows whose
+            # per-lane names — e.g. validate-left/right — are never window keys)
+            # from config, so harness_policy is safe on ANY session and mixed
+            # windows resolve per lane. setdefault = the tag wins where present,
+            # so correctly-tagged single-pane sessions stay byte-identical; no
+            # lane-config => {} => unchanged (dormant).
+            for lane, harness in lane_config_harnesses(root).items():
+                lane_harnesses.setdefault(lane, harness)
             lane_kinds = {info.window: info.kind for info in lane_infos if info.kind}
             role_workers = {}
             # T0026: count live CODE-WRITER lanes (worker kind + an agent
