@@ -1,7 +1,10 @@
 ---
 id: T0023
 title: "Phase-5 lane-handoff breadcrumb — Handoff state + idle-gated drop_lane flush"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "445/0"
+commit: cea8288
 depends_on: [T0019]
 scope: src/loop_orchestrator/engine/{actions.py,wiki.py} + ops-wiki lane-page schema + tests ONLY; ADDITIVE; flush gated on verified-idle and skips otherwise; no reinstall; no git push
 loop: harness-governance
