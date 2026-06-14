@@ -1,7 +1,10 @@
 ---
 id: T0029
 title: "F7 — observe degrades gracefully instead of aborting the cycle on a slow/failed fan-out"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "484/0"
+commit: c493eb01
 depends_on: []
 scope: src/loop_orchestrator/engine/{observe.py,loop.py} + tests ONLY; ADDITIVE; no reinstall; no git push
 loop: harness-governance
