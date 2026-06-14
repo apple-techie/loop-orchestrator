@@ -20,6 +20,9 @@ _MAX_ATTEMPTS = 3
 # overflow goes to the decisions archive. Configurable via EngineConfig.
 DEFAULT_KEEP_DECISIONS = 10
 _ENTRY_RE = re.compile(r"(?m)^### ")
+# Lane-page section a drop_lane flush appends (T0023) and a successor lane reads
+# to recover (T0028). Its presence on a lane page = a predecessor was handed off.
+HANDOFF_MARKER = "## Handoff state"
 
 
 def _mtime_ns(path: Path) -> int | None:
@@ -142,7 +145,7 @@ def append_handoff(lane_page: Path, window: str, harness: str, pane_tail: str, n
     break the block. A drop_lane swap thus always leaves an observable signal."""
     indented = "\n".join("    " + line for line in pane_tail.rstrip("\n").splitlines()) or "    "
     block = (
-        "\n## Handoff state\n"
+        f"\n{HANDOFF_MARKER}\n"
         f"### [{now}] {window} handoff — {harness} (drop_lane flush)\n"
         f"- as-of: {now}\n"
         f"- harness: {harness}\n"
@@ -157,6 +160,17 @@ def append_handoff(lane_page: Path, window: str, harness: str, pane_tail: str, n
     if existing and not existing.endswith("\n"):
         existing += "\n"
     _write_replace(lane_page, existing + block)
+
+
+def has_handoff_state(lane_page: Path) -> bool:
+    """T0028: True when a lane page carries a `## Handoff state` section — i.e. a
+    predecessor was flushed out of this window (T0023), so a newly (re)provisioned
+    lane of the same window is a SUCCESSOR that should recover, not cold-start.
+    Missing page / no section = a normal cold add (today's behavior)."""
+    try:
+        return HANDOFF_MARKER in lane_page.read_text(encoding="utf-8")
+    except OSError:
+        return False
 
 
 def render_decision_entry(doc: dict) -> str:

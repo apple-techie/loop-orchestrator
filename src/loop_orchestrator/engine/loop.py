@@ -27,10 +27,10 @@ from . import actions as actions_mod
 from . import decision as decision_mod
 from . import decisions, gate, wiki
 from .brain import Brain, BrainError, oneshot_argv, run_oneshot
-from .config import EngineConfig, HarnessPolicy
+from .config import EngineConfig, HarnessPolicy, lane_config_harnesses
 from .decision import DecisionError
 from .events import EventLog, parse_ts
-from .observe import EngineSnapshot, Observer
+from .observe import EngineSnapshot, Observer, adaptive_timeout
 
 _HEADER_RESOURCE = ("contracts", "checkpoint-header.md")
 
@@ -410,8 +410,28 @@ def run_once(
         return 5
 
     substrate = Substrate(root, session)
-    snap = Observer(substrate, paths).snapshot()
-    events.append("observe", lanes=len(snap.lanes), mailbox_pending=len(snap.mailbox_pending))
+    # F7 (T0029): observe degrades gracefully. A fresh snapshot is the happy path
+    # (unchanged — same observe event). When the all-lanes fan-out fails under
+    # load, reuse the last good snapshot (observe-stale, with its age + the
+    # adaptive timeout the fan-out should scale to) so the cycle proceeds on known
+    # state; with no prior snapshot to fall back on, skip the cycle (observe-failed)
+    # instead of letting the SubstrateError abort it.
+    try:
+        snap, stale, age_s = Observer(substrate, paths).snapshot_or_stale()
+    except SubstrateError as exc:
+        events.append("observe-failed", error=str(exc))
+        events.append("cycle-end", outcome="observe-failed")
+        return 6
+    if stale:
+        events.append(
+            "observe-stale",
+            lanes=len(snap.lanes),
+            mailbox_pending=len(snap.mailbox_pending),
+            age_s=round(age_s) if age_s is not None else None,
+            adaptive_timeout_s=round(adaptive_timeout(len(snap.lanes))),
+        )
+    else:
+        events.append("observe", lanes=len(snap.lanes), mailbox_pending=len(snap.mailbox_pending))
 
     if snap.mailbox_pending and config.ingest.mode == "headless":
         _headless_ingest(substrate, paths, events, config, snap.mailbox_pending)
@@ -459,6 +479,16 @@ def run_once(
         try:
             lane_infos = substrate.lanes()
             lane_harnesses = {info.window: info.harness for info in lane_infos if info.harness}
+            # F6 (T0027): the tmux tag is a per-window fast-path; the lane-config
+            # is the authoritative per-lane source. Fill any lane the tag map
+            # lacks (untagged pre-existing sessions; multi-pane windows whose
+            # per-lane names — e.g. validate-left/right — are never window keys)
+            # from config, so harness_policy is safe on ANY session and mixed
+            # windows resolve per lane. setdefault = the tag wins where present,
+            # so correctly-tagged single-pane sessions stay byte-identical; no
+            # lane-config => {} => unchanged (dormant).
+            for lane, harness in lane_config_harnesses(root).items():
+                lane_harnesses.setdefault(lane, harness)
             lane_kinds = {info.window: info.kind for info in lane_infos if info.kind}
             role_workers = {}
             # T0026: count live CODE-WRITER lanes (worker kind + an agent

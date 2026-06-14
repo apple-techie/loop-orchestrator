@@ -123,6 +123,60 @@ def _flush_handoff(
         events.append("handoff-skip", window=window, reason="error", error=str(exc))
 
 
+def handoff_ack_subject(window: str) -> str:
+    """T0028: the mailbox subject a successor lane uses to ack a handoff, on the
+    `re:` reply convention so the ack is observable (confirmed landed)."""
+    return f"re:handoff:{window}"
+
+
+def _predecessor_branch(paths: SessionPaths, window: str) -> str | None:
+    """The branch recorded for this window's prior worktree lane
+    (loops.<window>.branch in the ledger, T0025), or None — used to carry the
+    worktree to the successor on a swap rather than strand its in-flight commits."""
+    ledger = read_json(paths.state_file, {})
+    loops = ledger.get("loops") if isinstance(ledger, dict) else None
+    entry = loops.get(window) if isinstance(loops, dict) else None
+    branch = entry.get("branch") if isinstance(entry, dict) else None
+    return branch if isinstance(branch, str) and branch else None
+
+
+_HANDOFF_RECOVERY_TEMPLATE = (
+    "## Handoff recovery — you are SUCCEEDING a prior lane in window '{window}'\n\n"
+    "A predecessor agent was handed off out of this window. Do NOT cold-start:\n"
+    "1. Read its breadcrumb in ops-wiki/lanes/{window}.md (the `## Handoff state`\n"
+    "   section — last step, touched files, working tree, blocked-on, assumptions).\n"
+    "2. Read the active task file under tasks/ for the in-flight work.\n"
+    "3. Resume from where it left off.{worktree}\n"
+    "Then ACK so the handoff is observable: write a mailbox message\n"
+    ".loop/messages/<UTC ts YYYYMMDD-HHMMSS>-{window}-to-coord.md with frontmatter\n"
+    "`subject: {ack}` confirming you have the context.\n\n--- original brief ---\n\n"
+)
+
+
+def _handoff_recovery(
+    window: str, brief: str, paths: SessionPaths | None, events: EventLog
+) -> tuple[str, bool]:
+    """T0028 full handoff: if the window already carries a `## Handoff state`
+    section (a predecessor was flushed here, T0023), prepend a recovery preamble
+    so the successor resumes from the breadcrumb + task file and acks, and report
+    whether to carry the predecessor's worktree branch (T0025). No handoff state
+    => (brief, False), a normal cold add, byte-identical to today."""
+    if paths is None or not wiki.has_handoff_state(paths.lane_page(window)):
+        return brief, False
+    branch = _predecessor_branch(paths, window)
+    worktree_note = (
+        f"\n   Your git worktree + branch ({branch}) carry over from the predecessor"
+        " — its in-flight commits are intact; continue on that branch."
+        if branch
+        else ""
+    )
+    preamble = _HANDOFF_RECOVERY_TEMPLATE.format(
+        window=window, ack=handoff_ack_subject(window), worktree=worktree_note
+    )
+    events.append("handoff-recovery", window=window, worktree_carry=bool(branch))
+    return preamble + brief, bool(branch)
+
+
 def execute(
     action: dict,
     substrate: Substrate,
@@ -150,6 +204,12 @@ def execute(
         # DORMANT at concurrency=1. The rule only applies to a code-writer lane
         # (agent harness, no raw cmd) and only when the loop threaded a count;
         # at code_writers in {None, 0} it resolves False -> shared, byte-identical.
+        # T0028: a successor to a flushed lane recovers from its handoff
+        # breadcrumb (+ carries the predecessor's worktree); a cold add is
+        # unchanged (recovered_brief == brief, worktree_carry False).
+        recovered_brief, worktree_carry = _handoff_recovery(
+            action["window"], action["brief"], paths, events
+        )
         new_harness = action.get("harness")
         is_code_writer = (
             bool(new_harness) and new_harness not in ("shell", "mprocs") and not action.get("cmd")
@@ -157,6 +217,7 @@ def execute(
         worktree = bool(action.get("worktree", False))
         if not worktree and is_code_writer and code_writers is not None:
             worktree = gate.should_provision_worktree(code_writers)
+        worktree = worktree or worktree_carry  # T0028 continuity: reuse the predecessor's tree
         substrate.add_lane(
             action["window"],
             harness=action.get("harness"),
@@ -166,7 +227,7 @@ def execute(
             auto_approve=bool(action.get("auto_approve", False)),
             worktree=worktree,
         )
-        substrate.dispatch(action["window"], action["brief"], wait_ready=True)
+        substrate.dispatch(action["window"], recovered_brief, wait_ready=True)
     elif kind == "drop_lane":
         _flush_handoff(action["window"], substrate, events, paths)
         substrate.drop_lane(action["window"])
