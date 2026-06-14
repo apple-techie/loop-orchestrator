@@ -193,29 +193,37 @@ try:
 except (OSError, ValueError):
     fallback(); sys.exit(0)
 
-# Coord-owned region (marker onward) preserved byte-for-byte from checkpoint.md.
-below = ""
+# Split the current checkpoint into its hand-authored compiled region (above the
+# marker) and the coord-owned region (marker onward, preserved byte-for-byte).
+above, below = "", ""
 try:
     with open(ckpt, encoding="utf-8") as fh:
         content = fh.read()
     pos = content.find(marker)
     if pos != -1:
-        below = content[pos:]
+        above, below = content[:pos], content[pos:]
+    else:
+        above = content
 except OSError:
-    below = ""
+    above, below = "", ""
 
-lines = [
-    "# checkpoint",
-    "",
-    "_Compiled from .loop/orchestrator-state.json (the canonical loop ledger) at "
-    "boot — do not hand-edit this region; edit the ledger._",
-]
-if data.get("updated_at"):
-    lines += ["", "_ledger as-of: %s_" % data["updated_at"]]
-lines += ["", "## Current objective", str(data.get("objective") or "(none recorded in ledger)")]
-lines += ["", "## Loop states"]
-loops = data.get("loops") or {}
-if isinstance(loops, dict) and loops:
+
+def section_body(region, heading):
+    # Body under the "## <heading>" section of the compiled region (stripped),
+    # or None. F5: PRESERVE a hand-authored field the ledger does not carry
+    # instead of clobbering it with a placeholder.
+    head = "## " + heading
+    i = region.find(head)
+    if i == -1:
+        return None
+    start = i + len(head)
+    nxt = region.find("\n## ", start)
+    body = (region[start:nxt] if nxt != -1 else region[start:]).strip()
+    return body or None
+
+
+def render_loops(loops):
+    rows = []
     for lid, lp in loops.items():
         lp = lp or {}
         parts = ["status=%s" % lp.get("status", "?")]
@@ -228,15 +236,39 @@ if isinstance(loops, dict) and loops:
                 parts.append("%s=%s" % (k, ",".join(str(x) for x in v)))
             elif v:
                 parts.append("%s=%s" % (k, v))
-        lines.append("- **%s** — %s" % (lid, "; ".join(parts)))
+        rows.append("- **%s** — %s" % (lid, "; ".join(parts)))
+    return "\n".join(rows)
+
+
+# F5: project each compiled-region field from the ledger ONLY when it carries a
+# non-empty value; otherwise PRESERVE the hand-authored value from checkpoint.md.
+# Never replace a hand-authored field with "(none)". A fully-populated ledger
+# renders exactly as before (additive); a sparse ledger keeps what it lacks.
+objective = (
+    data.get("objective") or section_body(above, "Current objective") or "(none recorded in ledger)"
+)
+loops = data.get("loops")
+if isinstance(loops, dict) and loops:
+    loop_block = render_loops(loops)
 else:
-    lines.append("(none)")
-conflicts = data.get("open_conflicts") or data.get("conflicts") or []
-lines += ["", "## Open conflicts"]
+    loop_block = section_body(above, "Loop states") or "(none)"
+conflicts = data.get("open_conflicts") or data.get("conflicts")
 if isinstance(conflicts, list) and conflicts:
-    lines += ["- %s" % c for c in conflicts]
+    conflict_block = "\n".join("- %s" % c for c in conflicts)
 else:
-    lines.append("(none)")
+    conflict_block = section_body(above, "Open conflicts") or "(none)"
+
+lines = [
+    "# checkpoint",
+    "",
+    "_Compiled from .loop/orchestrator-state.json (the canonical loop ledger) at "
+    "boot — do not hand-edit this region; edit the ledger._",
+]
+if data.get("updated_at"):
+    lines += ["", "_ledger as-of: %s_" % data["updated_at"]]
+lines += ["", "## Current objective", objective]
+lines += ["", "## Loop states", loop_block]
+lines += ["", "## Open conflicts", conflict_block]
 
 out = "\n".join(lines) + "\n"
 if below:

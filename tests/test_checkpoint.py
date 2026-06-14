@@ -121,3 +121,21 @@ def test_unparseable_ledger_falls_back(tmp_path):
     assert r.returncode == 0
     assert "HAND-AUTHORED objective" in r.stdout  # malformed ledger -> fallback
     assert "canonical loop ledger" not in r.stdout
+
+
+def test_sparse_ledger_projects_loops_preserves_hand_authored_objective(tmp_path):
+    # F5 (T0024): a loops-only ledger (no objective) must project its loops yet
+    # PRESERVE the hand-authored objective — never clobber it with "(none)".
+    proj = _project_with_checkpoint(tmp_path)
+    (proj / ".loop" / "orchestrator-state.json").write_text(
+        json.dumps({"schema_version": 2, "loops": {"alpha": {"status": "working"}}}),
+        encoding="utf-8",
+    )
+    r = _run(proj, ceiling="1000000")
+    assert r.returncode == 0
+    assert "canonical loop ledger" in r.stdout  # projection is active
+    assert "**alpha** — status=working" in r.stdout  # loops projected from the ledger
+    assert "HAND-AUTHORED objective" in r.stdout  # objective PRESERVED (the F5 fix)
+    assert "none recorded in ledger" not in r.stdout  # not clobbered
+    # coord-decisions region still preserved byte-for-byte
+    assert "<!-- coord-decisions -->\n## Decision needed\n(none)" in r.stdout
