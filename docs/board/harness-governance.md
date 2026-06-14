@@ -93,6 +93,18 @@ retro` and the Confluence page._
   crossing into an explicitly-deferred phase an escalate-or-block, not a brain
   judgment call. Operator interrupted the lane and forced the escalate.
 
+- **F5 — ledger projection destroys sparse-ledger fields (live, found at Phase 3 merge).**
+  T0021's checkpoint projection (`scripts/loop-checkpoint.sh project_checkpoint`)
+  replaced the WHOLE compiled region whenever the ledger file merely existed,
+  substituting "(none recorded in ledger)" for any field the ledger lacked. Live:
+  govern (no ledger) fell back correctly; **leo (ledger with loops, no `objective`)
+  lost its hand-authored objective** → would degrade brain-boot on the next cycle.
+  The Phase-3 tests passed because they used a fully-populated fixture. Caught by
+  operator live-verification during the Phase 3 merge close-out; the merge was
+  aborted to preserve safety. **Fix:** T0024 — non-destructive per-field projection
+  (the ledger stays canonical for what it HAS; it preserves any hand-authored field
+  it lacks) + a loops-only-ledger regression test.
+
 ## Sprint: "Govern P2 — readiness/health" (COMPLETE 2026-06-13)
 Goal: the per-harness readiness/health contract + the dispatch-target (F1) and
 model-availability (F3) governance gaps. Additive; frozen status output.
@@ -127,11 +139,18 @@ is the **canonical** work-state surface (checkpoint.md becomes its projection).
 
 | Issue | Title | Status |
 |-------|-------|--------|
-| T0019 | standing:/worker declared lane field (base-lane protection + demand-provision substrate) | open |
-| T0020 | demand→provision→reuse→retire HarnessPolicy + HARD reuse-before-spawn gate (incl. role-vocab unify + activate policy) | open |
-| T0021 | orchestrator-state.json canonical; project checkpoint compiled-region FROM the ledger | open |
-| T0022 | decision-log retention in wiki.py (atomic rotate+archive) + hard token gate (durable fix for the 235KB checkpoint) | open |
-| T0023 | Phase-5 lane-handoff breadcrumb (## Handoff state + idle-gated drop_lane flush) | open |
+| T0019 | standing:/worker declared lane field (base-lane protection + demand-provision substrate) | done |
+| T0020 | demand→provision→reuse→retire HarnessPolicy + HARD reuse-before-spawn gate (incl. role-vocab unify + activate policy) | done |
+| T0021 | orchestrator-state.json canonical; project checkpoint compiled-region FROM the ledger | done |
+| T0022 | decision-log retention in wiki.py (atomic rotate+archive) + hard token gate (durable fix for the 235KB checkpoint) | done |
+| T0023 | Phase-5 lane-handoff breadcrumb (## Handoff state + idle-gated drop_lane flush) | done |
+| T0024 | F5 — non-destructive ledger projection (sparse ledger preserves hand-authored fields) | open |
+
+**Phase 3 status (2026-06-13):** T0019–T0023 all CODE-COMPLETE, gate 448/0, on
+`feature/harness-governance` (not yet merged to main). Merge close-out surfaced
+**F5** (see Findings) → T0024 must land before the merge is safe. After T0024:
+merge to main + activate the starter `harness_policy` + restart daemons, then
+Phase 4 (worktree isolation).
 
 Operator config step (not a build): activate a starter `engine.harness_policy`
 in ooLEO + govern lane-configs so T0017's dispatch-target gate goes LIVE (it is
