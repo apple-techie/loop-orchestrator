@@ -161,7 +161,11 @@ like `[]` or `[T0001, T0002]`):
 - `depends_on` — list of task ids; every id must exist as a task file and
   the dependency graph must be acyclic
 - `loop` — optional loop id
-- `jira` — optional issue key
+- `jira` — optional issue key. Leave it BLANK for issueless work (omit the
+  field, or `jira: ""`); `loop-pm push` will create the issue, backfill the
+  true returned key, and link the epic. NEVER guess or increment a key: a
+  non-empty `jira:` means "this issue exists — reconcile it", so a guessed key
+  makes every push 404 and the task can never reach Done.
 - `scope` — one line
 
 **Body sections, all required**, as `## <name>` headings (a trailing
