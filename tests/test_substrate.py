@@ -162,6 +162,17 @@ def test_add_lane_argv(sub, call_log):
     ]
 
 
+def test_add_lane_shared_default_omits_worktree(sub, call_log):
+    # T0025: the shared default must NOT pass --worktree (byte-identical to today).
+    sub.add_lane("helper3", harness="claude")
+    assert "--worktree" not in call_log()[0]
+
+
+def test_add_lane_worktree_appends_flag(sub, call_log):
+    sub.add_lane("helper4", harness="claude", worktree=True)
+    assert "--worktree" in call_log()[0]
+
+
 def test_drop_lane_never_forces(sub, call_log):
     sub.drop_lane("helper")  # fake exits 7 on --force, so success also proves it
     (line,) = call_log()

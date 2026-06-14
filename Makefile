@@ -16,7 +16,7 @@ SCRIPTS := loop-tmux loop-dispatch loop-digest loop-lane-status loop-adr
 # repo-relative). They all take --project-root, so the symlink location
 # never decides which project they operate on.
 HELPERS := loop-wiki-pending loop-checkpoint loop-task-lint loop-jira-sync loop-metrics loop-wiki-lint
-LIBS := lib/harness-registry.sh lib/lane-config-resolver.sh lib/lane-health.sh
+LIBS := lib/harness-registry.sh lib/lane-config-resolver.sh lib/lane-health.sh lib/lane-worktree.sh
 REPO_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 
 .PHONY: install uninstall check print-paths help install-python check-python check-all install-skill

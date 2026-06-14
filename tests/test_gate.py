@@ -489,3 +489,35 @@ def test_t0020_classify_batch_threads_role_workers():
     actions = [_addlane(window="w1"), _addlane(role="other", window="w2")]
     # first role has an idle worker -> reuse; second role has none -> safe
     assert classify_batch(actions, 1, cfg, ROSTER, None, None, workers) == ["destructive", "safe"]
+
+
+# ── T0026 conditional worktree provisioning rule (Phase 4) ──────────────────
+
+from loop_orchestrator.engine.gate import (  # noqa: E402
+    needs_integration_lane,
+    should_provision_worktree,
+)
+
+
+def test_t0026_dormant_at_concurrency_one():
+    # The sole serialized code-writer (no other live, no dirty peer) stays SHARED.
+    assert should_provision_worktree(0) is False
+    assert should_provision_worktree(0, dirty_peers=False) is False
+
+
+def test_t0026_worktree_when_a_peer_is_concurrent():
+    # A second concurrent code-writer => isolate the new lane.
+    assert should_provision_worktree(1) is True
+    assert should_provision_worktree(3) is True
+
+
+def test_t0026_worktree_when_a_peer_is_dirty():
+    # Even alone, a dirty peer means parallelism is not serialized.
+    assert should_provision_worktree(0, dirty_peers=True) is True
+
+
+def test_t0026_integration_lane_threshold():
+    assert needs_integration_lane(2) is False
+    assert needs_integration_lane(3) is True
+    assert needs_integration_lane(5) is True
+    assert needs_integration_lane(3, threshold=4) is False

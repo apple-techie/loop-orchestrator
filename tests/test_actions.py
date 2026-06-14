@@ -112,3 +112,61 @@ def test_handoff_breadcrumb_is_append_only(tmp_path):
     text = page.read_text(encoding="utf-8")
     assert text.startswith("# lane: helper\n\n## Role\nworker lane\n")  # original preserved
     assert "## Handoff state" in text
+
+
+# ── T0026 conditional worktree provisioning on add_lane ─────────────────────
+
+
+class AddLaneSub:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def add_lane(self, window, **kwargs):
+        self.calls.append({"window": window, **kwargs})
+
+    def dispatch(self, *a, **k):
+        pass
+
+
+def _add(harness="claude", cmd=None):
+    a = {"kind": "add_lane", "window": "w", "harness": harness, "brief": "b", "rationale": "r"}
+    if cmd:
+        a["cmd"] = cmd
+    return a
+
+
+def test_add_lane_shared_when_sole_code_writer(tmp_path):
+    paths, events = _env(tmp_path)
+    sub = AddLaneSub()
+    actions.execute(_add(), sub, events, EngineConfig(), paths=paths, code_writers=0)
+    assert sub.calls[0]["worktree"] is False  # DORMANT at concurrency=1
+
+
+def test_add_lane_worktree_when_a_peer_is_concurrent(tmp_path):
+    paths, events = _env(tmp_path)
+    sub = AddLaneSub()
+    actions.execute(_add(), sub, events, EngineConfig(), paths=paths, code_writers=1)
+    assert sub.calls[0]["worktree"] is True  # second concurrent code-writer
+
+
+def test_add_lane_shell_lane_never_worktree(tmp_path):
+    paths, events = _env(tmp_path)
+    sub = AddLaneSub()
+    actions.execute(_add(harness="shell"), sub, events, EngineConfig(), paths=paths, code_writers=5)
+    assert sub.calls[0]["worktree"] is False  # not a code-writer lane
+
+
+def test_add_lane_dormant_without_concurrency_signal(tmp_path):
+    # cli path / no policy: code_writers=None => shared, byte-identical to today.
+    paths, events = _env(tmp_path)
+    sub = AddLaneSub()
+    actions.execute(_add(), sub, events, EngineConfig(), paths=paths, code_writers=None)
+    assert sub.calls[0]["worktree"] is False
+
+
+def test_add_lane_explicit_worktree_field_still_honored(tmp_path):
+    paths, events = _env(tmp_path)
+    sub = AddLaneSub()
+    action = {**_add(), "worktree": True}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths, code_writers=0)
+    assert sub.calls[0]["worktree"] is True  # explicit T0025 opt-in preserved

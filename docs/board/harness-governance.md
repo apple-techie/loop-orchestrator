@@ -105,6 +105,18 @@ retro` and the Confluence page._
   (the ledger stays canonical for what it HAS; it preserves any hand-authored field
   it lacks) + a loops-only-ledger regression test.
 
+- **F6 — harness_policy activation blocks dispatches on pre-existing / multi-pane sessions (live, 2026-06-14).**
+  Activating the harness_policy on the live govern + leo daemons STALLED their
+  builds: the gate resolves each lane's harness only from the `@loop_lane_harness`
+  tmux WINDOW tag, which (a) base lanes booted before `loop-tmux.sh:344` lack →
+  `list-lanes` returns `harness=""` → a dispatch even to the claude `web` lane
+  classifies BLOCKED; and (b) multi-pane windows (leo's `validate` = claude +
+  shell) can't represent per-lane. Worked around by manually tagging each running
+  window (govern web=claude / rest=shell; leo agents=claude, ops=shell), which
+  unblocked both. **Fix:** T0027 — resolve lane harness from the lane-config
+  (authoritative), per-lane, with the tmux tag as an optional override, so the
+  policy is safe to activate on any session without manual tagging.
+
 ## Sprint: "Govern P2 — readiness/health" (COMPLETE 2026-06-13)
 Goal: the per-harness readiness/health contract + the dispatch-target (F1) and
 model-availability (F3) governance gaps. Additive; frozen status output.
@@ -158,3 +170,19 @@ inert today — empty policy). Lands with T0020's role-vocabulary unification.
 
 (Migration map unchanged — when Jira is added these replay as a new epic +
 sprint via the loop-pm jira verbs; task files are the source of truth.)
+
+## Sprint: "Govern P4 — conditional worktree isolation" (green-lit 2026-06-14; built ahead of the concurrency>1 trigger per operator decision)
+Goal: the parallelism infrastructure — provision isolated git worktrees per
+dynamic lane, CONDITIONALLY on concurrency (not opinion), so 2+ concurrent
+code-writers can't cross-commit on a shared index. ADDITIVE + DORMANT at
+concurrency = 1 (the plan defers Phase 4 until concurrency > 1; the operator
+chose to build it ready-but-inert now). Phase 3 (T0019–T0024) is merged to main
+and the harness_policy is active on govern + ooLEO (T0017 dispatch-target gate LIVE).
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| T0025 | isolation registry field + add_lane --worktree provision/record/teardown | open |
+| T0026 | conditional provisioning rule (shared only while serialized) + N>=3 integration lane | open |
+
+Phase 5 (the lane-handoff flush, expensive half) stays deferred until Phase 4 is
+exercised under real concurrency.

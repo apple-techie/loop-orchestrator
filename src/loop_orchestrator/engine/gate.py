@@ -295,3 +295,30 @@ def classify_batch(
             for action, result in zip(actions, results, strict=True)
         ]
     return results
+
+
+# Default sustained code-writer count at which a dedicated integration lane
+# (sole writer of main) is warranted (plan C.3; T0026).
+INTEGRATION_LANE_THRESHOLD = 3
+
+
+def should_provision_worktree(existing_code_writers: int, dirty_peers: bool = False) -> bool:
+    """T0026 conditional provisioning rule (plan C.4) — DORMANT at concurrency=1.
+
+    A new code-writer lane gets an isolated git worktree only once parallelism is
+    REAL: another code-writer lane is already live (so the new one would be
+    concurrent), or a peer already holds dirty state. When the new lane would be
+    the sole serialized writer (no other code-writer, no dirty peer) it stays
+    SHARED — byte-identical to pre-Phase-4. The asymmetry justifies the default:
+    isolation is ~200ms + a venv (bounded, front-loaded) while a shared tree's
+    cross-lane commit-sweep is unbounded and invisible until review, so the
+    default flips from 'shared unless asked' to 'shared only while serialized'."""
+    return existing_code_writers >= 1 or bool(dirty_peers)
+
+
+def needs_integration_lane(code_writers: int, threshold: int = INTEGRATION_LANE_THRESHOLD) -> bool:
+    """T0026: at N>=threshold sustained concurrent code-writers, a dedicated
+    integration lane (its own worktree, the SOLE writer of main) contains the
+    O(N^2) reconciliation cost in one partition owner. Pure predicate — the
+    engine surfaces it; lane creation stays brain/operator-driven."""
+    return code_writers >= threshold

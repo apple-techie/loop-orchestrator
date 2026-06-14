@@ -184,6 +184,19 @@ def test_model_failover_field_resolves_and_empty_safe():
     assert "model_failover" in proc.stdout
 
 
+# ── isolation field (T0025, Phase 4) ────────────────────────────────────────
+
+
+def test_isolation_field_defaults_shared_for_every_harness():
+    # Phase 4 worktree isolation is DORMANT by default: every harness declares
+    # `shared`, so an add-lane lane inherits the project root (today's behavior)
+    # until a lane opts in via --worktree.
+    for name in HARNESSES:
+        assert field_value(name, "isolation") == "shared"
+    proc = run_cli("fields", "claude")
+    assert "isolation" in proc.stdout
+
+
 # ── roster + health verbs (T0011) ──────────────────────────────────────────
 
 
