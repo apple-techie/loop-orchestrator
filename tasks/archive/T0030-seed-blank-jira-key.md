@@ -1,7 +1,10 @@
 ---
 id: T0030
 title: "F8 — seeder must seed jira blank and let push create+backfill, not guess a key"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "487/0"
+commit: 8b5ece96
 depends_on: []
 scope: the coordinator/engine task-SEED logic (checkpoint-header guidance + any seed helper) + src/loop_orchestrator/pm/ (jira create-path writeback) + tests ONLY; ADDITIVE; no reinstall; no git push
 loop: harness-governance
