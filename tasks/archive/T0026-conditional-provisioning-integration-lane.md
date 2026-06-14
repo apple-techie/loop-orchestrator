@@ -1,7 +1,10 @@
 ---
 id: T0026
 title: "Phase 4 — conditional worktree provisioning rule + N>=3 integration lane"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "465/0"
+commit: 55559b2
 depends_on: [T0025]
 scope: src/loop_orchestrator/engine/{gate.py,actions.py,loop.py} + contracts/checkpoint-header.md + CONTRACT.md + tests ONLY; ADDITIVE; concurrency=1 path unchanged (stays shared); no reinstall; no git push
 loop: harness-governance
