@@ -181,8 +181,27 @@ and the harness_policy is active on govern + ooLEO (T0017 dispatch-target gate L
 
 | Issue | Title | Status |
 |-------|-------|--------|
-| T0025 | isolation registry field + add_lane --worktree provision/record/teardown | open |
-| T0026 | conditional provisioning rule (shared only while serialized) + N>=3 integration lane | open |
+| T0025 | isolation registry field + add_lane --worktree provision/record/teardown | done |
+| T0026 | conditional provisioning rule (shared only while serialized) + N>=3 integration lane | done |
 
-Phase 5 (the lane-handoff flush, expensive half) stays deferred until Phase 4 is
-exercised under real concurrency.
+**Phase 4 COMPLETE (2026-06-14):** T0025+T0026 done, gate 465/0, merged to main
+(c304873). All 17 tasks T0010–T0026 now on main; governance dormant at concurrency=1.
+
+## Sprint: "Govern P5 — full lane-handoff + hardening" (green-lit 2026-06-14)
+Goal: the expensive half of the lane-handoff contract (the cheap breadcrumb half
+T0023 already shipped) plus the two open hardening findings. Operator green-lit
+Phase 5 ahead of the concurrency>1 trigger (like Phase 4) — built ADDITIVE + safe
+at concurrency=1.
+
+| Issue | Title | Status |
+|-------|-------|--------|
+| T0027 | F6 — gate resolves lane harness from lane-config fallback (per-lane, not tmux tag) | open |
+| T0028 | Phase 5 — full lane-handoff (recovery brief + handoff ack + worktree continuity) | open |
+| T0029 | F7 — observe degrades gracefully (last-snapshot fallback) instead of aborting the cycle | open |
+
+**F7 — observe hard-30s timeout aborts the cycle under load (live, 2026-06-14).**
+A transient load spike (two concurrent heavy xhigh builds) made the
+`loop-lane-status --json --all` fleet fan-out exceed observe's hard 30s timeout,
+so observe failed and ABORTED the cycle repeatedly in BOTH live loops, stalling
+them ~2-3 min. Single-lane reads stayed instant throughout. **Fix:** T0029 —
+reuse the last snapshot / adaptive timeout instead of failing the cycle.
