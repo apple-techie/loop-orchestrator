@@ -1,7 +1,10 @@
 ---
 id: T0025
 title: "Phase 4 — isolation registry field + add_lane --worktree provision/record/teardown"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "456/0"
+commit: e62200b
 depends_on: [T0019]
 scope: lib/harness-registry.sh + loop-tmux.sh (add-lane/drop-lane) + src/loop_orchestrator/engine/{actions.py,substrate.py} + CONTRACT.md + tests ONLY; ADDITIVE; default isolation=shared = today's behavior; no reinstall; no git push
 loop: harness-governance
