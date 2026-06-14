@@ -205,3 +205,18 @@ A transient load spike (two concurrent heavy xhigh builds) made the
 so observe failed and ABORTED the cycle repeatedly in BOTH live loops, stalling
 them ~2-3 min. Single-lane reads stayed instant throughout. **Fix:** T0029 —
 reuse the last snapshot / adaptive timeout instead of failing the cycle.
+
+**F8 — coordinator seeds a GUESSED jira key for issueless work (live, 2026-06-14, ooLEO).**
+The task-seeder pre-filled `jira: SCRUM-139` on leo's Phase 2c task — a key never
+created in Jira — so push treated it as linked and reconciled
+`GET /issue/SCRUM-139/status` → HTTP 404 → errors:1 every cycle; the task could
+never close. Surfaced by a parallel agent working in ooLEO (multi-agent-on-one-repo
+— sequence pushes to origin/main). Immediate unstick: created SCRUM-139 under epic
+SCRUM-133. **Fix:** T0030 — seed `jira:` BLANK and let push's create-path make the
+issue + backfill the true key (+ link the epic). Engine-level so it can't recur
+per project; leo got a project-level AGENTS.md rule via mailbox separately.
+
+## Backlog — next govern session (dogfood paused; Phases 0–5 + F1–F7 complete and merged to main)
+| Issue | Title | Status |
+|-------|-------|--------|
+| T0030 | F8 — seed jira blank, let push create+backfill (no guessed keys) | open |
