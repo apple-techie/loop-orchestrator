@@ -174,6 +174,32 @@ def _classify_dispatch_target(
     return None
 
 
+def _classify_reuse_before_spawn(
+    action: Action, config: EngineConfig, role_workers: dict[str, dict] | None
+) -> str | None:
+    """T0020 reuse-before-spawn HARD rule: an add_lane for a role that already
+    has an idle worker lane is DESTRUCTIVE (prefer reuse over a duplicate),
+    until the role's `concurrency_allowance` (default 1) permits more live
+    workers. `role_workers` is the per-cycle {role: {"idle": n, "live": n}}
+    snapshot the loop resolves (worker-kind lanes only). None / empty policy /
+    no role / no workers for the role = no opinion (today's behavior)."""
+    if role_workers is None or not isinstance(action, AddLaneAction):
+        return None
+    policy = config.harness_policy
+    if policy == _EMPTY_POLICY:
+        return None
+    role = action.role
+    if not role:
+        return None
+    counts = role_workers.get(role)
+    if not counts:
+        return None
+    allowance = policy.role_rules.get(role, {}).get("concurrency_allowance", 1)
+    if counts.get("idle", 0) >= 1 and counts.get("live", 0) >= allowance:
+        return DESTRUCTIVE
+    return None
+
+
 def classify(
     action: Action,
     live_lane_count: int,
@@ -181,6 +207,7 @@ def classify(
     roster: Roster | None = None,
     lane_harnesses: dict[str, str] | None = None,
     lane_kinds: dict[str, str] | None = None,
+    role_workers: dict[str, dict] | None = None,
 ) -> str:
     """Classify one action. blocked > destructive > safe.
 
@@ -197,6 +224,7 @@ def classify(
     target_verdict = _classify_dispatch_target(action, roster, lane_harnesses)
     if target_verdict == BLOCKED:
         return BLOCKED
+    reuse_verdict = _classify_reuse_before_spawn(action, config, role_workers)
     target = getattr(action, "lane", None) or getattr(action, "window", None)
     text = getattr(action, "payload", None) or getattr(action, "brief", None)
     if target == "coord":
@@ -235,6 +263,8 @@ def classify(
         return DESTRUCTIVE
     if action.kind == "add_lane" and live_lane_count >= config.destructive.max_lanes:
         return DESTRUCTIVE
+    if reuse_verdict == DESTRUCTIVE:
+        return DESTRUCTIVE
     if target_verdict == DESTRUCTIVE:
         return DESTRUCTIVE
     if harness_verdict == DESTRUCTIVE:
@@ -249,12 +279,13 @@ def classify_batch(
     roster: Roster | None = None,
     lane_harnesses: dict[str, str] | None = None,
     lane_kinds: dict[str, str] | None = None,
+    role_workers: dict[str, dict] | None = None,
 ) -> list[str]:
     """Per-action classify, then the fan-out guard: when the batch carries more
     dispatch+steer than max_dispatches_per_cycle, every 'safe' dispatch/steer
     in it is upgraded to 'destructive' (the whole burst needs approval)."""
     results = [
-        classify(action, live_lane_count, config, roster, lane_harnesses, lane_kinds)
+        classify(action, live_lane_count, config, roster, lane_harnesses, lane_kinds, role_workers)
         for action in actions
     ]
     fan_out = sum(1 for action in actions if action.kind in ("dispatch", "steer"))

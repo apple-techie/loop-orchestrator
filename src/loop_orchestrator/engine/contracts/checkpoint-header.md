@@ -50,6 +50,11 @@ Action kinds and fields (optional fields shown with their defaults):
   `{kind: add_lane, window: <new window>, harness: <name> | cmd: <command>,
   model: <optional>, role: <optional>, auto_approve: false, brief: <the
   lane's task brief>, rationale: <why>}`
+  Provision against DECLARED demand and REUSE before you spawn: if a worker
+  lane for that role is already idle, dispatch the brief to it instead of
+  adding a duplicate — the gate classifies a duplicate-idle-worker add_lane
+  `destructive` (reuse is the default; a role's `concurrency_allowance` is the
+  only escape hatch). Choose the harness from the role's `preferred_harness`.
 - drop_lane — remove a dynamic lane:
   `{kind: drop_lane, window: <live lane>, rationale: <why>}`
 - steer — redirect a lane that is mid-task:

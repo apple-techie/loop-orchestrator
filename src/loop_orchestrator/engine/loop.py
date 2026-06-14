@@ -442,6 +442,7 @@ def run_once(
     roster = None
     lane_harnesses = None
     lane_kinds = None
+    role_workers = None
     if config.harness_policy != HarnessPolicy():
         try:
             roster = substrate.harness_roster()
@@ -449,13 +450,23 @@ def run_once(
             events.append("error", kind="roster-failed", error=str(exc))
         # Per-cycle lane snapshot, resolved only under a non-empty policy so the
         # empty policy keeps today's call profile. One substrate.lanes() call
-        # feeds both the F1 dispatch-target map (lane->harness) and the T0019
-        # standing-lane drop guard (lane->kind). A failure degrades both to None
-        # (the gate passes go inert) with an event; it never aborts the cycle.
+        # feeds the F1 dispatch-target map (lane->harness), the T0019 standing-
+        # lane drop guard (lane->kind), and the T0020 reuse-before-spawn rule
+        # (per-role idle/live worker counts, correlated with this cycle's
+        # observed statuses in snap.lanes). A failure degrades all to None (the
+        # gate passes go inert) with an event; it never aborts the cycle.
         try:
             lane_infos = substrate.lanes()
             lane_harnesses = {info.window: info.harness for info in lane_infos if info.harness}
             lane_kinds = {info.window: info.kind for info in lane_infos if info.kind}
+            role_workers = {}
+            for info in lane_infos:
+                if info.kind != "worker":
+                    continue
+                bucket = role_workers.setdefault(info.role or "", {"idle": 0, "live": 0})
+                bucket["live"] += 1
+                if (snap.lanes.get(info.window) or {}).get("status") == "idle":
+                    bucket["idle"] += 1
         except SubstrateError as exc:
             events.append("error", kind="lanes-failed", error=str(exc))
 
@@ -502,7 +513,7 @@ def run_once(
     if governance_events:
         parsed = dataclasses.replace(parsed, actions=governed)
     classifications = gate.classify_batch(
-        parsed.actions, len(snap.lanes), config, roster, lane_harnesses, lane_kinds
+        parsed.actions, len(snap.lanes), config, roster, lane_harnesses, lane_kinds, role_workers
     )
     events.append("gate", id=parsed.id, classifications=classifications)
 
