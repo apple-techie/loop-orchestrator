@@ -1,7 +1,10 @@
 ---
 id: T0021
 title: "orchestrator-state.json canonical; project checkpoint compiled-region from the ledger"
-status: open
+status: done
+accepted: 2026-06-14
+gate: "448/0"
+commit: 8a61720
 depends_on: []
 scope: scripts/loop-checkpoint.sh + src/loop_orchestrator/ (read-only consumers) + CONTRACT.md + tests ONLY; ADDITIVE; absent/empty ledger = today's hand-authored region; coord-decisions region untouched; no reinstall; no git push
 loop: harness-governance
