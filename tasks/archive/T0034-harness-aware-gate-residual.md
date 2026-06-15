@@ -1,7 +1,11 @@
 ---
 id: T0034
 title: "B4 — close the mode-vs-harness gate residual: classify a text dispatch by the TARGET lane's harness"
-status: open
+status: done
+accepted: 2026-06-15
+gate: "517/0"
+commit: e098622
+rollback: "git revert e098622"
 depends_on: []
 jira:
 scope: src/loop_orchestrator/engine/gate.py (classify_dispatch_target / classify_harness) + per-lane harness resolution + tests ONLY; ADDITIVE; no reinstall by the task; no git push
