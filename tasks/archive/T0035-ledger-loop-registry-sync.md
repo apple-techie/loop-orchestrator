@@ -1,7 +1,10 @@
 ---
 id: T0035
 title: "B5 — every active loop appears in the ledger loops registry (deck shows it); auto-register + backfill"
-status: open
+status: done
+accepted: 2026-06-15
+gate: "528/0"
+commit: f137989
 depends_on: []
 jira:
 scope: src/loop_orchestrator/engine/ (observe/checkpoint loop-registry sync + the checkpoint-header guidance that tells the coordinator to register a loop) + tests ONLY; ADDITIVE; no reinstall by the task; no git push
