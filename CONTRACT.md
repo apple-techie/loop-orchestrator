@@ -137,6 +137,23 @@ section in this file.
   Python engine invokes this via its substrate wrapper (`loop-wiki-lint`
   repo-relative entry).
 
+### bin/loop-restart
+Operational wrapper — the ONLY sanctioned restart path for a PM-syncing loop
+daemon. Unlike the pure substrate above, it REQUIRES the Python layer
+(`loop-engine`, `loop-pm`).
+- `loop-restart <session> [--project-root R]` — (1) re-sources the per-loop env
+  `$LOOP_SECRETS_DIR/<session>.env` (default `~/.loop-secrets/`); (2) reinstalls
+  via `$LOOP_RESTART_INSTALL_CMD` (default `make install-python`); (3)
+  `loop-engine restart`; (4) if the loop configures any `engine.pm.adapters`,
+  asserts each is `available` per `loop-pm list-adapters`.
+- Exit 0 only when the daemon was restarted AND every configured PM adapter is
+  available. Exit 1 on a missing env file when a PM adapter is configured
+  (fails BEFORE restart), a reinstall/restart failure, or an adapter still
+  unavailable after restart. Exit 2 on usage error.
+- A loop with no configured PM adapter (e.g. govern) needs no env file and the
+  assert is a no-op. Bare `loop-engine restart` is deprecated for PM loops: a
+  fresh shell drops the secrets and silently disables the adapter.
+
 ## File conventions (read-only to higher layers unless stated)
 
 - `.loop/orchestrator-state.json` — schema v2 (`schema_version`, `updated_at`,

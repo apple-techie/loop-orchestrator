@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# loop-restart — the ONLY sanctioned restart path for a PM-syncing loop daemon.
+#
+# `loop-engine restart` run from a fresh shell inherits THAT shell's env, so a
+# per-loop secret (e.g. JIRA_*) that lived only in the original launch shell
+# vanishes — the PM adapter then silently reports unavailable and pull/push
+# become no-ops, so loop state goes stale invisibly. This wrapper makes the
+# safe sequence the default: re-source the per-loop env, reinstall the code (so
+# a running daemon picks up changes), restart, then ASSERT the configured PM
+# adapter is actually live before exiting 0. (T0031 / B1)
+#
+# Usage:  loop-restart <session> [--project-root R]
+#
+# Env:
+#   LOOP_SECRETS_DIR        dir holding <session>.env  (default: ~/.loop-secrets)
+#   LOOP_RESTART_INSTALL_CMD  reinstall command, run in the project root
+#                           (default: "make install-python"; e.g.
+#                            "uv tool install --reinstall --from . loop-orchestrator")
+#
+# Exit: 0 only when the daemon was restarted AND every configured PM adapter is
+# available; 1 on any failure (missing env with a PM adapter configured,
+# reinstall/restart failure, or an adapter still unavailable after restart);
+# 2 on a usage error.
+set -euo pipefail
+
+usage() {
+  echo "usage: loop-restart <session> [--project-root R]" >&2
+}
+
+session=""
+project_root="$PWD"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project-root) project_root="${2:?--project-root needs a value}"; shift 2 ;;
+    --project-root=*) project_root="${1#*=}"; shift ;;
+    -h | --help) usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "loop-restart: unknown option '$1'" >&2; usage; exit 2 ;;
+    *)
+      if [[ -z "$session" ]]; then
+        session="$1"; shift
+      else
+        echo "loop-restart: unexpected argument '$1'" >&2; usage; exit 2
+      fi
+      ;;
+  esac
+done
+[[ -n "$session" ]] || { usage; exit 2; }
+
+# Adapter names this loop configures (engine.pm.adapters in lane-config.yaml +
+# host override). Empty = no PM layer, so the env file is optional and the
+# readiness assert is a no-op. Any read failure degrades to "none configured"
+# exactly as the engine's own config loader does (absent/unparseable => []).
+_configured_adapters() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import os, socket, sys
+
+try:
+    import yaml
+except Exception:
+    sys.exit(0)  # no yaml -> cannot introspect; the engine would see none either
+
+root = sys.argv[1]
+host = socket.gethostname().split(".")[0]
+names: list[str] = []
+for fn in ("lane-config.yaml", f"lane-config.{host}.yaml"):
+    try:
+        with open(os.path.join(root, fn), encoding="utf-8") as fh:
+            doc = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        continue
+    if not isinstance(doc, dict):
+        continue
+    engine = doc.get("engine") if isinstance(doc.get("engine"), dict) else {}
+    pm = engine.get("pm") if isinstance(engine.get("pm"), dict) else {}
+    for entry in pm.get("adapters") or []:
+        name = entry.get("name") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+print(" ".join(names))
+PY
+}
+
+adapters="$(_configured_adapters "$project_root")"
+
+# ── step 1: re-source the per-loop env ───────────────────────────────────────
+secrets_dir="${LOOP_SECRETS_DIR:-$HOME/.loop-secrets}"
+env_file="$secrets_dir/$session.env"
+if [[ -f "$env_file" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$env_file"
+  set +a
+  echo "loop-restart: sourced env $env_file" >&2
+elif [[ -n "$adapters" ]]; then
+  echo "loop-restart: FATAL: env file '$env_file' is missing but this loop" \
+    "configures PM adapter(s): $adapters." >&2
+  echo "  Without it those adapters would be UNAVAILABLE and pull/push a silent" \
+    "no-op. Create the env file (set -a; export JIRA_*; set +a) or remove the" \
+    "adapter from engine.pm.adapters. Aborting BEFORE restart." >&2
+  exit 1
+else
+  echo "loop-restart: no env file ($env_file) and no PM adapter configured —" \
+    "continuing" >&2
+fi
+
+# ── step 2: reinstall so a running daemon picks up code changes ───────────────
+install_cmd="${LOOP_RESTART_INSTALL_CMD:-make install-python}"
+echo "loop-restart: reinstalling ($install_cmd) in $project_root" >&2
+( cd "$project_root" && eval "$install_cmd" ) || {
+  echo "loop-restart: FATAL: reinstall failed ($install_cmd)" >&2
+  exit 1
+}
+
+# ── step 3: restart the engine (stop -> confirm-dead -> start) ───────────────
+echo "loop-restart: restarting engine for session '$session'" >&2
+loop-engine --project-root "$project_root" --session "$session" restart || {
+  echo "loop-restart: FATAL: loop-engine restart failed" >&2
+  exit 1
+}
+
+# ── step 4: assert PM readiness ──────────────────────────────────────────────
+# list-adapters reports each installed adapter's env-based availability; it takes
+# no --project-root (availability is env-derived, not project-derived).
+if [[ -z "$adapters" ]]; then
+  echo "loop-restart: OK — daemon restarted (no PM adapter configured)" >&2
+  exit 0
+fi
+
+listing="$(loop-pm list-adapters)" || {
+  echo "loop-restart: FATAL: 'loop-pm list-adapters' failed after restart" >&2
+  exit 1
+}
+unavailable=""
+for adapter in $adapters; do
+  if ! grep -Eq "^${adapter}[[:space:]]+available\b" <<<"$listing"; then
+    unavailable+=" $adapter"
+  fi
+done
+if [[ -n "$unavailable" ]]; then
+  echo "loop-restart: FATAL: PM adapter(s)$unavailable NOT available after restart:" >&2
+  echo "$listing" | sed 's/^/  /' >&2
+  echo "  The daemon is up but PM sync would be a SILENT no-op (env likely not" \
+    "sourced). Fix $env_file and re-run." >&2
+  exit 1
+fi
+echo "loop-restart: OK — daemon restarted, PM adapter(s) available: $adapters" >&2
+exit 0
