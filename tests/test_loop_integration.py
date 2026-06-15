@@ -246,6 +246,23 @@ def test_genuine_stop_executes_on_idle_fleet(project, call_log, monkeypatch):
     assert "gate" in kinds  # the stop decision was classified + processed
 
 
+def test_run_once_syncs_loops_registry(project, call_log):
+    # B5 (T0035): a cycle refreshes the ledger loops registry from task loop:
+    # fields, so loop-digest / the deck show every active loop.
+    (project / "tasks").mkdir(exist_ok=True)
+    (project / "tasks" / "T1-x.md").write_text(
+        "---\nid: T1\ntitle: t\nstatus: open\ndepends_on: []\nloop: demo-loop\nscope: s\n---\n\n"
+        "## Objective\no\n",
+        encoding="utf-8",
+    )
+    assert run_once(project, "demo", EngineConfig()) == 0
+
+    paths = SessionPaths(project, "demo")
+    ledger = json.loads(paths.state_file.read_text(encoding="utf-8"))
+    assert ledger["loops"]["demo-loop"]["status"] == "in-progress"
+    assert "loops-sync" in [e["event"] for e in _events(paths)]
+
+
 def test_cli_once_dry_run(project, call_log, capsys):
     rc = cli.main(["--project-root", str(project), "--session", "demo", "once", "--dry-run"])
 

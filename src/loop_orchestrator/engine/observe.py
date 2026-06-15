@@ -14,7 +14,7 @@ from pathlib import Path
 from ..locking import atomic_write_json
 from ..paths import SessionPaths
 from ..substrate import Substrate, SubstrateError
-from .events import parse_ts, utc_now
+from .events import EventLog, parse_ts, utc_now
 
 
 @dataclass
@@ -185,3 +185,89 @@ def delta(prev_dict: dict | None, cur_dict: dict) -> list[tuple[str, dict]]:
         if name not in prev_mail:
             events.append(("mailbox-new", {"file": name}))
     return events
+
+
+# ── loops registry sync (T0035/B5): project the task loop: fields into the
+# ledger loops registry so loop-digest / the deck show every active loop ────────
+
+
+def _loop_display_name(loops_doc_dir: Path, loop: str) -> str:
+    """The loop's display name: the title of its `ops-wiki/loops/<loop>.md` doc
+    (its first `# ` heading, minus a leading `loop:` tag), else the loop id."""
+    try:
+        text = (loops_doc_dir / f"{loop}.md").read_text(encoding="utf-8")
+    except OSError:
+        return loop
+    for line in text.splitlines():
+        if line.startswith("# "):
+            title = line[2:].strip().removeprefix("loop:").strip()
+            return title or loop
+    return loop
+
+
+def derive_loops_from_tasks(tasks_dir: Path, loops_doc_dir: Path) -> dict[str, dict]:
+    """The loops registry DERIVED from the task `loop:` fields (the source of
+    truth, T0004): one row per loop id with `status` (in-progress if ANY of its
+    tasks is open/in-progress, else done) and a display `name`. Read-only over
+    tasks/ + tasks/archive/; tasks with no loop: field are ignored."""
+    from ..pm import taskfiles
+
+    statuses: dict[str, set[str]] = {}
+    for path in taskfiles.list_tasks(tasks_dir):
+        try:
+            frontmatter = taskfiles.parse_frontmatter(path)
+        except ValueError:
+            continue
+        loop = frontmatter.get("loop")
+        if isinstance(loop, str) and loop:
+            statuses.setdefault(loop, set()).add(str(frontmatter.get("status") or ""))
+    derived: dict[str, dict] = {}
+    for loop, seen in statuses.items():
+        active = any(status in ("open", "in-progress") for status in seen)
+        derived[loop] = {
+            "status": "in-progress" if active else "done",
+            "name": _loop_display_name(loops_doc_dir, loop),
+        }
+    return derived
+
+
+def merge_loops_registry(existing: dict, derived: dict[str, dict]) -> dict:
+    """Non-destructive (F5/T0024) merge of the derived loops into the existing
+    registry: the task-derived `status` is canonical (refreshed), but every
+    hand-authored field a loop already carries (branch, name, blast_radius, …) is
+    PRESERVED, and a loop with no derived tasks is left untouched. `name` is only
+    filled from the derivation when the loop has none."""
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    for loop, derived_row in derived.items():
+        current = merged.get(loop)
+        row = dict(current) if isinstance(current, dict) else {}
+        row["status"] = derived_row["status"]  # derived status is canonical
+        row.setdefault("name", derived_row["name"])  # preserve hand-authored name
+        merged[loop] = row
+    return merged
+
+
+def sync_loops_registry(paths: SessionPaths, events: EventLog) -> int:
+    """Refresh the ledger loops registry from the task `loop:` fields, non-
+    destructively, so loop-digest / the deck list every loop that has tasks.
+    Writes the ledger ONLY when the registry actually changes (idempotent) and
+    emits `loops-sync` with the loop ids. Returns the loop-row count after the
+    sync (0 = nothing derived / no tasks). The write is an additive, non-
+    destructive merge of the coordinator-owned ledger (the T0025 branch-record
+    precedent)."""
+    from ..locking import read_json
+
+    ledger = read_json(paths.state_file, {})
+    if not isinstance(ledger, dict):
+        ledger = {}
+    derived = derive_loops_from_tasks(paths.tasks_dir, paths.ops_wiki / "loops")
+    if not derived:
+        return 0
+    existing = ledger.get("loops")
+    existing = existing if isinstance(existing, dict) else {}
+    merged = merge_loops_registry(existing, derived)
+    if merged == existing:
+        return len(merged)
+    atomic_write_json(paths.state_file, {**ledger, "loops": merged})
+    events.append("loops-sync", loops=sorted(merged), derived=sorted(derived))
+    return len(merged)
