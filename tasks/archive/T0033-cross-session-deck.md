@@ -1,7 +1,11 @@
 ---
 id: T0033
 title: "B3 — cross-session deck: one read-only view of every running loop (engine, queue depth, lane health)"
-status: open
+status: done
+accepted: 2026-06-15
+gate: "511/0"
+commit: 238c95a
+rollback: "git revert 238c95a"
 depends_on: []
 jira:
 scope: src/loop_orchestrator/deck/ + a multi-session read helper in substrate.py + tests ONLY; ADDITIVE; deck stays NON-WRITER; no reinstall by the task; no git push
