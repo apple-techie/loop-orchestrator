@@ -386,6 +386,11 @@ Mirror loop work into Jira.
 hand-written content the sync must never touch
 """
 
+# F8 (T0030): the seeded form for issueless work — a PRESENT-but-blank jira: ""
+# field (not merely absent). It must take the same create+backfill path, NOT a
+# reconcile that 404s on a guessed key.
+TASK_BLANK_JIRA = TASK_NO_JIRA.replace("depends_on: []\n", 'depends_on: []\njira: ""\n')
+
 
 class ParentRejectingTransport(FakeTransport):
     """POST /issue with a 'parent' field -> 400 (company-managed project);
@@ -771,6 +776,64 @@ def test_push_creates_issue_and_writes_key_back(jira_env, project: Path, monkeyp
     assert fields["description"]["content"][0]["content"][0]["text"] == (
         "Mirror loop work into Jira."
     )
+
+
+def test_push_blank_jira_string_creates_and_backfills_no_reconcile(
+    jira_env, project: Path, monkeypatch
+):
+    # F8 (T0030): a PRESENT-but-blank jira: "" field is issueless work — it must
+    # take the CREATE path (create + backfill the true key + link epic), never a
+    # reconcile GET that 404s on a non-existent key.
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "PROJ")
+    path = project / "tasks" / "T0002-build-the-sync.md"
+    path.write_text(TASK_BLANK_JIRA, encoding="utf-8")
+    assert taskfiles.parse_frontmatter(path)["jira"] == ""  # seeded blank, present
+    transport = FakeTransport([("POST", "/rest/api/3/issue", CREATED_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks", epic="PROJ-42")
+
+    assert result.created == ["PROJ-77 from T0002"]
+    assert result.errors == []
+    assert taskfiles.parse_frontmatter(path)["jira"] == "PROJ-77"  # backfilled
+    # the epic was linked at creation
+    fields = json.loads(transport.writes()[0][2])["fields"]
+    assert fields["parent"] == {"key": "PROJ-42"}
+    # NO reconcile happened: not a single GET against an issue status endpoint
+    assert not any("?fields=status" in url for _, url, _ in transport.calls)
+
+
+def test_push_set_jira_reconciles_and_never_creates(jira_env, project: Path):
+    # F8 invariant other side: a non-empty jira: means "reconcile this issue" —
+    # the push must take the transition path and NEVER hit the bare create POST.
+    archive = project / "tasks" / "archive"
+    (archive / "T0001-fix-the-login-flow.md").write_text(
+        TASK_WITH_JIRA.format(status="done"), encoding="utf-8"
+    )
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/api/3/issue/PROJ-1?fields=status", ISSUE_STATUS_RESPONSE),
+            ("GET", "/rest/api/3/issue/PROJ-1/transitions", TRANSITIONS_RESPONSE),
+            ("POST", "/rest/api/3/issue/PROJ-1/transitions", {}),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks")
+
+    assert result.updated == ["PROJ-1"] and result.created == []
+    # every write is a transition — the bare create endpoint is never POSTed to
+    assert all(url.rstrip("/").endswith("/transitions") for _, url, _ in transport.writes())
+
+
+def test_agents_md_documents_blank_jira_seeding():
+    # F8 root fix is a convention: the task-authoring guidance must tell the
+    # coordinator to seed jira BLANK and never guess a key. Guard it so the rule
+    # cannot silently regress.
+    agents_md = Path(__file__).resolve().parents[1] / "AGENTS.md"
+    text = agents_md.read_text(encoding="utf-8").lower()
+    assert "leave it blank for issueless work" in text
+    assert "never guess or increment a key" in text
 
 
 def test_push_create_under_epic_with_parent_fallback_warning(jira_env, project: Path):
