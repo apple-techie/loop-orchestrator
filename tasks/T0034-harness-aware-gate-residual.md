@@ -38,9 +38,35 @@ the registry read). See memory loop-orchestrator-security-model (mode-based not
 harness-aware residual) and the engine-state next-build note (thread per-lane
 harness into gate.classify).
 
+## Deliverables
+- The resolved per-lane harness (reusing the T0027/F6 lane-config resolution)
+  threaded into dispatch-target classification, so a text-mode brief to a lane
+  whose harness consumes text as a shell command is classified `destructive`
+  (forces human approval), not `safe`.
+- Command-mode to a shell lane and text to a genuine agent harness keep their
+  existing classifications; the change generalizes the T0017 dispatch-target gate
+  to be driven by the harness's registry text-handling semantics.
+- Regression tests for the new classification branch.
+
+## Acceptance criteria
+- Regression test: text-mode dispatch to a text-as-shell harness lane →
+  destructive/blocked; the same to an agent-harness lane → safe; command-mode to a
+  shell lane → safe (unchanged); existing T0017 dispatch-target tests still pass.
+- Full governance gate green; the 487/0 baseline must not regress.
+- ADDITIVE: lanes whose harness already classified correctly are unaffected
+  (empty/None resolution = today's behavior). Commit cites T0034/B4; no reinstall;
+  no `git push`.
+
 ## Verification (done-when)
 - Regression test: a text-mode dispatch to a text-as-shell harness lane → classified
   destructive/blocked; the same to an agent-harness lane → safe; command-mode to a
   shell lane → safe (unchanged). The existing T0017 dispatch-target tests still pass.
 - Full suite green (the governance gate suite — 487/0 baseline must not regress).
 - ADR/verify_record: test output + rollback note (revert the gate.py change).
+
+## Out of scope
+- Re-architecting the gate beyond threading per-lane harness semantics into the
+  existing classification.
+- Changing harness-registry field definitions or the FROZEN registry verbs.
+- Enabling AUTO mode on any live loop (an operator decision the fix merely makes
+  safer).

@@ -38,6 +38,28 @@ single session), `substrate.py` (add a read-only multi-session enumerator),
 per-session snapshot.json. The per-session deck and its non-writer rule are the
 pattern to extend.
 
+## Deliverables
+- A cross-session, read-only fleet view (`loop-deck --all` / a fleet screen)
+  enumerating every running loop with: session name, engine daemon state
+  (running/paused/stopped + pid), pending-decision queue depth (and whether one
+  awaits approval), and a lane-health summary (idle/working/needs-approval/errored).
+- Loop discovery across configured project roots (scan
+  `.loop/sessions/*/engine/engine.pid`) with a defined roots source (a `--roots`
+  list or a small registry file).
+- The deck NON-WRITER invariant preserved — read-only aggregation only (reuse
+  `loop-lane-status --json --all`, `loop-engine status`, snapshot.json); drilling
+  into a loop hands off to the existing per-session deck.
+- A Textual pilot/smoke test for the fleet screen.
+
+## Acceptance criteria
+- Two loops on distinct sessions → the fleet view lists both with accurate engine
+  state, queue depth, and lane-health counts; a paused/stopped loop renders
+  correctly; no sessions → empty fleet, no crash.
+- The fleet screen issues ONLY read-only CLIs (non-writer invariant asserted by
+  test).
+- Full governance gate green; the 487/0 baseline must not regress. Commit cites
+  T0033/B3; no reinstall; no `git push`.
+
 ## Verification (done-when)
 - Two loops running on distinct sessions → the fleet view lists BOTH with accurate
   engine state, queue depth, and lane-health counts; a paused/stopped loop shows
@@ -46,3 +68,10 @@ pattern to extend.
   CLIs (non-writer invariant intact).
 - ADR/verify_record: test output + a manual two-loop screenshot/transcript +
   rollback note (remove the fleet screen/flag).
+
+## Out of scope
+- Any write/mutation from the fleet view (steer/dispatch/approve stay in the
+  per-session deck only).
+- Cross-host discovery or a networked registry; roots are local.
+- Replacing or restructuring the existing per-session deck (the fleet view
+  extends it).
