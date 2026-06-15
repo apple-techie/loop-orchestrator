@@ -49,8 +49,10 @@ def _run(
     engine_marker = tmp_path / "engine-called"
     _stub(stub_bin / "loop-engine", f'echo "$*" >> "{engine_marker}"\nexit 0\n')
     # the wrapper only invokes `loop-pm list-adapters`; echo the canned listing.
-    _stub(stub_bin / "loop-pm", 'if [ "$1" = list-adapters ]; then cat <<\'EOF\'\n'
-          f"{pm_listing}\nEOF\nfi\nexit 0\n")
+    _stub(
+        stub_bin / "loop-pm",
+        f"if [ \"$1\" = list-adapters ]; then cat <<'EOF'\n{pm_listing}\nEOF\nfi\nexit 0\n",
+    )
 
     env = {
         **os.environ,
@@ -104,8 +106,6 @@ def test_no_pm_loop_exits_0_without_env(tmp_path):
 
 
 def test_missing_session_arg_is_usage_error(tmp_path):
-    proc = subprocess.run(
-        [str(WRAPPER)], capture_output=True, text=True, env={**os.environ}
-    )
+    proc = subprocess.run([str(WRAPPER)], capture_output=True, text=True, env={**os.environ})
     assert proc.returncode == 2
     assert "usage:" in proc.stderr
