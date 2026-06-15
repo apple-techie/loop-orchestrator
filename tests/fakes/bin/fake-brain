@@ -58,6 +58,19 @@ Final answer:
 EOF
     print_valid_fence
     ;;
+  stop)
+    cat <<'EOF'
+Observations: every lane appears to be working; nothing to dispatch this cycle.
+
+```decision
+version: 1
+critique: the fleet looks busy, so there is nothing for me to do this cycle
+actions:
+  - kind: stop
+    rationale: fleet busy, no action needed
+```
+EOF
+    ;;
   *)
     cat <<'EOF'
 Observations: all lanes idle, one mailbox message pending, no escalations.

@@ -234,3 +234,57 @@ def test_successor_without_predecessor_branch_no_carry(tmp_path):
     sub = AddLaneSub()
     actions.execute(_add(brief="resume"), sub, events, EngineConfig(), paths=paths, code_writers=0)
     assert sub.calls[0]["worktree"] is False
+
+
+# ── T0032 (B2) defensive stop: re-probe before honoring a `stop` ─────────────
+
+
+class _ReprobeSub:
+    """Records lane_status re-probes; a 'RAISE' status throws SubstrateError."""
+
+    def __init__(self, statuses: dict[str, str]):
+        self._statuses = statuses
+        self.probed: list[str] = []
+
+    def lane_status(self, lane: str) -> str:
+        self.probed.append(lane)
+        status = self._statuses.get(lane, "idle")
+        if status == "RAISE":
+            raise SubstrateError(["loop-lane-status", lane], 1, "boom")
+        return status
+
+
+def test_stop_no_working_lane_executes_without_reprobe(tmp_path):
+    # Genuinely-idle fleet => no re-probe, stop is honored (return False).
+    paths, events = _env(tmp_path)
+    sub = _ReprobeSub({})
+    assert actions.stop_suspected_idle_stall(sub, set(), events) is False
+    assert sub.probed == []
+    assert "stop-suspected-idle-stall" not in _events(events)
+
+
+def test_stop_reprobe_still_working_suppresses(tmp_path):
+    # Observed working + re-probe STILL working => suspected idle-stall, suppress.
+    paths, events = _env(tmp_path)
+    sub = _ReprobeSub({"web": "working"})
+    assert actions.stop_suspected_idle_stall(sub, {"web"}, events) is True
+    assert sub.probed == ["web"]  # re-probe invoked
+    stall = [e for e in events.tail(10) if e["event"] == "stop-suspected-idle-stall"]
+    assert stall and stall[-1]["lanes"] == ["web"]
+
+
+def test_stop_reprobe_now_idle_executes(tmp_path):
+    # Observed working but the lane finished by the re-probe => honor the stop.
+    paths, events = _env(tmp_path)
+    sub = _ReprobeSub({"web": "idle"})
+    assert actions.stop_suspected_idle_stall(sub, {"web"}, events) is False
+    assert sub.probed == ["web"]
+    assert "stop-suspected-idle-stall" not in _events(events)
+
+
+def test_stop_reprobe_error_is_not_counted_as_working(tmp_path):
+    # A lane we can't probe is not evidence of work => does not suppress.
+    paths, events = _env(tmp_path)
+    sub = _ReprobeSub({"web": "RAISE"})
+    assert actions.stop_suspected_idle_stall(sub, {"web"}, events) is False
+    assert "stop-suspected-idle-stall" not in _events(events)

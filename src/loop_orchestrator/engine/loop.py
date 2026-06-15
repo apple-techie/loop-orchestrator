@@ -548,6 +548,18 @@ def run_once(
             )
 
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
+    # T0032 (B2) defensive stop: a `stop` decision on a fleet the cycle observed as
+    # working is suspicious (the shared classifier can mis-read an idle lane as
+    # working). Re-probe the working lanes once; if any is still working the fleet
+    # is not genuinely idle, so suppress the stop and keep the loop alive instead of
+    # quietly halting. A genuinely-idle fleet (no working lane) honors the stop.
+    if any(action.kind == "stop" for action in parsed.actions):
+        working_lanes = {
+            lane for lane, info in snap.lanes.items() if info.get("status") == "working"
+        }
+        if actions_mod.stop_suspected_idle_stall(substrate, working_lanes, events):
+            events.append("cycle-end", outcome="stop-suspected-idle-stall")
+            return 0
     governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)
     for governance_event in governance_events:
         events.append("governance", **governance_event)

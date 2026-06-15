@@ -218,6 +218,34 @@ def test_observe_failed_skips_cycle_without_prior_snapshot(project, call_log, mo
     assert _brain_calls(call_log) == []  # never reached the brain
 
 
+def test_stop_suppressed_when_lane_still_working(project, call_log, monkeypatch):
+    # B2 (T0032): the brain stops while web shows working; a fresh re-probe still
+    # shows web working => suspected idle-stall => the stop is suppressed and the
+    # loop is NOT halted (no decision filed, never reached the gate).
+    monkeypatch.setenv("FAKE_BRAIN_MODE", "stop")
+    monkeypatch.setenv("FAKE_LANE_STATUS_OVERRIDE", "web=working")
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+
+    paths = SessionPaths(project, "demo")
+    kinds = [e["event"] for e in _events(paths)]
+    assert "stop-suspected-idle-stall" in kinds
+    assert "gate" not in kinds  # suppressed before the decision was built/executed
+    assert not paths.pending_decision_path.exists()
+    assert len(_brain_calls(call_log)) == 1
+
+
+def test_genuine_stop_executes_on_idle_fleet(project, call_log, monkeypatch):
+    # All lanes idle (no override) => no working lane => no re-probe => the stop
+    # is honored and processed normally (no idle-stall event).
+    monkeypatch.setenv("FAKE_BRAIN_MODE", "stop")
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+
+    paths = SessionPaths(project, "demo")
+    kinds = [e["event"] for e in _events(paths)]
+    assert "stop-suspected-idle-stall" not in kinds
+    assert "gate" in kinds  # the stop decision was classified + processed
+
+
 def test_cli_once_dry_run(project, call_log, capsys):
     rc = cli.main(["--project-root", str(project), "--session", "demo", "once", "--dry-run"])
 
