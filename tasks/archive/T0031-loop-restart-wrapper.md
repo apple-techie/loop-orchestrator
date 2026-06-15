@@ -1,7 +1,10 @@
 ---
 id: T0031
 title: "B1 — loop-restart wrapper: re-source env + reinstall + assert PM adapter, the only sanctioned restart path"
-status: open
+status: done
+accepted: 2026-06-15
+gate: "492/0"
+commit: f4b1e05
 depends_on: []
 jira:
 scope: NEW bin/loop-restart (+ Makefile/CONTRACT/README doc) + tests ONLY; ADDITIVE; does NOT change engine code; the task itself does NOT restart any live daemon or git push
