@@ -36,6 +36,18 @@ _lint_script_dir() {
   cd -P "$(dirname "$src")" && pwd
 }
 
+# Default project root for the tasks dir: prefer the git working tree we are run
+# from (correct in a git worktree), then $PWD when it holds tasks/, else the
+# legacy install-relative parent-of-parent. An explicit --tasks-dir always wins.
+_lint_default_root() {
+  local top
+  if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$top" ]]; then
+    printf '%s\n' "$top"; return 0
+  fi
+  if [[ -d "$PWD/tasks" ]]; then printf '%s\n' "$PWD"; return 0; fi
+  (cd "$(_lint_script_dir)/.." && pwd)
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -76,7 +88,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TASKS_DIR" ]]; then
-  TASKS_DIR="$(cd "$(_lint_script_dir)/.." && pwd)/tasks"
+  TASKS_DIR="$(_lint_default_root)/tasks"
 fi
 if [[ ! -d "$TASKS_DIR" ]]; then
   echo "error: tasks dir not found: $TASKS_DIR" >&2
