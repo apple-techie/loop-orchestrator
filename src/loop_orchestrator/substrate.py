@@ -383,3 +383,105 @@ class Substrate:
             timeout=timeout,
             cwd=self.project_root,
         )
+
+
+# ── cross-session fleet view (T0033/B3): read-only aggregation over many loops ──
+
+
+@dataclass(frozen=True)
+class LoopSummary:
+    """A read-only snapshot of one loop for the cross-session fleet view, built
+    entirely from engine state files (engine.pid / paused / pending-decision.json
+    / snapshot.json) — no tmux, no subprocess, no writes."""
+
+    project_root: str
+    session: str
+    engine: str  # running | paused | stopped
+    pid: int | None
+    pending: int  # in-flight decisions (the engine keeps at most one)
+    awaiting_approval: bool
+    lane_health: dict[str, int]  # lane status -> count, from snapshot.json
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
+def _loop_summary(project_root: Path, session: str) -> LoopSummary:
+    from .locking import read_json
+    from .paths import SessionPaths
+
+    paths = SessionPaths(project_root, session)
+    try:
+        pid: int | None = int(paths.pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = None
+    alive = pid is not None and _pid_alive(pid)
+    if not alive:
+        engine, pid_out = "stopped", None
+    elif paths.paused_path.exists():
+        engine, pid_out = "paused", pid
+    else:
+        engine, pid_out = "running", pid
+
+    pending, awaiting = 0, False
+    decision = read_json(paths.pending_decision_path, None)
+    if isinstance(decision, dict):
+        pending = 1
+        awaiting = any(
+            isinstance(action, dict) and action.get("status") == "awaiting-approval"
+            for action in decision.get("actions") or []
+        )
+
+    lane_health: dict[str, int] = {}
+    snap = read_json(paths.snapshot_path, None)
+    if isinstance(snap, dict):
+        for info in (snap.get("lanes") or {}).values():
+            status = info.get("status") if isinstance(info, dict) else None
+            if status:
+                lane_health[status] = lane_health.get(status, 0) + 1
+    return LoopSummary(str(project_root), session, engine, pid_out, pending, awaiting, lane_health)
+
+
+def discover_loops(roots: list[Path]) -> list[LoopSummary]:
+    """Every loop with engine state under any of `roots`
+    (`<root>/.loop/sessions/<session>/engine/`) as read-only LoopSummary rows —
+    running, paused, AND stopped. De-duped by (resolved root, session); a root
+    with no sessions contributes nothing. Pure reads — never writes."""
+    out: list[LoopSummary] = []
+    seen: set[tuple[str, str]] = set()
+    for root in roots:
+        root = Path(root)
+        sessions_dir = root / ".loop" / "sessions"
+        if not sessions_dir.is_dir():
+            continue
+        for session_dir in sorted(sessions_dir.iterdir()):
+            if not (session_dir / "engine").is_dir():
+                continue
+            key = (str(root.resolve()), session_dir.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(_loop_summary(root, session_dir.name))
+    return out
+
+
+def render_fleet(summaries: list[LoopSummary]) -> str:
+    """Plain-text fleet table for `loop-deck --all` (a read-only view). Empty =>
+    a clear 'no loops' line. `pending` shows '1*' when a decision awaits approval."""
+    if not summaries:
+        return "no loops found (nothing under any <root>/.loop/sessions/)"
+    lines = [f"{'SESSION':<18} {'ENGINE':<8} {'PEND':<5} LANE HEALTH"]
+    for summary in summaries:
+        health = " ".join(f"{k}:{v}" for k, v in sorted(summary.lane_health.items())) or "-"
+        pend = f"{summary.pending}{'*' if summary.awaiting_approval else ''}"
+        lines.append(f"{summary.session:<18} {summary.engine:<8} {pend:<5} {health}")
+    return "\n".join(lines)
