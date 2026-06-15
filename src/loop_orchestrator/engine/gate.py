@@ -41,6 +41,42 @@ _EMPTY_POLICY = HarnessPolicy()
 _COST_RANK = {"": 0, "none": 0, "low": 1, "medium": 2, "high": 3}
 _AUTONOMY_RANK = {"": 0, "none": 0, "attended": 1, "unattended": 2}
 
+# T0034 (B4): capability tags that mean "this harness consumes a prose brief as
+# a PROMPT" — a genuine agent. A harness with NONE of these and no one-shot
+# template does not act on a text brief as an agent: `shell` (probe,watch) runs
+# it as a raw shell command (a real safety hazard), `mprocs` (dashboard) ignores
+# it (a silent no-op). Either way a human must confirm, so a text brief to such
+# a lane is destructive. Driving off the registry's capability_tags (not just
+# the one-shot template) is what distinguishes the two and stops over-flagging an
+# interactive agent that simply has no one-shot mode (e.g. pi).
+_AGENT_CAPABILITY_TAGS = frozenset(
+    {
+        "brain",
+        "code",
+        "ingest",
+        "ops",
+        "research",
+        "synthesis",
+        "product",
+        "experiment",
+        "bulk",
+        "fleet",
+        "search",
+    }
+)
+
+
+def _is_agent_harness(entry: dict) -> bool:
+    """True when a harness consumes a text brief as a PROMPT (a genuine agent):
+    it declares a one-shot template OR any agent capability tag. Generalizes the
+    T0017 one-shot-only proxy so an interactive agent with no one-shot mode is not
+    mis-flagged, while shell/dashboard harnesses (no template, no agent tag) read
+    as non-agents."""
+    if entry.get("oneshot_template", ""):
+        return True
+    tags = {tag.strip() for tag in str(entry.get("capability_tags", "")).split(",") if tag.strip()}
+    return bool(tags & _AGENT_CAPABILITY_TAGS)
+
 
 def _allowed_for_role(harness: str, role: str | None, policy: HarnessPolicy, entry: dict) -> bool:
     if policy.allow and harness not in policy.allow:
@@ -147,10 +183,13 @@ def _classify_dispatch_target(
       - BLOCKED      the target lane is unknown to the per-cycle lane snapshot,
                      or runs a harness unknown to the roster (cannot verify it
                      is an agent at all);
-      - DESTRUCTIVE  the target runs a non-agent harness (shell/mprocs — empty
-                     `oneshot_template`, or the `shell` harness): an agent brief
-                     there is the silent no-op the F1 finding caught, so a human
-                     must confirm;
+      - DESTRUCTIVE  the target runs a non-agent harness — `shell` (text is a
+                     raw shell command), or any harness that is not a genuine
+                     agent per the registry (`_is_agent_harness`: no one-shot
+                     template AND no agent capability tag, e.g. mprocs). T0034
+                     drives this off the harness's text-handling semantics, not
+                     just the one-shot template, so a text brief that would run
+                     as a shell command always needs a human;
       - None         no opinion — no lane snapshot threaded, not a text
                      dispatch/steer, or the target is a genuine agent lane.
 
@@ -169,8 +208,8 @@ def _classify_dispatch_target(
     entry = roster.get(harness) if roster is not None else None
     if entry is None:
         return BLOCKED  # target runs a harness unknown to the roster
-    if harness == "shell" or not entry.get("oneshot_template", ""):
-        return DESTRUCTIVE  # agent brief to a non-agent (shell/dashboard) lane
+    if harness == "shell" or not _is_agent_harness(entry):
+        return DESTRUCTIVE  # text-as-shell or non-agent (dashboard) target lane
     return None
 
 
