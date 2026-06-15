@@ -55,6 +55,8 @@ loop-orchestrator/
 │   ├── loop-jira-sync.sh      #   PM sync shim (delegates to loop-pm)
 │   ├── loop-metrics.sh        #   coordinator-efficiency metrics
 │   └── loop-wiki-lint.sh      #   nightly ops-wiki lint prompt
+├── bin/
+│   └── loop-restart          # sanctioned PM-aware daemon restart (env+assert)
 ├── src/loop_orchestrator/ # the Python layer (engine / deck / pm)
 ├── tests/                 # 268 tests; fakes-on-PATH harness, no tmux needed
 ├── ops-wiki/              # compiled coordinator memory (see AGENTS.md)
@@ -550,6 +552,26 @@ loop-engine --session s approve d-…              # human gate; executes + arch
 loop-engine --session s watch                    # the daemon
 loop-engine --session s restart [--timeout 60]   # singleton-safe stop+start
 ```
+
+For a **PM-syncing** loop, prefer `bin/loop-restart` over bare `loop-engine
+restart` (see below) — a fresh shell drops the loop's secrets and silently
+disables the PM adapter.
+
+```bash
+loop-restart <session> [--project-root R]         # the sanctioned PM restart
+```
+
+`loop-restart` re-sources the per-loop env file
+(`$LOOP_SECRETS_DIR/<session>.env`, default `~/.loop-secrets/`), reinstalls the
+code (`$LOOP_RESTART_INSTALL_CMD`, default `make install-python`) so a running
+daemon picks up changes, runs `loop-engine restart`, then — if the loop
+configures any `engine.pm.adapters` — **asserts** the adapter is `available`
+(`loop-pm list-adapters`) before exiting 0. A missing env file when a PM adapter
+is configured fails *before* the restart; an adapter still unavailable after the
+restart fails the assert. For a PM loop this is the ONLY sanctioned restart path:
+bare `loop-engine restart` is deprecated for those loops because it inherits the
+calling shell's env and turns pull/push into a silent no-op. A no-PM loop (e.g.
+govern) needs no env file and the assert is a no-op.
 
 `watch` polls and runs cycles on triggers — checkpoint interval, new mailbox
 file, a lane finishing work (working→idle), state-file change, `cycle-now`,

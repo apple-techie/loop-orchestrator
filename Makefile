@@ -11,6 +11,8 @@
 
 BIN ?= $(HOME)/.local/bin
 SCRIPTS := loop-tmux loop-dispatch loop-digest loop-lane-status loop-adr
+# Standalone executables under bin/ (no .sh suffix; installed by base name).
+BINS := loop-restart
 # Compiled-coordinator helpers; installed on PATH so the Python engine can
 # resolve them from ANY project root (its lookup is PATH before
 # repo-relative). They all take --project-root, so the symlink location
@@ -55,6 +57,16 @@ install:
 		ln -sf "$$src" "$$dst"; \
 		echo "linked $$dst -> $$src"; \
 	done
+	@for b in $(BINS); do \
+		src="$(REPO_DIR)/bin/$$b"; \
+		dst="$(BIN)/$$b"; \
+		if [ ! -x "$$src" ]; then \
+			echo "skip: $$src is missing or not executable" >&2; \
+			continue; \
+		fi; \
+		ln -sf "$$src" "$$dst"; \
+		echo "linked $$dst -> $$src"; \
+	done
 	@# The registry doubles as a CLI (list/field/oneshot/probe); the Python
 	@# engine resolves it as 'harness-registry' PATH-first, so external
 	@# projects need it installed like the helpers.
@@ -64,7 +76,7 @@ install:
 	@echo "Done. Ensure $(BIN) is on your PATH."
 
 uninstall:
-	@for s in $(SCRIPTS) $(HELPERS) harness-registry; do \
+	@for s in $(SCRIPTS) $(HELPERS) $(BINS) harness-registry; do \
 		dst="$(BIN)/$$s"; \
 		if [ -L "$$dst" ]; then \
 			rm "$$dst"; \
@@ -86,6 +98,10 @@ check:
 	@for h in $(REPO_DIR)/scripts/*.sh; do \
 		[ -e "$$h" ] || continue; \
 		bash -n "$$h" && echo "ok  $$h" || exit 1; \
+	done
+	@for b in $(BINS); do \
+		src="$(REPO_DIR)/bin/$$b"; \
+		bash -n "$$src" && echo "ok  $$src" || exit 1; \
 	done
 
 # ── optional Python layer ────────────────────────────────────────────────

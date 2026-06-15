@@ -30,7 +30,7 @@ from .brain import Brain, BrainError, oneshot_argv, run_oneshot
 from .config import EngineConfig, HarnessPolicy, lane_config_harnesses
 from .decision import DecisionError
 from .events import EventLog, parse_ts
-from .observe import EngineSnapshot, Observer, adaptive_timeout
+from .observe import EngineSnapshot, Observer, adaptive_timeout, sync_loops_registry
 
 _HEADER_RESOURCE = ("contracts", "checkpoint-header.md")
 
@@ -410,6 +410,12 @@ def run_once(
         return 5
 
     substrate = Substrate(root, session)
+    # B5 (T0035): refresh the ledger loops registry from the task loop: fields (the
+    # source of truth) so loop-digest / the deck show every active loop. Non-
+    # destructive (F5/T0024): derived status only, hand-authored fields preserved;
+    # writes only when the registry changes. Runs before observe so the snapshot's
+    # digest reads the freshened ledger.
+    sync_loops_registry(paths, events)
     # F7 (T0029): observe degrades gracefully. A fresh snapshot is the happy path
     # (unchanged — same observe event). When the all-lanes fan-out fails under
     # load, reuse the last good snapshot (observe-stale, with its age + the
@@ -548,6 +554,18 @@ def run_once(
             )
 
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
+    # T0032 (B2) defensive stop: a `stop` decision on a fleet the cycle observed as
+    # working is suspicious (the shared classifier can mis-read an idle lane as
+    # working). Re-probe the working lanes once; if any is still working the fleet
+    # is not genuinely idle, so suppress the stop and keep the loop alive instead of
+    # quietly halting. A genuinely-idle fleet (no working lane) honors the stop.
+    if any(action.kind == "stop" for action in parsed.actions):
+        working_lanes = {
+            lane for lane, info in snap.lanes.items() if info.get("status") == "working"
+        }
+        if actions_mod.stop_suspected_idle_stall(substrate, working_lanes, events):
+            events.append("cycle-end", outcome="stop-suspected-idle-stall")
+            return 0
     governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)
     for governance_event in governance_events:
         events.append("governance", **governance_event)

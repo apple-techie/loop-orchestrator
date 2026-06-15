@@ -405,6 +405,82 @@ def test_f1_classify_batch_threads_lane_harnesses():
     ]
 
 
+# ── B4/T0034 harness-aware dispatch-target (capability_tags, not just oneshot) ──
+# Generalizes F1: the text-as-shell vs agent decision is driven by the registry's
+# capability_tags, so an interactive agent with no one-shot mode (pi) is SAFE,
+# while shell-semantics / dashboard harnesses stay destructive.
+
+B4_ROSTER = {
+    "claude": {
+        "name": "claude",
+        "present": True,
+        "oneshot_template": "claude -p {prompt}",
+        "capability_tags": "brain,code",
+    },
+    "pi": {  # an agent with NO one-shot mode, but agent capability tags
+        "name": "pi",
+        "present": True,
+        "oneshot_template": "",
+        "capability_tags": "product,synthesis",
+    },
+    "shell": {  # text is a raw shell command
+        "name": "shell",
+        "present": True,
+        "oneshot_template": "",
+        "capability_tags": "probe,watch",
+    },
+    "mprocs": {  # a dashboard — a brief is a no-op
+        "name": "mprocs",
+        "present": True,
+        "oneshot_template": "",
+        "capability_tags": "dashboard",
+    },
+}
+B4_LANES = {"web": "claude", "design": "pi", "ops": "shell", "top": "mprocs"}
+
+
+def test_b4_text_brief_to_oneshotless_agent_is_safe():
+    # pi has no one-shot template but agent capability tags => a text brief is a
+    # prompt => SAFE. (T0017's one-shot-only proxy over-flagged this destructive.)
+    assert classify(dispatch(lane="design"), 1, F1_CFG, B4_ROSTER, B4_LANES) == "safe"
+    assert classify(steer(lane="design"), 1, F1_CFG, B4_ROSTER, B4_LANES) == "safe"
+
+
+def test_b4_text_brief_to_shell_semantics_harness_is_destructive():
+    # shell consumes text as a raw shell command — the residual: destructive.
+    assert classify(dispatch(lane="ops"), 1, F1_CFG, B4_ROSTER, B4_LANES) == "destructive"
+    assert classify(steer(lane="ops"), 1, F1_CFG, B4_ROSTER, B4_LANES) == "destructive"
+
+
+def test_b4_text_brief_to_dashboard_is_destructive():
+    assert classify(dispatch(lane="top"), 1, F1_CFG, B4_ROSTER, B4_LANES) == "destructive"
+
+
+def test_b4_text_brief_to_agent_with_oneshot_is_safe():
+    assert classify(dispatch(lane="web"), 1, F1_CFG, B4_ROSTER, B4_LANES) == "safe"
+
+
+def test_b4_command_mode_to_shell_unchanged_destructive():
+    # command mode stays the existing shape rule's concern (destructive),
+    # unchanged by the harness-aware text rule.
+    assert (
+        classify(dispatch(lane="ops", mode="command"), 1, F1_CFG, B4_ROSTER, B4_LANES)
+        == "destructive"
+    )
+
+
+def test_b4_is_agent_harness_signal():
+    from loop_orchestrator.engine.gate import _is_agent_harness
+
+    assert _is_agent_harness({"oneshot_template": "x -p {prompt}"}) is True  # one-shot
+    assert (
+        _is_agent_harness({"oneshot_template": "", "capability_tags": "product,synthesis"}) is True
+    )
+    assert _is_agent_harness({"oneshot_template": "", "capability_tags": "probe,watch"}) is False
+    assert _is_agent_harness({"oneshot_template": "", "capability_tags": "dashboard"}) is False
+    assert _is_agent_harness({}) is False
+
+
 # ── T0019 standing-lane drop guard (Phase 3) ────────────────────────────────
 # A drop_lane targeting a declared 'standing' lane is BLOCKED; worker/unknown
 # stay DESTRUCTIVE. Activation rides on the per-cycle lane snapshot (lane_kinds),

@@ -177,6 +177,33 @@ def _handoff_recovery(
     return preamble + brief, bool(branch)
 
 
+def stop_suspected_idle_stall(
+    substrate: Substrate, working_lanes: set[str], events: EventLog
+) -> bool:
+    """T0032 (B2) defensive stop: a brain `stop` is honored only when the fleet is
+    genuinely idle. The shared lane-status classifier can mis-read an idle lane as
+    `working` (stale harness chrome), so the brain sees a busy fleet and stops and
+    the loop dies quietly on an actually-idle fleet. Guard: if the cycle observed
+    any working lane, RE-PROBE those lanes once (a fresh lane_status); if any is
+    STILL working the fleet is not genuinely idle, so the stop is a suspected
+    idle-stall — emit `stop-suspected-idle-stall` and return True to SUPPRESS it.
+    No observed working lane => a genuine stop (no re-probe), return False. A lane
+    that can't be probed is not counted as working."""
+    if not working_lanes:
+        return False
+    still_working: list[str] = []
+    for lane in sorted(working_lanes):
+        try:
+            if substrate.lane_status(lane) == "working":
+                still_working.append(lane)
+        except SubstrateError:
+            continue
+    if still_working:
+        events.append("stop-suspected-idle-stall", lanes=still_working)
+        return True
+    return False
+
+
 def execute(
     action: dict,
     substrate: Substrate,

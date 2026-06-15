@@ -25,11 +25,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="smoke check: imports + path resolution, no TTY needed",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="cross-session fleet view (read-only) of every loop; no TTY/session needed",
+    )
+    parser.add_argument(
+        "--roots",
+        help="comma-separated project roots to scan for --all (default: --project-root)",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.all:
+        # Cross-session fleet view (T0033/B3): read-only aggregation across roots.
+        # No TTY, no session required, never writes — the deck non-writer invariant.
+        from ..substrate import discover_loops, render_fleet
+
+        if args.roots:
+            roots = [Path(part).expanduser() for part in args.roots.split(",") if part.strip()]
+        else:
+            roots = [Path(args.project_root)]
+        print(render_fleet(discover_loops(roots)))
+        return 0
     if args.check:
         try:
             import textual  # noqa: F401
