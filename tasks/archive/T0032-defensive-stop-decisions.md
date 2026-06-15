@@ -1,7 +1,10 @@
 ---
 id: T0032
 title: "B2 — defensive stop: a brain stop on a healthy-looking fleet re-probes readiness once before executing"
-status: open
+status: done
+accepted: 2026-06-15
+gate: "498/0"
+commit: 4f79aae
 depends_on: []
 jira:
 scope: src/loop_orchestrator/engine/ (stop-action handling in loop.py + watch.py; possibly a small readiness re-probe via substrate) + tests ONLY; ADDITIVE; no reinstall by the task; no git push
