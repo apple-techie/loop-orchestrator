@@ -52,7 +52,15 @@ SEARCH_FIELDS = "summary,description,status"
 # Jira statusCategory key -> task-file status.
 _CATEGORY_TO_STATUS = {"new": "open", "indeterminate": "in-progress", "done": "done"}
 # task-file status -> target transition name (matched case-insensitively).
-_STATUS_TO_TRANSITION = {"open": "To Do", "in-progress": "In Progress", "done": "Done"}
+# 'review' is the local tech-QA-complete state; it maps to Jira's 'In Review'.
+# A human PO promoting In Review -> Done in Jira is the ONLY path to local
+# 'done' (the file-wins exception in _pull_existing).
+_STATUS_TO_TRANSITION = {
+    "open": "To Do",
+    "in-progress": "In Progress",
+    "review": "In Review",
+    "done": "Done",
+}
 
 # (method, url, headers, body) -> (http status, response body)
 Transport = Callable[[str, str, dict[str, str], "bytes | None"], "tuple[int, bytes]"]
@@ -154,8 +162,14 @@ def _adf_text(node: object) -> str:
 
 
 def _remote_status(fields: dict) -> str | None:
-    """Mapped task-file status for an issue's statusCategory, or None."""
+    """Mapped task-file status for an issue's statusCategory, or None. An
+    issue sitting on the literal 'In Review' status maps to local 'review' so
+    a re-push is a no-op (the statusCategory of 'In Review' is the generic
+    'indeterminate', which would otherwise read back as 'in-progress')."""
     status = fields.get("status") or {}
+    status_name = (status.get("name") or "").strip().lower()
+    if status_name == "in review":
+        return "review"
     category = status.get("statusCategory") or {}
     mapped = _CATEGORY_TO_STATUS.get(category.get("key"))
     if mapped:
@@ -411,10 +425,12 @@ class JiraAdapter(PMAdapter):
             return result
 
         next_num = int(taskfiles.next_task_id(tasks_dir)[1:])
+        seen_keys: set[str] = set()
         for issue in doc.get("issues") or []:
             key = issue.get("key")
             if not key:
                 continue
+            seen_keys.add(key)
             fields = issue.get("fields") or {}
             summary = (fields.get("summary") or "").strip() or key
             existing = taskfiles.find_by_jira(tasks_dir, key)
@@ -438,7 +454,40 @@ class JiraAdapter(PMAdapter):
             }
             taskfiles.write_task(path, frontmatter, _new_task_body(task_id, key, summary, context))
             taskfiles.record_sync(log_md, key)
+        self._reconcile_reviewed(tasks_dir, seen_keys, result, log_md, dry_run)
         return result
+
+    def _reconcile_reviewed(
+        self,
+        tasks_dir: Path,
+        seen_keys: set[str],
+        result: PMSyncResult,
+        log_md: Path,
+        dry_run: bool,
+    ) -> None:
+        """Detect PO validation for local 'review' tasks. The standing pull JQL
+        excludes Done-category issues (statusCategory != Done), so a PO-promoted
+        issue never appears in the search above — its status must be fetched
+        directly. Only 'review' tasks bearing a jira: key not already seen in
+        the search are probed; a Done-category remote triggers the promotion."""
+        for path in taskfiles.list_tasks(tasks_dir):
+            try:
+                frontmatter = taskfiles.parse_frontmatter(path)
+            except ValueError:
+                continue
+            if frontmatter.get("status") != "review":
+                continue
+            key = frontmatter.get("jira")
+            if not key or key in seen_keys:
+                continue
+            try:
+                issue = self._request("GET", f"/rest/api/3/issue/{key}?fields=status")
+            except JiraError as exc:
+                result.errors.append(f"{key}: {exc}")
+                continue
+            category = ((issue.get("fields") or {}).get("status") or {}).get("statusCategory") or {}
+            if category.get("key") == "done":
+                self._promote_reviewed(path, key, result, log_md, dry_run)
 
     def _pull_existing(
         self,
@@ -450,23 +499,48 @@ class JiraAdapter(PMAdapter):
         dry_run: bool,
     ) -> None:
         """File wins on ANY divergence: the file is never modified; a status
-        mismatch is recorded as a conflict and logged."""
+        mismatch is recorded as a conflict and logged. The ONE sanctioned
+        exception is PO validation: a local 'review' task whose remote issue
+        the PO has promoted to a Done-category status is itself promoted to
+        'done' (and moved to tasks/archive/ to keep the status<->location
+        invariant). This is the only pull that writes a status — every other
+        divergence stays file-wins."""
         try:
             frontmatter = taskfiles.parse_frontmatter(path)
         except ValueError as exc:
             result.errors.append(f"{key}: {exc}")
             return
+        category = ((fields.get("status") or {}).get("statusCategory") or {}).get("key")
+        local = frontmatter.get("status")
+        if local == "review" and category == "done":
+            self._promote_reviewed(path, key, result, log_md, dry_run)
+            return
         remote = _remote_status(fields)
         if remote is None:
             result.errors.append(f"{key}: unrecognized remote status category")
             return
-        local = frontmatter.get("status")
         if local == remote:
             return
         detail = f"local status '{local}' vs remote '{remote}'"
         result.conflicts.append(f"{key}: {detail}")
         if not dry_run:
             taskfiles.record_conflict(log_md, key, detail)
+
+    def _promote_reviewed(
+        self, path: Path, key: str, result: PMSyncResult, log_md: Path, dry_run: bool
+    ) -> None:
+        """PO validated In Review -> Done: flip local 'review' to 'done' and
+        move the file into tasks/archive/ (the status<->location invariant)."""
+        archive = path.parent if path.parent.name == "archive" else path.parent / "archive"
+        dest = archive / path.name
+        result.updated.append(f"{key} promoted review -> done (PO validated)")
+        if dry_run:
+            return
+        archive.mkdir(parents=True, exist_ok=True)
+        taskfiles.update_frontmatter(path, status="done")
+        if dest != path:
+            path.replace(dest)
+        taskfiles.record_sync(log_md, key)
 
     # ── push ──────────────────────────────────────────────────────────────
 
@@ -494,7 +568,7 @@ class JiraAdapter(PMAdapter):
             key = frontmatter.get("jira")
             status = frontmatter.get("status")
             if not key:
-                if status not in ("open", "in-progress"):
+                if status not in ("open", "in-progress", "review"):
                     continue
                 if not project:
                     skipped_creations += 1

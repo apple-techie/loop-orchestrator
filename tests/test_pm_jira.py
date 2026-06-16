@@ -46,9 +46,28 @@ TRANSITIONS_RESPONSE = {
     "transitions": [
         {"id": "11", "name": "to do"},
         {"id": "21", "name": "in progress"},
+        {"id": "41", "name": "In Review"},
         {"id": "31", "name": "done"},
     ]
 }
+
+# A To-Do issue (statusCategory 'new') so a review push has somewhere to move.
+TODO_STATUS_RESPONSE = {
+    "key": "PROJ-1",
+    "fields": {"status": {"name": "To Do", "statusCategory": {"key": "new", "name": "To Do"}}},
+}
+
+# A Done-category issue: what the PO leaves behind after promoting In Review.
+DONE_STATUS_RESPONSE = {
+    "key": "PROJ-1",
+    "fields": {
+        "summary": "Fix the Login Flow",
+        "status": {"name": "Done", "statusCategory": {"key": "done", "name": "Done"}},
+    },
+}
+
+# The single-issue search payload the PO-validated issue comes back on (pull).
+DONE_SEARCH_RESPONSE = {"issues": [DONE_STATUS_RESPONSE]}
 
 TASK_WITH_JIRA = """\
 ---
@@ -285,6 +304,145 @@ def test_push_transitions_issue(jira_env, project: Path):
     assert method == "POST" and url.endswith("/rest/api/3/issue/PROJ-1/transitions")
     assert json.loads(body) == {"transition": {"id": "31"}}  # 'Done' matched case-insensitively
     assert "sync | PROJ-1" in _log_text(project)
+
+
+def test_push_review_transitions_to_in_review(jira_env, project: Path):
+    # Two-stage SDLC: a local 'review' task (tech-QA complete, awaiting PO)
+    # pushes the issue to Jira's 'In Review', NOT 'Done'. review lives in
+    # tasks/ (still open work), so the file is there, not in archive/.
+    path = project / "tasks" / "T0001-fix-the-login-flow.md"
+    path.write_text(TASK_WITH_JIRA.format(status="review"), encoding="utf-8")
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/api/3/issue/PROJ-1?fields=status", TODO_STATUS_RESPONSE),
+            ("GET", "/rest/api/3/issue/PROJ-1/transitions", TRANSITIONS_RESPONSE),
+            ("POST", "/rest/api/3/issue/PROJ-1/transitions", {}),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks")
+
+    assert result.updated == ["PROJ-1"]
+    assert result.conflicts == [] and result.errors == []
+    writes = transport.writes()
+    assert len(writes) == 1
+    method, url, body = writes[0]
+    assert method == "POST" and url.endswith("/rest/api/3/issue/PROJ-1/transitions")
+    assert json.loads(body) == {"transition": {"id": "41"}}  # 'In Review', not 'Done' (31)
+    assert "sync | PROJ-1" in _log_text(project)
+
+
+def test_push_review_already_in_review_is_noop(jira_env, project: Path):
+    # An issue already sitting on 'In Review' (statusCategory indeterminate)
+    # must read back as 'review' so the push short-circuits — no re-transition.
+    in_review = {
+        "key": "PROJ-1",
+        "fields": {"status": {"name": "In Review", "statusCategory": {"key": "indeterminate"}}},
+    }
+    path = project / "tasks" / "T0001-fix-the-login-flow.md"
+    path.write_text(TASK_WITH_JIRA.format(status="review"), encoding="utf-8")
+    transport = FakeTransport([("GET", "/rest/api/3/issue/PROJ-1?fields=status", in_review)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.push(project / "tasks")
+
+    assert result.updated == [] and result.errors == []
+    assert transport.writes() == []  # no transition POST
+
+
+def test_pull_po_validated_review_promotes_to_done_and_archives(jira_env, project: Path):
+    # The ONE sanctioned file-wins exception: a local 'review' task whose
+    # remote issue the PO has promoted to a Done-category status is promoted
+    # to 'done' and MOVED into tasks/archive/ (status<->location invariant).
+    # The standing JQL excludes Done issues, so the search comes back EMPTY and
+    # the promotion is driven by a direct status GET on the review task's key.
+    path = project / "tasks" / "T0001-fix-the-login-flow.md"
+    path.write_text(TASK_WITH_JIRA.format(status="review"), encoding="utf-8")
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/api/3/search/jql?", {"issues": []}),
+            ("GET", "/rest/api/3/issue/PROJ-1?fields=status", DONE_STATUS_RESPONSE),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert result.updated == ["PROJ-1 promoted review -> done (PO validated)"]
+    assert result.conflicts == [] and result.errors == []
+    assert not path.exists()  # moved out of tasks/
+    dest = project / "tasks" / "archive" / "T0001-fix-the-login-flow.md"
+    assert dest.exists()
+    frontmatter, body = taskfiles.split_task(dest)
+    assert frontmatter["status"] == "done"
+    assert "hand-written content the sync must never touch" in body  # body preserved
+    assert "sync | PROJ-1" in _log_text(project)
+
+
+def test_pull_review_still_in_review_is_not_promoted(jira_env, project: Path):
+    # A review task whose issue the PO has NOT yet promoted (still In Review,
+    # indeterminate category) stays put — no promotion, no conflict, no write.
+    in_review = {
+        "key": "PROJ-1",
+        "fields": {"status": {"name": "In Review", "statusCategory": {"key": "indeterminate"}}},
+    }
+    path = project / "tasks" / "T0001-fix-the-login-flow.md"
+    path.write_text(TASK_WITH_JIRA.format(status="review"), encoding="utf-8")
+    before = path.read_bytes()
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/api/3/search/jql?", {"issues": []}),
+            ("GET", "/rest/api/3/issue/PROJ-1?fields=status", in_review),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert result.updated == [] and result.conflicts == [] and result.errors == []
+    assert path.exists() and path.read_bytes() == before  # untouched, not archived
+    assert _log_text(project) == ""
+
+
+def test_pull_po_validated_promotion_dry_run_no_move_no_log(jira_env, project: Path):
+    path = project / "tasks" / "T0001-fix-the-login-flow.md"
+    path.write_text(TASK_WITH_JIRA.format(status="review"), encoding="utf-8")
+    before = path.read_bytes()
+    transport = FakeTransport(
+        [
+            ("GET", "/rest/api/3/search/jql?", {"issues": []}),
+            ("GET", "/rest/api/3/issue/PROJ-1?fields=status", DONE_STATUS_RESPONSE),
+        ]
+    )
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks", dry_run=True)
+
+    assert result.dry_run is True
+    assert result.updated == ["PROJ-1 promoted review -> done (PO validated)"]
+    assert path.read_bytes() == before  # not moved, not rewritten
+    assert not (project / "tasks" / "archive" / "T0001-fix-the-login-flow.md").exists()
+    assert _log_text(project) == ""
+
+
+def test_pull_done_remote_with_local_open_stays_file_wins_conflict(jira_env, project: Path):
+    # Promotion is review-only: a local 'open' (or any non-review) task whose
+    # remote is Done is still a plain file-wins conflict, NEVER auto-promoted.
+    # (Here the Done issue is returned by the search to exercise _pull_existing
+    # directly — promotion must NOT fire for a non-review local status.)
+    path = project / "tasks" / "T0001-fix-the-login-flow.md"
+    path.write_text(TASK_WITH_JIRA.format(status="open"), encoding="utf-8")
+    before = path.read_bytes()
+    transport = FakeTransport([("GET", "/rest/api/3/search/jql?", DONE_SEARCH_RESPONSE)])
+    adapter = JiraAdapter(project_root=project, transport=transport)
+
+    result = adapter.pull(project / "tasks")
+
+    assert result.updated == []
+    assert result.conflicts == ["PROJ-1: local status 'open' vs remote 'done'"]
+    assert path.read_bytes() == before  # file wins: untouched
+    assert "conflict: file wins" in _log_text(project)
 
 
 def test_push_same_status_skips_transition(jira_env, project: Path):

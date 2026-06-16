@@ -208,7 +208,7 @@ def _loop_display_name(loops_doc_dir: Path, loop: str) -> str:
 def derive_loops_from_tasks(tasks_dir: Path, loops_doc_dir: Path) -> dict[str, dict]:
     """The loops registry DERIVED from the task `loop:` fields (the source of
     truth, T0004): one row per loop id with `status` (in-progress if ANY of its
-    tasks is open/in-progress, else done) and a display `name`. Read-only over
+    tasks is open/in-progress/review, else done) and a display `name`. Read-only over
     tasks/ + tasks/archive/; tasks with no loop: field are ignored."""
     from ..pm import taskfiles
 
@@ -223,7 +223,7 @@ def derive_loops_from_tasks(tasks_dir: Path, loops_doc_dir: Path) -> dict[str, d
             statuses.setdefault(loop, set()).add(str(frontmatter.get("status") or ""))
     derived: dict[str, dict] = {}
     for loop, seen in statuses.items():
-        active = any(status in ("open", "in-progress") for status in seen)
+        active = any(status in ("open", "in-progress", "review") for status in seen)
         derived[loop] = {
             "status": "in-progress" if active else "done",
             "name": _loop_display_name(loops_doc_dir, loop),

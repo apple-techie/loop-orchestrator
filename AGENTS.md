@@ -157,7 +157,11 @@ like `[]` or `[T0001, T0002]`):
 - `id` — `T<NNNN>`, must match the filename prefix; unique across tasks/
   and tasks/archive/
 - `title`
-- `status` — `open | in-progress | done | dropped`
+- `status` — `open | in-progress | review | done | dropped`. `review` is the
+  two-stage DoD's first gate: tech-QA-complete work the loop has finished but
+  a human PO has not yet validated. The loop NEVER sets `done` itself — it
+  lands completed work in `review` (mapping to Jira "In Review"); only a PO
+  promoting In Review -> Done in Jira flips a task to `done`.
 - `depends_on` — list of task ids; every id must exist as a task file and
   the dependency graph must be acyclic
 - `loop` — optional loop id
@@ -176,9 +180,13 @@ succeeds. Lanes consume work via
 `loop-dispatch --mode text <lane> "$(cat tasks/T<NNNN>-<slug>.md)"`, so a
 task file's full text must stand alone as a dispatchable prompt.
 
-**Status<->location invariant.** open/in-progress tasks live in `tasks/`;
-done/dropped tasks live in `tasks/archive/`. On completion: set
-`status: done`, move the file to `tasks/archive/`, and append
+**Status<->location invariant.** open/in-progress/review tasks live in
+`tasks/`; done/dropped tasks live in `tasks/archive/`. On tech-QA completion
+the loop sets `status: review` (the file STAYS in `tasks/`) — it does NOT
+archive or set `done`. `done` and the move to `tasks/archive/` are reserved
+for the human-PO promotion: when the PO moves the issue from In Review to Done
+in Jira, the next `loop-pm pull` flips the local task to `done` and archives
+it (the one sanctioned exception to file-wins), appending
 `## [YYYY-MM-DD] task | T<NNNN> done` to `ops-wiki/log.md`.
 
 **Lint.** `scripts/loop-task-lint.sh` enforces all of the above (filename,

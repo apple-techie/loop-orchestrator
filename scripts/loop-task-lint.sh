@@ -7,8 +7,8 @@
 #   - frontmatter present with required keys id, title, status, depends_on,
 #     scope (loop and jira are optional and may be absent)
 #   - id matches T<NNNN> and the filename prefix; ids are unique
-#   - status is one of open|in-progress|done|dropped
-#   - status<->location invariant: open/in-progress live in tasks/,
+#   - status is one of open|in-progress|review|done|dropped
+#   - status<->location invariant: open/in-progress/review live in tasks/,
 #     done/dropped live in tasks/archive/
 #   - required body sections (## headings; a trailing annotation after the
 #     section name is allowed): Objective, Context you need, Deliverables,
@@ -56,7 +56,7 @@ Usage:
 Validates task files against the convention in AGENTS.md "Task files":
 filename T<NNNN>-<slug>.md, required frontmatter keys (id, title, status,
 depends_on, scope; loop/jira optional), required body sections, the
-status<->location invariant (open/in-progress in tasks/, done/dropped in
+status<->location invariant (open/in-progress/review in tasks/, done/dropped in
 tasks/archive/), and depends_on ids that exist with no cycles.
 
 Options:
@@ -159,9 +159,9 @@ lint_file() {  # $1 = path, $2 = location (tasks|archive)
   status_val="$(printf '%s\n' "$fm" | sed -n 's/^status:[[:space:]]*//p' | head -1)"
   if [[ -n "$status_val" ]]; then
     case "$status_val" in
-      open|in-progress)
+      open|in-progress|review)
         if [[ "$where" == "archive" ]]; then
-          finding "$f" "status '$status_val' but file is in tasks/archive/ (open/in-progress live in tasks/)"
+          finding "$f" "status '$status_val' but file is in tasks/archive/ (open/in-progress/review live in tasks/)"
         fi
         ;;
       done|dropped)
@@ -170,7 +170,7 @@ lint_file() {  # $1 = path, $2 = location (tasks|archive)
         fi
         ;;
       *)
-        finding "$f" "status '$status_val' not one of open|in-progress|done|dropped"
+        finding "$f" "status '$status_val' not one of open|in-progress|review|done|dropped"
         ;;
     esac
   fi
