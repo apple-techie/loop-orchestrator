@@ -210,13 +210,18 @@ def derive_loops_from_tasks(tasks_dir: Path, loops_doc_dir: Path) -> dict[str, d
     truth, T0004): one row per loop id with `status` (in-progress if ANY of its
     tasks is open/in-progress/review, else done) and a display `name`. Read-only over
     tasks/ + tasks/archive/; tasks with no loop: field are ignored."""
+    import yaml
+
     from ..pm import taskfiles
 
     statuses: dict[str, set[str]] = {}
     for path in taskfiles.list_tasks(tasks_dir):
         try:
             frontmatter = taskfiles.parse_frontmatter(path)
-        except ValueError:
+        except (ValueError, yaml.YAMLError):
+            # F11/T0036: skip a malformed task file rather than abort the whole
+            # engine cycle. split_task now re-raises YAML errors as ValueError;
+            # YAMLError stays here as belt-and-suspenders.
             continue
         loop = frontmatter.get("loop")
         if isinstance(loop, str) and loop:

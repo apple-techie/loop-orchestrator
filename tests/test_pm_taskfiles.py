@@ -52,6 +52,19 @@ def test_parse_frontmatter_rejects_missing(tmp_path: Path):
         taskfiles.parse_frontmatter(path)
 
 
+def test_split_task_reraises_malformed_yaml_as_value_error(tmp_path: Path):
+    """F11 (T0036): unparseable frontmatter YAML must surface as ValueError, not
+    a bare yaml.YAMLError — every caller guards on ValueError, and YAMLError is
+    NOT a ValueError subclass, so a raw YAMLError escapes them all."""
+    path = _write(
+        tmp_path / "tasks",
+        "T0001-x.md",
+        "---\nid: T0001\ntitle: bad: unquoted: colons\nstatus: open\n---\n\nbody\n",
+    )
+    with pytest.raises(ValueError, match="frontmatter"):
+        taskfiles.split_task(path)
+
+
 def test_split_write_round_trip(tmp_path: Path):
     path = _write(tmp_path / "tasks", "T0001-bootstrap-the-wiki.md")
     frontmatter, body = taskfiles.split_task(path)

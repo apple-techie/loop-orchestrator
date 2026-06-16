@@ -60,6 +60,23 @@ def test_derive_ignores_tasks_without_a_loop_field(tmp_path):
     assert derive_loops_from_tasks(tmp_path, tmp_path / "loops") == {}
 
 
+def test_derive_skips_malformed_yaml_instead_of_crashing(tmp_path):
+    """F11 (T0036): a single unparseable task YAML must be SKIPPED, not raise
+    yaml.YAMLError out of the derivation and abort the whole engine cycle.
+    `yaml.YAMLError` is NOT a subclass of `ValueError`, so the old guard let it
+    propagate. The valid loop must still derive."""
+    _task(tmp_path, "T1", "alpha", "open")
+    # Unquoted nested colons => yaml.scanner.ScannerError (a yaml.YAMLError,
+    # which is NOT a ValueError) — band-aided live by commit 6836ee1.
+    (tmp_path / "T2-bad.md").write_text(
+        "---\nid: T2\ntitle: bad: unquoted: colons\nstatus: open\nloop: beta\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    derived = derive_loops_from_tasks(tmp_path, tmp_path / "loops")
+    assert derived["alpha"]["status"] == "in-progress"  # valid task still derives
+    assert "beta" not in derived  # the malformed file is dropped, not fatal
+
+
 # ── non-destructive merge ────────────────────────────────────────────────────
 
 
