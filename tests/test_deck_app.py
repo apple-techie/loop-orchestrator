@@ -288,7 +288,12 @@ def test_add_lane_modal_submits_add_lane_then_brief_dispatch(paths):
                     "auto_approve": True,
                 },
             ) in stub.calls
-            assert ("dispatch", "scout", "explore the repo", {"wait_ready": True}) in stub.calls
+            assert (
+                "dispatch",
+                "scout",
+                "explore the repo",
+                {"wait_ready": True, "no_clear": True},
+            ) in stub.calls
             # add_lane strictly before the brief dispatch
             kinds = [c[0] for c in stub.calls if c[0] in ("add_lane", "dispatch")]
             assert kinds == ["add_lane", "dispatch"]
@@ -365,7 +370,7 @@ def test_steer_modal_dispatch_with_interrupt(paths):
                 "dispatch",
                 "coord",
                 "focus on the API tests",
-                {"interrupt": True, "wait_ready": False},
+                {"interrupt": True, "wait_ready": False, "no_clear": True},
             ) in stub.calls
 
     asyncio.run(main())

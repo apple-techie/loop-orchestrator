@@ -296,7 +296,10 @@ class LoopDeckApp(App):
             return
         if spec["brief"]:
             try:
-                self.substrate.dispatch(spec["window"], spec["brief"], wait_ready=True)
+                # Fresh lane, fresh composer — no context to clear (#36).
+                self.substrate.dispatch(
+                    spec["window"], spec["brief"], wait_ready=True, no_clear=True
+                )
             except Exception as exc:
                 self.call_from_thread(
                     self.toast, f"lane '{spec['window']}' added; brief failed: {exc}", "error"
@@ -321,11 +324,14 @@ class LoopDeckApp(App):
     @work(thread=True, group="mutate")
     def _steer_worker(self, spec: dict) -> None:
         try:
+            # A steer preserves the lane's existing context by definition —
+            # never auto-/clear it (#36).
             self.substrate.dispatch(
                 spec["lane"],
                 spec["payload"],
                 interrupt=spec["interrupt"],
                 wait_ready=spec["wait_idle"],
+                no_clear=True,
             )
         except Exception as exc:
             self.call_from_thread(self.toast, f"dispatch failed: {exc}", "error")

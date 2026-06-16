@@ -145,6 +145,17 @@ def test_dispatch_argv_order(sub, call_log):
     ]
 
 
+def test_dispatch_no_clear_flag(sub, call_log):
+    # no_clear=True appends --no-clear (opt out of the auto-/clear, #36); the
+    # default omits it so loop-dispatch's claude fresh-dispatch clear stays on.
+    sub.dispatch("web", "hello", no_clear=True)
+    sub.dispatch("docs", "world")
+    assert call_log() == [
+        "loop-dispatch --session demo --mode text --no-clear web hello",
+        "loop-dispatch --session demo --mode text docs world",
+    ]
+
+
 def test_dispatch_failure_captures_stderr(sub, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_FAIL", "1")
     with pytest.raises(SubstrateError) as exc:

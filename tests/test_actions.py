@@ -288,3 +288,59 @@ def test_stop_reprobe_error_is_not_counted_as_working(tmp_path):
     sub = _ReprobeSub({"web": "RAISE"})
     assert actions.stop_suspected_idle_stall(sub, {"web"}, events) is False
     assert "stop-suspected-idle-stall" not in _events(events)
+
+
+# ── loop improvement #36: per-kind auto-/clear opt-out contract ─────────────
+# The auto-/clear lives in loop-dispatch.sh and is gated there on harness=claude
+# + fresh (non-interrupt) + idle. The engine's only responsibility is to opt OUT
+# (no_clear=True) on the dispatch kinds that must preserve context, and to leave
+# it ON (default) for the fresh self-contained-task dispatch. These pin that.
+
+
+class _DispatchKwargsSub:
+    """Records every dispatch call's full kwargs so we can assert no_clear."""
+
+    def __init__(self):
+        self.dispatched: list[tuple[str, dict]] = []
+        self.added: list[str] = []
+
+    def add_lane(self, window, **kwargs):
+        self.added.append(window)
+
+    def dispatch(self, lane, payload, **kwargs):
+        self.dispatched.append((lane, kwargs))
+
+    def lanes(self):
+        return []
+
+
+def test_fresh_dispatch_kind_does_not_opt_out_of_clear(tmp_path):
+    # The fresh self-contained-task dispatch (kind="dispatch") is THE path the
+    # auto-/clear targets — it must NOT set no_clear, so loop-dispatch can reset
+    # a claude lane that accumulated context across the session.
+    paths, events = _env(tmp_path)
+    sub = _DispatchKwargsSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": "do task T0001", "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", {"mode": "text", "wait_ready": False})]
+    assert sub.dispatched[0][1].get("no_clear", False) is False
+
+
+def test_add_lane_brief_opts_out_of_clear(tmp_path):
+    # A freshly-provisioned lane has no accumulated context — opt out so the
+    # clear can't race the booting welcome screen.
+    paths, events = _env(tmp_path)
+    sub = _DispatchKwargsSub()
+    actions.execute(_add(brief="explore"), sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched[0][0] == "w"
+    assert sub.dispatched[0][1].get("no_clear") is True
+
+
+def test_steer_opts_out_of_clear(tmp_path):
+    # A steer is mid-conversation guidance — it MUST preserve the lane's context,
+    # so it always opts out, even without --interrupt.
+    paths, events = _env(tmp_path)
+    sub = _DispatchKwargsSub()
+    action = {"kind": "steer", "lane": "coord", "payload": "focus on the API", "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched[0][1].get("no_clear") is True

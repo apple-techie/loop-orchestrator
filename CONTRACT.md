@@ -51,14 +51,24 @@ section in this file.
 
 ### loop-dispatch.sh
 - `[--session <s>] [--mode command|text] [--no-enter] [--verify]
-  [--wait-ready [--ready-timeout s]] [--interrupt] <lane> <payload>` and the
-  `--window <target>` direct form.
+  [--wait-ready [--ready-timeout s]] [--interrupt] [--no-clear] <lane> <payload>`
+  and the `--window <target>` direct form.
 - Exit 0 = payload delivered to the pane (paste + Enter). Non-zero = NOT
   delivered (usage, missing session/lane, tmux failure). Dispatch is
   at-most-once; callers must not retry blindly (double-paste into a TUI
   composer corrupts the turn).
 - `--interrupt` sends Escape, waits 1s, then dispatches — cancels in-flight
   generation for steer-style redirects.
+- Auto-context-reset: before a FRESH dispatch, if the target lane's harness is
+  `claude` AND the dispatch is NOT `--interrupt` AND the lane is idle AND
+  `--no-clear`/`LOOP_DISPATCH_NO_CLEAR` is unset, loop-dispatch first sends
+  `/clear` + Enter and waits (≤ `LOOP_DISPATCH_CLEAR_TIMEOUT`, default 8s) for
+  the lane to re-settle, then dispatches. SAFETY: if the clear can't be
+  confirmed in time it dispatches anyway (never hangs); the clear is one
+  paste+Enter so the at-most-once payload delivery is unchanged. Each task
+  dispatch is self-contained, so the reset loses nothing — it stops a lane from
+  accumulating context across a session and stalling. Steers/nudges and
+  fresh-lane briefs pass `--no-clear` (they must preserve context or have none).
 - `--mode text` is bracketed-paste with a paste→Enter delay
   (`LOOP_DISPATCH_PASTE_DELAY`, default 2.0s).
 

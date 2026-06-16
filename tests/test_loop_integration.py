@@ -380,7 +380,9 @@ class _StubSubstrate:
         self.added: list[str] = []
         self.dropped: list[str] = []
 
-    def dispatch(self, lane, payload, mode="text", wait_ready=False, interrupt=False):
+    def dispatch(
+        self, lane, payload, mode="text", wait_ready=False, interrupt=False, no_clear=False
+    ):
         self.dispatches.append((lane, payload, mode, wait_ready, interrupt))
 
     def add_lane(self, window, **kwargs):

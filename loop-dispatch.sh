@@ -31,6 +31,12 @@ WAIT_READY=0
 READY_TIMEOUT="${LOOP_DISPATCH_READY_TIMEOUT:-20}"
 INTERRUPT=0
 LANE_NAME=""
+# Auto-context-reset before a FRESH claude dispatch. Default on; opt out with
+# --no-clear or LOOP_DISPATCH_NO_CLEAR=1. See the clear block below for why.
+NO_CLEAR="${LOOP_DISPATCH_NO_CLEAR:-0}"
+# Max secs to wait for the lane to re-settle after a /clear before proceeding
+# anyway (SAFETY: never hang a dispatch on a clear that can't be confirmed).
+CLEAR_TIMEOUT="${LOOP_DISPATCH_CLEAR_TIMEOUT:-8}"
 
 # Resolve this script's real directory (symlink-aware) so --wait-ready can find
 # the sibling loop-lane-status.sh even when invoked via a ~/.local/bin symlink.
@@ -78,6 +84,9 @@ Options:
                       generation in Claude/Pi composers), wait 1s, then
                       dispatch — for steering a busy lane onto a new course
                       instead of appending mid-turn guidance
+  --no-clear          Disable the auto-/clear context reset that otherwise runs
+                      before a FRESH dispatch into an idle claude lane
+                      (env: LOOP_DISPATCH_NO_CLEAR=1)
   -h, --help          Show this help
 
 Env vars:
@@ -85,6 +94,10 @@ Env vars:
                              (default: 2.0). Raise if your Claude/Pi composer
                              is slow to process long prompts. Also honors
                              TMUX_DISPATCH_PASTE_DELAY for backward compat.
+  LOOP_DISPATCH_NO_CLEAR     Set to 1 to disable the auto-/clear context reset
+                             before a fresh claude dispatch (same as --no-clear).
+  LOOP_DISPATCH_CLEAR_TIMEOUT Max secs to wait for the lane to re-settle after a
+                             /clear before dispatching anyway (default: 8).
 
 Modes:
   command  Send text and press Enter. Best for shell commands.
@@ -110,6 +123,7 @@ while [[ $# -gt 0 ]]; do
     --wait-ready)   WAIT_READY=1; shift ;;
     --ready-timeout) READY_TIMEOUT="$2"; shift 2 ;;
     --interrupt)    INTERRUPT=1; shift ;;
+    --no-clear)     NO_CLEAR=1; shift ;;
     -h|--help)      usage; exit 0 ;;
     --*)
       echo "Unknown option: $1" >&2
@@ -234,6 +248,61 @@ if [[ "$WAIT_READY" -eq 1 ]]; then
       sleep 1; _elapsed=$((_elapsed + 1))
     done
     [[ "$_ready" -eq 1 ]] || echo "warning: lane '$LANE_NAME' not confirmed ready within ${READY_TIMEOUT}s (dispatching anyway)" >&2
+  fi
+fi
+
+# Auto-context-reset (loop improvement #36): before pasting a FRESH task into a
+# claude lane, send `/clear` so the lane never accumulates context across a
+# session. Observed 3×: after ~5-6 builds in one session a claude composer lags
+# so badly a dispatched prompt PASTES but the Enter never registers — the prompt
+# sits unsent and repeated sends stack pastes. Each task dispatch is fully
+# self-contained (whole prompt + task file), so resetting the lane's context
+# before a fresh task loses nothing. Gated on ALL of:
+#   (a) harness is claude — `/clear` is claude-specific; NEVER send it to a
+#       shell/other lane (it would land as literal text or a bad command);
+#   (b) NOT --interrupt — steering a busy lane must never wipe its context;
+#   (c) the lane is idle/ready — never clear a working lane mid-task;
+#   (d) not opted out (--no-clear / LOOP_DISPATCH_NO_CLEAR).
+# SAFETY: if the post-clear settle can't be confirmed within CLEAR_TIMEOUT, we
+# proceed with the dispatch anyway — a clear must never hang a dispatch. The
+# clear itself is one paste+Enter, so the at-most-once payload delivery below is
+# unchanged (we never re-send the task).
+# _lane_status_for_target — classify the resolved TARGET by capturing its pane
+# and running it through loop-lane-status's --classify-stdin seam (the same rule
+# chain the fleet sweep uses). Works for both named lanes and the --window
+# direct form since it operates on the already-resolved tmux target. Echoes one
+# status word (idle|working|awaiting-approval|errored|unknown), or `unknown` if
+# anything fails — the caller treats non-idle conservatively (skips the clear).
+_lane_status_for_target() {
+  local tail
+  tail="$(tmux capture-pane -t "$TARGET" -p 2>/dev/null || true)"
+  [[ -z "$tail" ]] && { echo unknown; return; }
+  printf '%s' "$tail" | bash "$LANE_STATUS_SCRIPT" --classify-stdin claude 2>/dev/null || echo unknown
+}
+
+if [[ "$NO_CLEAR" -ne 1 && "$INTERRUPT" -ne 1 && -f "$LANE_STATUS_SCRIPT" ]]; then
+  _lane_harness="$(tmux show-options -wqv -t "$TARGET" @loop_lane_harness 2>/dev/null || true)"
+  if [[ "$_lane_harness" == "claude" ]]; then
+    # Only clear a confirmed-idle lane — never wipe a working lane mid-task.
+    if [[ "$(_lane_status_for_target)" == "idle" ]]; then
+      # Send /clear as keystrokes (it's a short, fixed slash-command — no paste
+      # buffer needed), then Enter to submit.
+      tmux send-keys -t "$TARGET" -l -- "/clear"
+      tmux send-keys -t "$TARGET" Enter
+      # Give the clear a moment to take effect before re-probing — claude's idle
+      # home-chrome ("accept edits on") persists across the clear, so an instant
+      # re-probe could read the PRE-clear chrome and race the redraw.
+      sleep 1
+      # Wait for the lane to re-settle to idle (the cleared composer home-chrome)
+      # before pasting the task, so the paste can't race the clear's redraw.
+      # SAFETY: bounded by CLEAR_TIMEOUT — on timeout we fall through and
+      # dispatch anyway rather than hang.
+      _c_elapsed=0
+      while (( _c_elapsed < CLEAR_TIMEOUT )); do
+        [[ "$(_lane_status_for_target)" == "idle" ]] && break
+        sleep 1; _c_elapsed=$((_c_elapsed + 1))
+      done
+    fi
   fi
 fi
 

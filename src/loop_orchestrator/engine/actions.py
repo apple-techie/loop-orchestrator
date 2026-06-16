@@ -254,7 +254,10 @@ def execute(
             auto_approve=bool(action.get("auto_approve", False)),
             worktree=worktree,
         )
-        substrate.dispatch(action["window"], recovered_brief, wait_ready=True)
+        # A just-provisioned lane has a fresh composer with no accumulated
+        # context, so the auto-/clear (loop improvement #36) is unnecessary here
+        # and would only race the freshly-booted welcome screen — opt out.
+        substrate.dispatch(action["window"], recovered_brief, wait_ready=True, no_clear=True)
     elif kind == "drop_lane":
         _flush_handoff(action["window"], substrate, events, paths)
         substrate.drop_lane(action["window"])
@@ -265,11 +268,15 @@ def execute(
         expects_reply = bool(action.get("expects_reply"))
         if expects_reply:
             payload += _REPLY_FOOTER.format(lane=action["lane"], request_id=ask_id)
+        # A steer is mid-conversation guidance — it MUST preserve the lane's
+        # context (it often references prior work), so never auto-/clear here,
+        # even when the steer waits for an idle lane (loop improvement #36).
         substrate.dispatch(
             action["lane"],
             payload,
             mode=action.get("mode", "text"),
             interrupt=bool(action.get("interrupt", False)),
+            no_clear=True,
         )
         if expects_reply and paths is not None and ask_id:
             timeout_s = int(action.get("reply_timeout_s") or 1800)

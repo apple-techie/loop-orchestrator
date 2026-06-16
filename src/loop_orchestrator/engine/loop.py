@@ -448,7 +448,10 @@ def run_once(
             "oldest-first and move each processed file to .loop/messages/processed/."
         )
         try:
-            substrate.dispatch(config.ingest.lane, nudge, wait_ready=True)
+            # The ingest lane (e.g. coord) is a long-lived lane whose
+            # accumulated session context (fleet state, prior mailbox handling)
+            # the nudge relies on — never auto-/clear it (#36).
+            substrate.dispatch(config.ingest.lane, nudge, wait_ready=True, no_clear=True)
         except SubstrateError as exc:
             events.append("error", kind="ingest-nudge-failed", error=str(exc))
         else:

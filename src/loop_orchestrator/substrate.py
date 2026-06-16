@@ -217,15 +217,23 @@ class Substrate:
         mode: str = "text",
         wait_ready: bool = False,
         interrupt: bool = False,
-        timeout: float = 90,  # covers 20s ready-poll + 2s paste delay + margin
+        no_clear: bool = False,
+        timeout: float = 90,  # covers 20s ready-poll + clear settle + 2s paste delay + margin
     ) -> None:
         """At-most-once delivery; raises on non-zero exit. Never retry blindly —
-        a double paste into a TUI composer is worse than a missed dispatch."""
+        a double paste into a TUI composer is worse than a missed dispatch.
+
+        loop-dispatch auto-sends `/clear` before a FRESH (non-interrupt) dispatch
+        into an idle claude lane so a lane never accumulates context across a
+        session and stalls; `no_clear=True` opts out (steers always opt out via
+        `interrupt=True`)."""
         args = ["--session", self.session, "--mode", mode]
         if wait_ready:
             args.append("--wait-ready")
         if interrupt:
             args.append("--interrupt")
+        if no_clear:
+            args.append("--no-clear")
         args += [lane, payload]
         self._run("loop-dispatch", *args, timeout=timeout)
 
