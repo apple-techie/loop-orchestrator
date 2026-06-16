@@ -1,0 +1,34 @@
+# partner.engine.yaml — the `engine:` block for a HIGH-STAKES MANUAL loop (live
+# partner/customer work touching a shared origin/main). Copy this block into a
+# project's lane-config.yaml.
+#
+# The THIN TOP of the barbell: every action gates at the deck, opus brain,
+# streaming on, PM adapter wired. Each such loop consumes real per-decision
+# operator attention — past ~3 simultaneous manual loops YOUR latency becomes the
+# loop's stall, so keep this tier small. Restart this loop ONLY via
+# `bin/loop-restart <session>` — it re-sources ~/.loop-secrets/<session>.env so the
+# PM adapter doesn't silently go unavailable (the restart-drops-env gotcha).
+engine:
+  approval_mode: manual          # every action gates at the deck (you adjudicate)
+  poll_interval_s: 5
+  min_cycle_interval_s: 60
+  checkpoint_interval_s: 3600
+  brain:
+    harness: claude
+    timeout_s: 600               # opus is slower; doubled deadline. Do NOT raise effort to xhigh (it timed out at 300s)
+    max_retries: 1
+    max_calls_per_hour: 12
+    stream: true                 # live transcript in the deck `b` panel
+    extra_args: ["--model", "claude-opus-4-8"]   # most-capable brain for high-stakes coordination
+  ingest:
+    mode: headless
+    timeout_s: 600
+  destructive:
+    payload_patterns: ["git push", "rm -rf", "reset --hard", "rebase", "commit --amend", "filter-branch"]
+  metrics:
+    log_after_cycle: true
+  pm:
+    adapters: [jira]             # secrets in ~/.loop-secrets/<session>.env; restart via bin/loop-restart
+  harness_policy:
+    allow: [claude, shell]
+    brain_allow: [claude]

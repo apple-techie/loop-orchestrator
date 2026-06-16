@@ -1,0 +1,36 @@
+# janitor.engine.yaml — the `engine:` block for a LOW-RISK AUTO maintenance loop
+# (lint / deps / metrics / doc-recompile / stale-branch sweeps). Copy this block
+# into a project's lane-config.yaml.
+#
+# The WIDE BASE of the barbell: cheap, cost-capped, auto, worktree-isolated.
+# Reviewing a janitor's lint fix is the operator anti-pattern — so safe actions
+# self-execute and only genuinely destructive ones queue. Limited by how many you
+# can glance at in a daily deck pass, not by compute. Spin one up only when the
+# work is recurring AND has a verification hook (a green gate) so it can self-mark
+# progress; a loop with no verification hook is a chat you babysit, not a janitor.
+engine:
+  approval_mode: auto            # safe self-executes; destructive (drop/interrupt/push/rm/reset) still gate
+  poll_interval_s: 10
+  min_cycle_interval_s: 300      # janitors aren't latency-sensitive — debounce hard
+  checkpoint_interval_s: 3600
+  brain:
+    harness: claude
+    timeout_s: 300
+    max_retries: 1
+    max_calls_per_hour: 4        # tight cost ceiling — a janitor MUST be cheap (the uncapped auto loop is the one that wakes you up)
+    stream: false
+    extra_args: ["--model", "claude-sonnet-4-6"]   # capable + far cheaper than opus for routine work
+  ingest:
+    mode: headless
+  destructive:
+    max_dispatches_per_cycle: 2  # tighter than default 4 — a janitor shouldn't fan out
+    max_lanes: 4                 # tighter than default 12
+  metrics:
+    log_after_cycle: true
+  pm:
+    adapters: []                 # janitors usually have no PM layer
+  harness_policy:
+    allow: [claude, shell]
+    brain_allow: [claude]
+    cost_ceiling: low            # any high-cost-tier harness add is forced destructive (human-gated)
+    autonomy_cap: attended       # a high-drift harness gates even in auto mode
