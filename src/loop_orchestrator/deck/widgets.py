@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.binding import Binding
 from textual.widgets import DataTable, Static
 
-from .model import DeckState, LaneRow, LoopRow, event_line
+from .model import DeckState, LaneRow, LoopRow, ReviewRow, event_line
 
 STATUS_STYLES = {
     "working": "yellow",
@@ -156,6 +156,36 @@ class DecisionQueue(Static):
             if rationale:
                 text.append(f"\n  {rationale}", style="dim")
         text.append("\n\ny approve · N reject", style="dim")
+        self.update(text)
+
+
+class ReviewQueue(Static):
+    """Tech-QA-complete tasks (status: review) awaiting the PO's validation.
+
+    The mirror of DecisionQueue: that panel gates work BEFORE it runs; this one
+    surfaces work the engine finished and handed to the human to validate AFTER.
+    Read-only — the deck never promotes or writes; the operator validates via
+    the PM (e.g. moving the Jira issue to Done)."""
+
+    def on_mount(self) -> None:
+        self.border_title = "review queue"
+        self.update_reviews([])
+
+    def update_reviews(self, items: list[ReviewRow]) -> None:
+        self._items = items
+        text = Text()
+        if not items:
+            text.append("(no items awaiting review)", style="dim")
+            self.update(text)
+            return
+        for item in items:
+            text.append(item.id, style="bold")
+            if item.title:
+                text.append(f" · {item.title}")
+            if item.jira:
+                text.append(f" · {item.jira}", style="cyan")
+            text.append("\n")
+        text.append(f"\nawaiting review: {len(items)}", style="dim")
         self.update(text)
 
 

@@ -176,6 +176,49 @@ def test_resolved_decision_is_not_unresolved(paths):
     assert state.pending_unresolved is None
 
 
+def _write_task(paths, name: str, **frontmatter) -> None:
+    lines = ["---"]
+    lines += [f"{key}: {value}" for key, value in frontmatter.items()]
+    lines += ["---", "", "body"]
+    path = paths.tasks_dir / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_review_items_only_review_status(paths):
+    _write_task(
+        paths, "T0052-add-panel.md", id="T0052", title="add panel", status="review", jira="SCRUM-52"
+    )
+    _write_task(paths, "T0040-earlier.md", id="T0040", title="earlier review", status="review")
+    _write_task(paths, "T0051-wip.md", id="T0051", title="in flight", status="in-progress")
+    _write_task(paths, "T0001-open.md", id="T0001", title="todo", status="open")
+    _write_task(paths, "T0009-done.md", id="T0009", title="finished", status="done")
+    paths.tasks_dir.joinpath("README.md").write_text("not a task\n", encoding="utf-8")
+    # An archived review task must NOT surface — review items live in tasks/ only.
+    (paths.tasks_dir / "archive").mkdir(parents=True, exist_ok=True)
+    _write_task(paths, "archive/T0030-archived.md", id="T0030", title="archived", status="review")
+
+    items = model.review_items(paths)
+
+    assert [r.id for r in items] == ["T0040", "T0052"]  # sorted by id, review-only
+    by_id = {r.id: r for r in items}
+    assert by_id["T0052"].title == "add panel"
+    assert by_id["T0052"].jira == "SCRUM-52"
+    assert by_id["T0040"].jira == ""  # missing jira -> empty string
+
+
+def test_review_items_empty_without_tasks_dir(paths):
+    assert model.review_items(paths) == []
+
+
+def test_review_items_in_load_state(paths):
+    _write_task(
+        paths, "T0052-add-panel.md", id="T0052", title="add panel", status="review", jira="SCRUM-52"
+    )
+    state = model.load_state(StubSubstrate(), paths)
+    assert [r.id for r in state.review_items] == ["T0052"]
+
+
 def test_digest_join_and_events_tail(paths):
     events = [
         {"ts": "2026-06-10T00:00:00Z", "seq": i, "event": "observe", "lanes": 3} for i in range(25)

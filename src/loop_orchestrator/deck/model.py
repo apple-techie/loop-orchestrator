@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,8 +17,11 @@ from pathlib import Path
 from ..engine.events import EventLog
 from ..locking import read_json
 from ..paths import SessionPaths
+from ..pm import taskfiles
 
 UNRESOLVED = ("pending", "needs-human")
+
+_TASK_ID_RE = re.compile(r"^(T\d{4})")
 
 
 @dataclass
@@ -41,6 +45,13 @@ class LoopRow:
 
 
 @dataclass
+class ReviewRow:
+    id: str
+    title: str
+    jira: str
+
+
+@dataclass
 class DeckState:
     session: str
     engine: str  # running | paused | off
@@ -51,6 +62,7 @@ class DeckState:
     processed_count: int = 0
     adrs: list[dict] = field(default_factory=list)
     events_tail: list[dict] = field(default_factory=list)
+    review_items: list[ReviewRow] = field(default_factory=list)
 
     @property
     def pending_unresolved(self) -> dict | None:
@@ -153,6 +165,41 @@ def _loops(digest: dict) -> list[LoopRow]:
     return rows
 
 
+def review_items(paths: SessionPaths) -> list[ReviewRow]:
+    """Tasks in <project_root>/tasks/ whose frontmatter status is 'review' —
+    tech-QA-complete work awaiting the PO's validation.
+
+    Review items stay in tasks/ (never tasks/archive/, which holds done/dropped),
+    so this scans the top-level tasks dir only. id comes from the filename's
+    T<NNNN> prefix; title and jira come from the frontmatter. Sorted by id.
+    Read-only — the deck non-writer invariant holds.
+    """
+    tasks_dir = paths.tasks_dir
+    if not tasks_dir.is_dir():
+        return []
+    rows: list[ReviewRow] = []
+    for path in sorted(tasks_dir.glob("*.md")):
+        if path.name == "README.md":
+            continue
+        try:
+            frontmatter = taskfiles.parse_frontmatter(path)
+        except (ValueError, OSError):
+            continue
+        if frontmatter.get("status") != "review":
+            continue
+        match = _TASK_ID_RE.match(path.name)
+        task_id = match.group(1) if match else path.stem
+        rows.append(
+            ReviewRow(
+                id=task_id,
+                title=str(frontmatter.get("title") or ""),
+                jira=str(frontmatter.get("jira") or ""),
+            )
+        )
+    rows.sort(key=lambda row: row.id)
+    return rows
+
+
 def load_state(substrate, paths: SessionPaths, prefer_snapshot_age_s: float = 10) -> DeckState:
     """Join lanes + statuses + digest + engine files into one DeckState."""
     statuses = lane_statuses(substrate, paths, prefer_snapshot_age_s)
@@ -186,6 +233,7 @@ def load_state(substrate, paths: SessionPaths, prefer_snapshot_age_s: float = 10
         processed_count=int(mailbox.get("processed_count") or 0),
         adrs=[a for a in adrs or [] if isinstance(a, dict)],
         events_tail=EventLog(paths.events_path).tail(20),
+        review_items=review_items(paths),
     )
 
 
