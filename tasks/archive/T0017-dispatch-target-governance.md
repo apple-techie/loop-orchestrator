@@ -1,6 +1,6 @@
 ---
 id: T0017
-title: F1: validate dispatch/steer targets are agent lanes
+title: "F1: validate dispatch/steer targets are agent lanes"
 status: done
 accepted: 2026-06-13
 depends_on: []

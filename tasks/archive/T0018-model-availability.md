@@ -1,6 +1,6 @@
 ---
 id: T0018
-title: F3: model-unavailable failure kind + per-harness model failover
+title: "F3: model-unavailable failure kind + per-harness model failover"
 status: done
 accepted: 2026-06-13
 depends_on: []
