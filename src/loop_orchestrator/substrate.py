@@ -253,9 +253,7 @@ class Substrate:
 
     # ── metrics + lint (scripts/ helpers) ─────────────────────────────────
 
-    def task_lint(
-        self, tasks_dir: str | Path | None = None
-    ) -> subprocess.CompletedProcess:
+    def task_lint(self, tasks_dir: str | Path | None = None) -> subprocess.CompletedProcess:
         """Validate the tasks-as-files convention (F9 wrapper). Passes an explicit
         --tasks-dir (default: project_root/tasks == paths.tasks_dir) so the lint
         targets THIS loop's tasks, not loop-task-lint's install-relative default —
