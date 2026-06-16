@@ -253,6 +253,18 @@ class Substrate:
 
     # ── metrics + lint (scripts/ helpers) ─────────────────────────────────
 
+    def task_lint(
+        self, tasks_dir: str | Path | None = None
+    ) -> subprocess.CompletedProcess:
+        """Validate the tasks-as-files convention (F9 wrapper). Passes an explicit
+        --tasks-dir (default: project_root/tasks == paths.tasks_dir) so the lint
+        targets THIS loop's tasks, not loop-task-lint's install-relative default —
+        the engine-internal path is now worktree-correct like digest/checkpoint.
+        check=False: exit 1 means lint findings (a normal, inspectable result), not
+        a substrate crash — callers read returncode/stdout."""
+        target = str(tasks_dir or (self.project_root / "tasks"))
+        return self._run("loop-task-lint", "--tasks-dir", target, check=False)
+
     def metrics_log(self, session: str | None = None) -> str:
         """Record the T0006 metrics block (`loop-metrics --log` appends one
         `## [date] metrics | …` entry to ops-wiki/log.md)."""

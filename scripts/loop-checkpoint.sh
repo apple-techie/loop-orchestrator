@@ -41,6 +41,19 @@ _checkpoint_script_dir() {
 }
 SCRIPT_DIR="$(_checkpoint_script_dir)"
 
+# Default project root: prefer the git working tree we are run from (correct in a
+# worktree), then $PWD when it holds ops-wiki/ or .loop/, else the legacy
+# install-relative parent-of-parent. An explicit --project-root always overrides;
+# the engine always passes it, so this default only affects bare invocations.
+_checkpoint_default_root() {
+  local top
+  if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$top" ]]; then
+    printf '%s\n' "$top"; return 0
+  fi
+  if [[ -d "$PWD/ops-wiki" || -d "$PWD/.loop" ]]; then printf '%s\n' "$PWD"; return 0; fi
+  (cd "$SCRIPT_DIR/.." && pwd)
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -120,7 +133,7 @@ if [[ -z "$MODE" ]]; then
 fi
 
 if [[ -z "$PROJECT_ROOT" ]]; then
-  PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  PROJECT_ROOT="$(_checkpoint_default_root)"
 fi
 
 CHECKPOINT_FILE="$PROJECT_ROOT/ops-wiki/checkpoint.md"

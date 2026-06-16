@@ -77,6 +77,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Bare-invocation default (defense-in-depth): if no root/state/mailbox was given,
+# prefer the git working tree we are run from (worktree-correct), then $PWD with a
+# .loop/. The engine always passes --project-root, so this only affects bare runs;
+# absent both, the L88 guard below still errors out.
+if [[ -z "$PROJECT_ROOT" && -z "$STATE_FILE" && -z "$MAILBOX_DIR" ]]; then
+  if top="$(git rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$top" ]]; then
+    PROJECT_ROOT="$top"
+  elif [[ -d "$PWD/.loop" ]]; then
+    PROJECT_ROOT="$PWD"
+  fi
+fi
+
 # Derive defaults from --project-root.
 if [[ -n "$PROJECT_ROOT" ]]; then
   : "${STATE_FILE:=$PROJECT_ROOT/.loop/orchestrator-state.json}"
