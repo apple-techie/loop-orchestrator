@@ -641,3 +641,40 @@ def test_prompt_unchanged_without_roster(project):
     prompt = _assemble_prompt(sub, snap, paths)
     assert "harness roster" not in prompt
     assert "selection rubric" not in prompt
+
+
+# ── F16 (T0041): checkpoint overflow degrades, never aborts the cycle ────────
+
+from loop_orchestrator.substrate import SubstrateError  # noqa: E402
+
+
+def test_checkpoint_overflow_degrades_and_brain_still_runs(project, call_log, monkeypatch):
+    # An over-ceiling checkpoint prompt (loop-checkpoint exit 3 -> SubstrateError)
+    # is the ONLY run_once substrate call that used to abort the cycle BEFORE the
+    # brain. It must now degrade like observe/ingest (F7/F11): emit
+    # checkpoint-overflow, fall back to a header-only prompt so the brain STILL
+    # runs (and can self-trim), and resolve the cycle (cycle-end) — never raise.
+    def _overflow(self, header_file=None):
+        raise SubstrateError(["loop-checkpoint", "--print"], 3, "prompt over ceiling (48000)")
+
+    monkeypatch.setattr(Substrate, "checkpoint_prompt", _overflow)
+
+    rc = run_once(project, "demo", EngineConfig())  # must NOT raise / abort
+    assert rc == 0
+
+    paths = SessionPaths(project, "demo")
+    kinds = [e["event"] for e in _events(paths)]
+    assert "checkpoint-overflow" in kinds  # degraded, not aborted
+    assert "brain-call" in kinds  # the brain STILL ran on the header-only prompt
+    assert "cycle-end" in kinds  # the cycle resolved gracefully
+    assert len(_brain_calls(call_log)) == 1
+
+
+def test_checkpoint_overflow_degraded_prompt_directs_self_trim(monkeypatch, project):
+    # The header-only fallback carries the contract header + an explicit directive
+    # to trim ops-wiki/checkpoint.md + index.md, so the brain can fix the bloat.
+    from loop_orchestrator.engine.loop import _degraded_checkpoint_body
+
+    body = _degraded_checkpoint_body()
+    assert "checkpoint OVERFLOW (F16)" in body
+    assert "trim" in body and "ops-wiki/checkpoint.md" in body and "ops-wiki/index.md" in body

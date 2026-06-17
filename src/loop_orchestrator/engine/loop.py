@@ -123,19 +123,42 @@ def _roster_lines(roster: dict[str, dict], config: EngineConfig) -> list[str]:
     return lines
 
 
+def _degraded_checkpoint_body() -> str:
+    """F16: a header-only checkpoint body for when the assembled checkpoint prompt
+    is over the token ceiling (loop-checkpoint exit 3). The contract header (small,
+    bounded) carries the brain's operating instructions; ops-wiki/checkpoint.md +
+    index.md are OMITTED to keep the cycle alive, with an explicit directive to
+    self-trim them this cycle so the next cycle sees full state again."""
+    resource = resources.files("loop_orchestrator.engine").joinpath(*_HEADER_RESOURCE)
+    header = resource.read_text(encoding="utf-8")
+    return (
+        header.rstrip("\n") + "\n\n--- checkpoint OVERFLOW (F16) ---\n"
+        "The assembled checkpoint exceeded the token ceiling, so ops-wiki/checkpoint.md\n"
+        "and ops-wiki/index.md were OMITTED from this prompt to keep the cycle alive.\n"
+        "Your HIGHEST-priority action this cycle: trim/rotate ops-wiki/checkpoint.md and\n"
+        "ops-wiki/index.md back under the ceiling so the next cycle sees full state.\n"
+    )
+
+
 def _assemble_prompt(
     substrate: Substrate,
     snap: EngineSnapshot,
     paths: SessionPaths,
     config: EngineConfig | None = None,
     roster: dict[str, dict] | None = None,
+    checkpoint_body: str | None = None,
 ) -> str:
     """checkpoint_prompt(packaged header) + lane status + restarts tail + asks
-    (+ governance roster and selection rubric when a roster was resolved)."""
-    resource = resources.files("loop_orchestrator.engine").joinpath(*_HEADER_RESOURCE)
-    with resources.as_file(resource) as header:
-        prompt = substrate.checkpoint_prompt(header_file=header)
-    lines = [prompt.rstrip("\n"), "", "--- live lane status ---"]
+    (+ governance roster and selection rubric when a roster was resolved).
+
+    `checkpoint_body` overrides the substrate.checkpoint_prompt call (the F16
+    degrade path passes a header-only body so an over-ceiling checkpoint does not
+    re-raise); None = today's behavior, fetch it from the substrate."""
+    if checkpoint_body is None:
+        resource = resources.files("loop_orchestrator.engine").joinpath(*_HEADER_RESOURCE)
+        with resources.as_file(resource) as header:
+            checkpoint_body = substrate.checkpoint_prompt(header_file=header)
+    lines = [checkpoint_body.rstrip("\n"), "", "--- live lane status ---"]
     for name in sorted(snap.lanes):
         info = snap.lanes[name]
         lines.append(f"{name} {info['status']} {info['kind']}")
@@ -520,7 +543,23 @@ def run_once(
         except SubstrateError as exc:
             events.append("error", kind="lanes-failed", error=str(exc))
 
-    prompt = _assemble_prompt(substrate, snap, paths, config=config, roster=roster)
+    # F16: the checkpoint_prompt substrate call is the ONLY one in run_once that
+    # could abort the cycle before the brain runs — an over-ceiling prompt makes
+    # loop-checkpoint exit 3 -> SubstrateError. Degrade like observe/ingest (F7/F11):
+    # emit checkpoint-overflow and fall back to a header-only prompt so the brain
+    # STILL runs and can self-trim ops-wiki/checkpoint.md + index.md this cycle.
+    try:
+        prompt = _assemble_prompt(substrate, snap, paths, config=config, roster=roster)
+    except SubstrateError as exc:
+        events.append("checkpoint-overflow", error=str(exc))
+        prompt = _assemble_prompt(
+            substrate,
+            snap,
+            paths,
+            config=config,
+            roster=roster,
+            checkpoint_body=_degraded_checkpoint_body(),
+        )
 
     if dry_run:
         print(f"dry-run: prompt {len(prompt)} bytes (~{len(prompt) // 4} tokens)")
