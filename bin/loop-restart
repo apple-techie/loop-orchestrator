@@ -112,12 +112,58 @@ echo "loop-restart: reinstalling ($install_cmd) in $project_root" >&2
   exit 1
 }
 
-# ── step 3: restart the engine (stop -> confirm-dead -> start) ───────────────
-echo "loop-restart: restarting engine for session '$session'" >&2
-loop-engine --project-root "$project_root" --session "$session" restart || {
-  echo "loop-restart: FATAL: loop-engine restart failed" >&2
+# ── step 3: restart the engine, then POLL for readiness (NON-BLOCKING) ────────
+# `loop-engine restart` ends in Watch.run()'s blocking `while self._running`
+# loop — it BECOMES the foreground daemon and never returns (F10/T0037). Running
+# it synchronously hung the wrapper here forever, so the PM-assert below and the
+# `exit 0` were unreachable for a real daemon. Background it instead, then poll
+# `loop-engine status` until the daemon reports alive with a FRESH heartbeat
+# before asserting PM readiness.
+echo "loop-restart: restarting engine for session '$session' (background)" >&2
+# Detach the daemon's stdio to a log file: it becomes the long-lived foreground
+# daemon, so it must NOT keep this wrapper's stdout/stderr open (that would also
+# defeat the poll below). Its log is dumped on any failure for diagnosis.
+restart_log="$(mktemp -t "loop-restart-${session}.XXXXXX")"
+loop-engine --project-root "$project_root" --session "$session" restart \
+  >"$restart_log" 2>&1 &
+restart_pid=$!
+
+_dump_restart_log() { [[ -s "$restart_log" ]] && sed 's/^/  | /' "$restart_log" >&2 || true; }
+
+restart_timeout="${LOOP_RESTART_TIMEOUT:-30}"
+max_heartbeat="${LOOP_RESTART_MAX_HEARTBEAT:-15}"
+ready=""
+deadline=$((SECONDS + restart_timeout))
+while ((SECONDS < deadline)); do
+  # If the backgrounded restart exited before becoming a live daemon, a non-zero
+  # exit is a real failure; a zero exit (e.g. a detaching restart) just means we
+  # keep polling status for the now-separate daemon.
+  if [[ -n "$restart_pid" ]] && ! kill -0 "$restart_pid" 2>/dev/null; then
+    rc=0
+    wait "$restart_pid" || rc=$?
+    if ((rc != 0)); then
+      echo "loop-restart: FATAL: loop-engine restart exited ($rc) before the daemon came up" >&2
+      _dump_restart_log
+      exit 1
+    fi
+    restart_pid=""  # reaped; stop checking liveness, keep polling status
+  fi
+  status="$(loop-engine --project-root "$project_root" --session "$session" status 2>/dev/null || true)"
+  if grep -Eq 'watch: alive \(pid [0-9]+, heartbeat [0-9]+s ago\)' <<<"$status"; then
+    age="$(sed -E -n 's/.*heartbeat ([0-9]+)s ago.*/\1/p' <<<"$status" | head -1)"
+    if [[ -n "$age" ]] && ((age <= max_heartbeat)); then
+      ready=1
+      break
+    fi
+  fi
+  sleep 0.5
+done
+if [[ -z "$ready" ]]; then
+  echo "loop-restart: FATAL: daemon not alive with a fresh heartbeat within ${restart_timeout}s" >&2
+  _dump_restart_log
   exit 1
-}
+fi
+echo "loop-restart: daemon alive (heartbeat ${age}s ago)" >&2
 
 # ── step 4: assert PM readiness ──────────────────────────────────────────────
 # list-adapters reports each installed adapter's env-based availability; it takes

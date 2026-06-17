@@ -67,7 +67,14 @@ def split_task(path: str | Path) -> tuple[dict, str]:
     end = text.find("\n---\n", 3)
     if end < 0:
         raise ValueError(f"{path}: unterminated frontmatter")
-    raw = yaml.safe_load(text[4 : end + 1])
+    try:
+        raw = yaml.safe_load(text[4 : end + 1])
+    except yaml.YAMLError as err:
+        # yaml.YAMLError is NOT a ValueError subclass, so a raw parse failure
+        # escapes every caller that guards on ValueError (F11/T0036). Re-raise
+        # as ValueError so a malformed task file degrades to a skip, never an
+        # aborted engine cycle.
+        raise ValueError(f"{path}: malformed frontmatter YAML: {err}") from err
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: frontmatter is not a mapping")
     return raw, text[end + 5 :]
