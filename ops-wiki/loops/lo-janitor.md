@@ -80,3 +80,27 @@ loop-orchestrator is the self-modifying substrate — highest blast radius.
   and
   `tests/test_loops_sync.py::test_derive_skips_malformed_yaml_instead_of_crashing`
   (both red before the fix, green after).
+
+### T0037 / F10 — loop-restart non-blocking before the PM-assert (2026-06-16)
+- **Before:** `bin/loop-restart` step 3 ran `loop-engine … restart`
+  synchronously. `cmd_restart` → `watch.restart()` ends in `Watch.run()`'s
+  blocking `while self._running` loop — the restart NEVER returns, it BECOMES
+  the foreground daemon. So the wrapper hung at step 3 and never reached the
+  PM-adapter assert; its `exit 0` was unreachable for a real daemon. The test
+  stubbed `loop-engine` as an instant `exit 0`, so all 5 tests passed while the
+  live foreground-block stayed invisible (a false green).
+- **After:** the wrapper backgrounds `loop-engine restart` (stdio detached to a
+  temp log) and POLLS `loop-engine status` until it reports
+  `watch: alive (pid …, heartbeat Ns ago)` with a fresh heartbeat
+  (`age <= LOOP_RESTART_MAX_HEARTBEAT`, default 15s) within a bounded timeout
+  (`LOOP_RESTART_TIMEOUT`, default 30s), THEN runs the PM-assert. A non-zero
+  early exit of the backgrounded restart, or a never-ready daemon, fails the
+  wrapper non-zero and dumps the restart log. Env re-source + reinstall +
+  PM-adapter assertion semantics are unchanged.
+- **Regression guard:**
+  `tests/test_loop_restart.py::test_restart_is_nonblocking_reaches_pm_assert` —
+  the `loop-engine` stub now BLOCKS forever like the real daemon and `status`
+  reports alive once up; the wrapper is run in its own process group with a
+  timeout, so the old foreground-blocking wrapper trips the timeout (red,
+  verified) and only the background+poll wrapper exits 0 (green). The four
+  pre-existing functional tests run against the same blocking stub.
