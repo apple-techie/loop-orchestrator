@@ -344,3 +344,102 @@ def test_steer_opts_out_of_clear(tmp_path):
     action = {"kind": "steer", "lane": "coord", "payload": "focus on the API", "rationale": "r"}
     actions.execute(action, sub, events, EngineConfig(), paths=paths)
     assert sub.dispatched[0][1].get("no_clear") is True
+
+
+# ── F15 (T0039): worktree-lane escalations route to the ENGINE mailbox ───────
+# A lane running in a git worktree has its OWN cwd-isolated .loop/messages
+# (.loop/ is gitignored, so each worktree gets a fresh one) that the engine
+# never ingests. The escalation/reply instruction the engine hands a lane must
+# therefore name the ENGINE's mailbox at the MAIN-checkout root by ABSOLUTE
+# path — never a cwd-relative one a worktree lane would resolve inside its own
+# tree (the blind-escalation gap surfaced by batch 1).
+
+import re as _re  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from loop_orchestrator.engine import improve  # noqa: E402
+
+_COORD_MSG_RE = _re.compile(r"(\S+)/<UTC ts YYYYMMDD-HHMMSS>-(\S+?)-to-coord\.md")
+
+
+def _coord_dir_from_instruction(payload: str) -> Path:
+    """The directory the engine told the lane to write its *-to-coord.md into."""
+    match = _COORD_MSG_RE.search(payload)
+    assert match, f"no coord-message instruction in payload: {payload!r}"
+    return Path(match.group(1))
+
+
+def _steer_reply(lane="web"):
+    return {
+        "kind": "steer",
+        "lane": lane,
+        "payload": "status?",
+        "expects_reply": True,
+        "rationale": "r",
+    }
+
+
+def test_steer_reply_routes_to_engine_mailbox_by_absolute_path(tmp_path):
+    # The engine runs from the MAIN checkout; a worktree lane's cwd differs.
+    paths = SessionPaths(tmp_path / "main", "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    sub = AddLaneSub()
+    actions.execute(_steer_reply(), sub, events, EngineConfig(), ask_id="D1-0", paths=paths)
+    _, payload = sub.dispatched[0]
+    coord_dir = _coord_dir_from_instruction(payload)
+    # routes to the ENGINE mailbox at the main root, by ABSOLUTE path so a
+    # worktree-chdir'd lane cannot misresolve it against its own cwd ...
+    assert coord_dir.is_absolute()
+    assert coord_dir == paths.mailbox_dir
+    # ... GUARD: NOT a worktree-local mailbox (what the old relative hint hit).
+    worktree_local = tmp_path / "worktrees" / "web" / ".loop" / "messages"
+    assert coord_dir != worktree_local
+
+
+def test_worktree_lane_escalation_is_ingest_discoverable(tmp_path):
+    # Simulate the lane FOLLOWING the instruction: write its escalation into the
+    # exact dir the engine named, then assert the engine's mailbox scan finds it.
+    paths = SessionPaths(tmp_path / "main", "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    sub = AddLaneSub()
+    actions.execute(_steer_reply(), sub, events, EngineConfig(), ask_id="D1-0", paths=paths)
+    coord_dir = _coord_dir_from_instruction(sub.dispatched[0][1])
+    coord_dir.mkdir(parents=True, exist_ok=True)
+    msg = coord_dir / "20260617-101500-web-to-coord.md"
+    msg.write_text("---\nsubject: blocked: need a decision\n---\n\nbody\n", encoding="utf-8")
+    # it physically landed under the MAIN engine mailbox (not a worktree) ...
+    assert msg.parent == paths.mailbox_dir
+    # ... and the engine's mailbox-ingest scan discovers it.
+    clusters = improve._human_intervention_clusters(
+        paths, datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+    assert any("web-to-coord.md" in s for c in clusters for s in c["samples"])
+
+
+def test_handoff_ack_routes_to_engine_mailbox_by_absolute_path(tmp_path):
+    # A successor recovering a handoff (often in a CARRIED worktree) must ack to
+    # the engine mailbox too — same absolute-path guarantee.
+    paths = SessionPaths(tmp_path / "main", "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    _seed_handoff(paths, "w")
+    sub = AddLaneSub()
+    actions.execute(_add(brief="resume"), sub, events, EngineConfig(), paths=paths)
+    _, payload = sub.dispatched[0]
+    coord_dir = _coord_dir_from_instruction(payload)
+    assert coord_dir.is_absolute()
+    assert coord_dir == paths.mailbox_dir
+    assert "subject: re:handoff:w" in payload  # ack semantics preserved
+
+
+def test_mailbox_hint_falls_back_to_relative_only_without_engine_root():
+    # paths=None is the legacy cli path (no engine root threaded): byte-identical
+    # to pre-F15. With a real engine root, the hint is the absolute mailbox path.
+    assert actions._mailbox_message_hint(None, "web").startswith(".loop/messages/")
+    paths = SessionPaths(Path("/srv/leo-main"), "demo")
+    hint = actions._mailbox_message_hint(paths, "web")
+    assert hint.startswith("/srv/leo-main/.loop/messages/")
+    assert Path(hint).is_absolute()

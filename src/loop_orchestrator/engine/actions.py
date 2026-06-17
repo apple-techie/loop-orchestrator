@@ -26,11 +26,27 @@ from .events import EventLog, utc_now
 IDLE_POLL_INTERVAL_S = 3.0
 IDLE_POLL_TIMEOUT_S = 120.0
 
-_REPLY_FOOTER = (
-    "\n\nWhen done, write a mailbox message "
-    ".loop/messages/<UTC ts YYYYMMDD-HHMMSS>-{lane}-to-coord.md "
-    "with frontmatter subject: re:{request_id}"
-)
+
+def _mailbox_message_hint(paths: SessionPaths | None, who: str) -> str:
+    """The escalation/reply mailbox path a lane MUST write its `<...>-to-coord.md`
+    message to (F15). ALWAYS the ENGINE's mailbox at the MAIN-checkout root
+    (`paths.mailbox_dir`, absolute) — a lane running inside a git worktree has its
+    own cwd-isolated `.loop/messages` (`.loop/` is gitignored, so each worktree
+    gets a fresh one) that the engine NEVER ingests, so a cwd-relative path is a
+    blind escalation. Resolving from the engine's configured root mirrors the
+    substrate's `--project-root` worktree-correctness pattern. `paths is None`
+    only on the legacy cli path (no engine root threaded): fall back to the
+    relative hint, byte-identical to pre-F15."""
+    base = str(paths.mailbox_dir) if paths is not None else ".loop/messages"
+    return f"{base}/<UTC ts YYYYMMDD-HHMMSS>-{who}-to-coord.md"
+
+
+def _reply_footer(paths: SessionPaths | None, lane: str, request_id: str) -> str:
+    return (
+        "\n\nWhen done, write a mailbox message "
+        f"{_mailbox_message_hint(paths, lane)} "
+        f"with frontmatter subject: re:{request_id}"
+    )
 
 
 # ── ask ledger ──────────────────────────────────────────────────────────────
@@ -148,7 +164,7 @@ _HANDOFF_RECOVERY_TEMPLATE = (
     "2. Read the active task file under tasks/ for the in-flight work.\n"
     "3. Resume from where it left off.{worktree}\n"
     "Then ACK so the handoff is observable: write a mailbox message\n"
-    ".loop/messages/<UTC ts YYYYMMDD-HHMMSS>-{window}-to-coord.md with frontmatter\n"
+    "{mailbox} with frontmatter\n"
     "`subject: {ack}` confirming you have the context.\n\n--- original brief ---\n\n"
 )
 
@@ -171,7 +187,10 @@ def _handoff_recovery(
         else ""
     )
     preamble = _HANDOFF_RECOVERY_TEMPLATE.format(
-        window=window, ack=handoff_ack_subject(window), worktree=worktree_note
+        window=window,
+        ack=handoff_ack_subject(window),
+        worktree=worktree_note,
+        mailbox=_mailbox_message_hint(paths, window),  # F15: engine mailbox, not cwd
     )
     events.append("handoff-recovery", window=window, worktree_carry=bool(branch))
     return preamble + brief, bool(branch)
@@ -267,7 +286,7 @@ def execute(
         payload = action["payload"]
         expects_reply = bool(action.get("expects_reply"))
         if expects_reply:
-            payload += _REPLY_FOOTER.format(lane=action["lane"], request_id=ask_id)
+            payload += _reply_footer(paths, action["lane"], ask_id)
         # A steer is mid-conversation guidance — it MUST preserve the lane's
         # context (it often references prior work), so never auto-/clear here,
         # even when the steer waits for an idle lane (loop improvement #36).
