@@ -97,7 +97,11 @@ def _run(
         "LOOP_RESTART_TIMEOUT": "10",
     }
     # Own session/process group so we can reap the wrapper AND the backgrounded
-    # (or hung-foreground) daemon stub on completion or timeout.
+    # (or hung-foreground) daemon stub on completion or timeout. start_new_session
+    # makes the wrapper a group leader (pgid == its pid); capture that pgid NOW —
+    # on the green path the wrapper exits and is reaped by communicate(), so a
+    # later os.getpgid(proc.pid) would raise ProcessLookupError and the orphaned
+    # daemon (which outlives the wrapper, but stays in the group) would leak.
     proc = subprocess.Popen(
         [str(WRAPPER), session, "--project-root", str(root)],
         stdout=subprocess.PIPE,
@@ -106,6 +110,7 @@ def _run(
         env=env,
         start_new_session=True,
     )
+    pgid = proc.pid  # group leader pgid; survives the leader's exit
     timed_out = False
     try:
         _, stderr = proc.communicate(timeout=_RUN_TIMEOUT)
@@ -116,7 +121,7 @@ def _run(
         stderr = ""
     finally:
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
         if timed_out:
