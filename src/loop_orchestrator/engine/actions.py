@@ -12,6 +12,7 @@ outstanding|replied|timed-out}]}. Written under the engine lock — the cycle
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -26,11 +27,27 @@ from .events import EventLog, utc_now
 IDLE_POLL_INTERVAL_S = 3.0
 IDLE_POLL_TIMEOUT_S = 120.0
 
-_REPLY_FOOTER = (
-    "\n\nWhen done, write a mailbox message "
-    ".loop/messages/<UTC ts YYYYMMDD-HHMMSS>-{lane}-to-coord.md "
-    "with frontmatter subject: re:{request_id}"
-)
+
+def _mailbox_message_hint(paths: SessionPaths | None, who: str) -> str:
+    """The escalation/reply mailbox path a lane MUST write its `<...>-to-coord.md`
+    message to (F15). ALWAYS the ENGINE's mailbox at the MAIN-checkout root
+    (`paths.mailbox_dir`, absolute) — a lane running inside a git worktree has its
+    own cwd-isolated `.loop/messages` (`.loop/` is gitignored, so each worktree
+    gets a fresh one) that the engine NEVER ingests, so a cwd-relative path is a
+    blind escalation. Resolving from the engine's configured root mirrors the
+    substrate's `--project-root` worktree-correctness pattern. `paths is None`
+    only on the legacy cli path (no engine root threaded): fall back to the
+    relative hint, byte-identical to pre-F15."""
+    base = str(paths.mailbox_dir) if paths is not None else ".loop/messages"
+    return f"{base}/<UTC ts YYYYMMDD-HHMMSS>-{who}-to-coord.md"
+
+
+def _reply_footer(paths: SessionPaths | None, lane: str, request_id: str) -> str:
+    return (
+        "\n\nWhen done, write a mailbox message "
+        f"{_mailbox_message_hint(paths, lane)} "
+        f"with frontmatter subject: re:{request_id}"
+    )
 
 
 # ── ask ledger ──────────────────────────────────────────────────────────────
@@ -140,6 +157,57 @@ def _predecessor_branch(paths: SessionPaths, window: str) -> str | None:
     return branch if isinstance(branch, str) and branch else None
 
 
+def _is_worktree_lane(paths: SessionPaths | None, window: str) -> bool:
+    """True when window runs in an isolated git worktree — signalled by a recorded
+    `loops.<window>.branch` in the ledger (T0025), the same marker the handoff
+    carry uses. The engine uses this to gate F14 inline-spec embedding so a
+    shared (non-worktree) lane's dispatch stays byte-identical."""
+    return paths is not None and _predecessor_branch(paths, window) is not None
+
+
+# F14: a worktree lane is cut from main HEAD, so a `tasks/Txxxx-….md` spec that is
+# uncommitted in main or seeded after the cut is ABSENT from its working tree.
+_TASK_REF_RE = re.compile(r"tasks/(T\d{4})[\w.-]*\.md")
+_MAX_EMBED_CHARS = 16000
+
+
+def _embed_task_spec(payload: str, paths: SessionPaths | None) -> str:
+    """F14: make a worktree-lane dispatch SELF-CONTAINED. When the payload points
+    a lane at a `tasks/Txxxx-….md` spec, resolve that file from the ENGINE's
+    main-checkout tasks/ (paths.tasks_dir — which the engine CAN see, mirroring
+    F15's main-root resolution) and append the spec INLINE, so a worktree lane
+    cut from main HEAD needs no tasks/ access to execute. No reference / no paths
+    / file missing / oversized / already-embedded => payload unchanged. The
+    caller gates on the lane being worktree-isolated, so non-worktree dispatches
+    are byte-identical."""
+    if paths is None:
+        return payload
+    match = _TASK_REF_RE.search(payload)
+    if not match:
+        return payload
+    task_id = match.group(1)
+    from ..pm import taskfiles
+
+    try:
+        path = next(
+            (p for p in taskfiles.list_tasks(paths.tasks_dir) if p.name.startswith(f"{task_id}-")),
+            None,
+        )
+        if path is None:
+            return payload
+        spec = path.read_text(encoding="utf-8")
+    except OSError:
+        return payload
+    if len(spec) > _MAX_EMBED_CHARS or spec in payload:
+        return payload
+    return (
+        f"{payload}\n\n"
+        f"--- task spec {path.name} (embedded inline — your worktree is cut from main "
+        f"HEAD and may NOT contain this file; do NOT rely on reading it from tasks/) "
+        f"---\n\n{spec}"
+    )
+
+
 _HANDOFF_RECOVERY_TEMPLATE = (
     "## Handoff recovery — you are SUCCEEDING a prior lane in window '{window}'\n\n"
     "A predecessor agent was handed off out of this window. Do NOT cold-start:\n"
@@ -148,7 +216,7 @@ _HANDOFF_RECOVERY_TEMPLATE = (
     "2. Read the active task file under tasks/ for the in-flight work.\n"
     "3. Resume from where it left off.{worktree}\n"
     "Then ACK so the handoff is observable: write a mailbox message\n"
-    ".loop/messages/<UTC ts YYYYMMDD-HHMMSS>-{window}-to-coord.md with frontmatter\n"
+    "{mailbox} with frontmatter\n"
     "`subject: {ack}` confirming you have the context.\n\n--- original brief ---\n\n"
 )
 
@@ -171,7 +239,10 @@ def _handoff_recovery(
         else ""
     )
     preamble = _HANDOFF_RECOVERY_TEMPLATE.format(
-        window=window, ack=handoff_ack_subject(window), worktree=worktree_note
+        window=window,
+        ack=handoff_ack_subject(window),
+        worktree=worktree_note,
+        mailbox=_mailbox_message_hint(paths, window),  # F15: engine mailbox, not cwd
     )
     events.append("handoff-recovery", window=window, worktree_carry=bool(branch))
     return preamble + brief, bool(branch)
@@ -220,9 +291,14 @@ def execute(
     shared, byte-identical)."""
     kind = action["kind"]
     if kind == "dispatch":
+        payload = action["payload"]
+        # F14: a worktree lane can't read a tasks/ spec absent from its cut tree —
+        # embed it inline. Gated on worktree-isolation => shared lanes unchanged.
+        if _is_worktree_lane(paths, action["lane"]):
+            payload = _embed_task_spec(payload, paths)
         substrate.dispatch(
             action["lane"],
-            action["payload"],
+            payload,
             mode=action.get("mode", "text"),
             wait_ready=bool(action.get("wait_ready", False)),
         )
@@ -245,6 +321,10 @@ def execute(
         if not worktree and is_code_writer and code_writers is not None:
             worktree = gate.should_provision_worktree(code_writers)
         worktree = worktree or worktree_carry  # T0028 continuity: reuse the predecessor's tree
+        # F14: a worktree lane is cut from main HEAD — embed the task spec inline
+        # so it needs no tasks/ access. Gated on worktree => shared adds unchanged.
+        if worktree:
+            recovered_brief = _embed_task_spec(recovered_brief, paths)
         substrate.add_lane(
             action["window"],
             harness=action.get("harness"),
@@ -267,7 +347,7 @@ def execute(
         payload = action["payload"]
         expects_reply = bool(action.get("expects_reply"))
         if expects_reply:
-            payload += _REPLY_FOOTER.format(lane=action["lane"], request_id=ask_id)
+            payload += _reply_footer(paths, action["lane"], ask_id)
         # A steer is mid-conversation guidance — it MUST preserve the lane's
         # context (it often references prior work), so never auto-/clear here,
         # even when the steer waits for an idle lane (loop improvement #36).

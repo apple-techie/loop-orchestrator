@@ -116,3 +116,31 @@ loop-orchestrator is the self-modifying substrate — highest blast radius.
   string-accuracy fix, no behavior change; no test asserted the old string.
   (Deliberate runbook rehearsal: a zero-risk change exercising the full
   draft → gate → escalate → human-merge path.)
+
+### T0039 / F15 — worktree-lane escalations route to the engine mailbox (2026-06-17)
+- **Before:** the engine's lane-facing escalation/reply instructions
+  (`actions._REPLY_FOOTER`, the handoff-recovery ack) named a cwd-relative
+  `.loop/messages/<UTC>-…-to-coord.md`. A worktree lane resolves that against its
+  OWN worktree (`.loop/` is gitignored → each worktree gets a fresh,
+  engine-invisible mailbox), so the escalation never reached the engine — a blind
+  escalation.
+- **After:** new `actions._mailbox_message_hint(paths, who)` returns the ENGINE
+  mailbox at the configured main-checkout root (`paths.mailbox_dir`, absolute),
+  mirroring the substrate's `--project-root` worktree-correctness pattern. Wired
+  into the reply footer and the handoff ack. `paths is None` (cli) keeps the
+  relative hint, byte-identical. Guards in `tests/test_actions.py`
+  (absolute-path routing + ingest-discoverability + not-worktree-local).
+
+### T0040 / F14 — embed the task spec inline in worktree dispatches (2026-06-17)
+- **Before:** a dispatch to a worktree lane said "read `tasks/Txxxx.md` for the
+  full spec", but the worktree is cut from main HEAD and cannot see a spec that is
+  uncommitted in main or seeded after the cut (this very task's spec was such a
+  seed). The lane had to hunt the spec in the main repo — wasted, fragile cycles.
+- **After:** `actions._embed_task_spec(payload, paths)` detects a `tasks/Txxxx-….md`
+  reference and appends that file's content INLINE, resolved from the engine's
+  main-checkout `tasks/` (`paths.tasks_dir`, which the engine CAN see — same
+  main-root resolution as F15). Gated on the lane being worktree-isolated
+  (`_is_worktree_lane`: a recorded `loops.<window>.branch`, T0025), wired into
+  both the `add_lane` brief and the recurring `dispatch` payload. Non-worktree
+  dispatches are byte-identical (regression-guarded). Bounded (≤16 KB), no-op when
+  there is no reference / the file is absent / already embedded.

@@ -344,3 +344,201 @@ def test_steer_opts_out_of_clear(tmp_path):
     action = {"kind": "steer", "lane": "coord", "payload": "focus on the API", "rationale": "r"}
     actions.execute(action, sub, events, EngineConfig(), paths=paths)
     assert sub.dispatched[0][1].get("no_clear") is True
+
+
+# ── F15 (T0039): worktree-lane escalations route to the ENGINE mailbox ───────
+# A lane running in a git worktree has its OWN cwd-isolated .loop/messages
+# (.loop/ is gitignored, so each worktree gets a fresh one) that the engine
+# never ingests. The escalation/reply instruction the engine hands a lane must
+# therefore name the ENGINE's mailbox at the MAIN-checkout root by ABSOLUTE
+# path — never a cwd-relative one a worktree lane would resolve inside its own
+# tree (the blind-escalation gap surfaced by batch 1).
+
+import re as _re  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from loop_orchestrator.engine import improve  # noqa: E402
+
+_COORD_MSG_RE = _re.compile(r"(\S+)/<UTC ts YYYYMMDD-HHMMSS>-(\S+?)-to-coord\.md")
+
+
+def _coord_dir_from_instruction(payload: str) -> Path:
+    """The directory the engine told the lane to write its *-to-coord.md into."""
+    match = _COORD_MSG_RE.search(payload)
+    assert match, f"no coord-message instruction in payload: {payload!r}"
+    return Path(match.group(1))
+
+
+def _steer_reply(lane="web"):
+    return {
+        "kind": "steer",
+        "lane": lane,
+        "payload": "status?",
+        "expects_reply": True,
+        "rationale": "r",
+    }
+
+
+def test_steer_reply_routes_to_engine_mailbox_by_absolute_path(tmp_path):
+    # The engine runs from the MAIN checkout; a worktree lane's cwd differs.
+    paths = SessionPaths(tmp_path / "main", "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    sub = AddLaneSub()
+    actions.execute(_steer_reply(), sub, events, EngineConfig(), ask_id="D1-0", paths=paths)
+    _, payload = sub.dispatched[0]
+    coord_dir = _coord_dir_from_instruction(payload)
+    # routes to the ENGINE mailbox at the main root, by ABSOLUTE path so a
+    # worktree-chdir'd lane cannot misresolve it against its own cwd ...
+    assert coord_dir.is_absolute()
+    assert coord_dir == paths.mailbox_dir
+    # ... GUARD: NOT a worktree-local mailbox (what the old relative hint hit).
+    worktree_local = tmp_path / "worktrees" / "web" / ".loop" / "messages"
+    assert coord_dir != worktree_local
+
+
+def test_worktree_lane_escalation_is_ingest_discoverable(tmp_path):
+    # Simulate the lane FOLLOWING the instruction: write its escalation into the
+    # exact dir the engine named, then assert the engine's mailbox scan finds it.
+    paths = SessionPaths(tmp_path / "main", "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    sub = AddLaneSub()
+    actions.execute(_steer_reply(), sub, events, EngineConfig(), ask_id="D1-0", paths=paths)
+    coord_dir = _coord_dir_from_instruction(sub.dispatched[0][1])
+    coord_dir.mkdir(parents=True, exist_ok=True)
+    msg = coord_dir / "20260617-101500-web-to-coord.md"
+    msg.write_text("---\nsubject: blocked: need a decision\n---\n\nbody\n", encoding="utf-8")
+    # it physically landed under the MAIN engine mailbox (not a worktree) ...
+    assert msg.parent == paths.mailbox_dir
+    # ... and the engine's mailbox-ingest scan discovers it.
+    clusters = improve._human_intervention_clusters(
+        paths, datetime(2026, 1, 1, tzinfo=timezone.utc)
+    )
+    assert any("web-to-coord.md" in s for c in clusters for s in c["samples"])
+
+
+def test_handoff_ack_routes_to_engine_mailbox_by_absolute_path(tmp_path):
+    # A successor recovering a handoff (often in a CARRIED worktree) must ack to
+    # the engine mailbox too — same absolute-path guarantee.
+    paths = SessionPaths(tmp_path / "main", "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    _seed_handoff(paths, "w")
+    sub = AddLaneSub()
+    actions.execute(_add(brief="resume"), sub, events, EngineConfig(), paths=paths)
+    _, payload = sub.dispatched[0]
+    coord_dir = _coord_dir_from_instruction(payload)
+    assert coord_dir.is_absolute()
+    assert coord_dir == paths.mailbox_dir
+    assert "subject: re:handoff:w" in payload  # ack semantics preserved
+
+
+def test_mailbox_hint_falls_back_to_relative_only_without_engine_root():
+    # paths=None is the legacy cli path (no engine root threaded): byte-identical
+    # to pre-F15. With a real engine root, the hint is the absolute mailbox path.
+    assert actions._mailbox_message_hint(None, "web").startswith(".loop/messages/")
+    paths = SessionPaths(Path("/srv/leo-main"), "demo")
+    hint = actions._mailbox_message_hint(paths, "web")
+    assert hint.startswith("/srv/leo-main/.loop/messages/")
+    assert Path(hint).is_absolute()
+
+
+# ── F14 (T0040): worktree dispatches embed the task spec inline ──────────────
+# A worktree lane is cut from main HEAD, so a tasks/Txxxx-….md spec that is
+# uncommitted in main or seeded after the cut is ABSENT from its working tree.
+# When the engine dispatches to a worktree lane, the spec body must ride inline
+# in the payload; a shared (non-worktree) lane's dispatch stays byte-identical.
+
+_SPEC_SENTINEL = "embedded-spec-sentinel-line"
+
+
+def _seed_task(paths, task_id="T0040", slug="f14-demo"):
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    f = paths.tasks_dir / f"{task_id}-{slug}.md"
+    f.write_text(
+        f"---\nid: {task_id}\ntitle: t\nstatus: open\n---\n\n## Objective\n{_SPEC_SENTINEL}\n",
+        encoding="utf-8",
+    )
+    return f
+
+
+def _seed_branch(paths, window, branch="loop/demo/web"):
+    paths.state_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.state_file.write_text(
+        json.dumps({"loops": {window: {"branch": branch}}}), encoding="utf-8"
+    )
+
+
+_BRIEF_WITH_REF = "Do T0040. Read tasks/T0040-f14-demo.md for the full spec."
+
+
+def test_worktree_add_lane_embeds_task_spec_inline(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    sub = AddLaneSub()
+    action = {**_add(brief=_BRIEF_WITH_REF), "worktree": True}  # explicit T0025 opt-in
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.calls[0]["worktree"] is True
+    _, payload = sub.dispatched[0]
+    assert _SPEC_SENTINEL in payload  # (a) spec body rides inline
+    assert "embedded inline" in payload  # the self-contained marker
+    assert payload.startswith(_BRIEF_WITH_REF)  # original brief preserved, spec appended
+
+
+def test_nonworktree_add_lane_is_byte_identical(tmp_path):
+    # (b)+(c): a shared lane add is byte-for-byte the original brief — no embed.
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    sub = AddLaneSub()
+    actions.execute(
+        _add(brief=_BRIEF_WITH_REF), sub, events, EngineConfig(), paths=paths, code_writers=0
+    )
+    assert sub.calls[0]["worktree"] is False
+    assert sub.dispatched == [("w", _BRIEF_WITH_REF)]  # byte-identical, spec NOT embedded
+
+
+def test_worktree_dispatch_kind_embeds_task_spec_inline(tmp_path):
+    # The recurring task dispatch to an EXISTING worktree lane (ledger branch).
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    _seed_branch(paths, "web")
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": _BRIEF_WITH_REF, "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    _, payload = sub.dispatched[0]
+    assert _SPEC_SENTINEL in payload
+    assert payload.startswith(_BRIEF_WITH_REF)
+
+
+def test_nonworktree_dispatch_kind_is_byte_identical(tmp_path):
+    # No ledger branch => shared lane => byte-identical payload (regression guard).
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": _BRIEF_WITH_REF, "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", _BRIEF_WITH_REF)]  # unchanged
+
+
+def test_embed_is_noop_when_spec_file_absent(tmp_path):
+    # Worktree lane but the referenced spec isn't in the engine's tasks/ => the
+    # payload is left intact (graceful, never raises).
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web")  # worktree, but no _seed_task
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": _BRIEF_WITH_REF, "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", _BRIEF_WITH_REF)]  # no file => unchanged
+
+
+def test_embed_noop_when_payload_has_no_task_reference(tmp_path):
+    # Worktree lane, spec present, but the payload names no tasks/ path => no embed.
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    _seed_branch(paths, "web")
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": "just do the thing", "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", "just do the thing")]
