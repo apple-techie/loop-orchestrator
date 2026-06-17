@@ -12,6 +12,7 @@ outstanding|replied|timed-out}]}. Written under the engine lock — the cycle
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -156,6 +157,57 @@ def _predecessor_branch(paths: SessionPaths, window: str) -> str | None:
     return branch if isinstance(branch, str) and branch else None
 
 
+def _is_worktree_lane(paths: SessionPaths | None, window: str) -> bool:
+    """True when window runs in an isolated git worktree — signalled by a recorded
+    `loops.<window>.branch` in the ledger (T0025), the same marker the handoff
+    carry uses. The engine uses this to gate F14 inline-spec embedding so a
+    shared (non-worktree) lane's dispatch stays byte-identical."""
+    return paths is not None and _predecessor_branch(paths, window) is not None
+
+
+# F14: a worktree lane is cut from main HEAD, so a `tasks/Txxxx-….md` spec that is
+# uncommitted in main or seeded after the cut is ABSENT from its working tree.
+_TASK_REF_RE = re.compile(r"tasks/(T\d{4})[\w.-]*\.md")
+_MAX_EMBED_CHARS = 16000
+
+
+def _embed_task_spec(payload: str, paths: SessionPaths | None) -> str:
+    """F14: make a worktree-lane dispatch SELF-CONTAINED. When the payload points
+    a lane at a `tasks/Txxxx-….md` spec, resolve that file from the ENGINE's
+    main-checkout tasks/ (paths.tasks_dir — which the engine CAN see, mirroring
+    F15's main-root resolution) and append the spec INLINE, so a worktree lane
+    cut from main HEAD needs no tasks/ access to execute. No reference / no paths
+    / file missing / oversized / already-embedded => payload unchanged. The
+    caller gates on the lane being worktree-isolated, so non-worktree dispatches
+    are byte-identical."""
+    if paths is None:
+        return payload
+    match = _TASK_REF_RE.search(payload)
+    if not match:
+        return payload
+    task_id = match.group(1)
+    from ..pm import taskfiles
+
+    try:
+        path = next(
+            (p for p in taskfiles.list_tasks(paths.tasks_dir) if p.name.startswith(f"{task_id}-")),
+            None,
+        )
+        if path is None:
+            return payload
+        spec = path.read_text(encoding="utf-8")
+    except OSError:
+        return payload
+    if len(spec) > _MAX_EMBED_CHARS or spec in payload:
+        return payload
+    return (
+        f"{payload}\n\n"
+        f"--- task spec {path.name} (embedded inline — your worktree is cut from main "
+        f"HEAD and may NOT contain this file; do NOT rely on reading it from tasks/) "
+        f"---\n\n{spec}"
+    )
+
+
 _HANDOFF_RECOVERY_TEMPLATE = (
     "## Handoff recovery — you are SUCCEEDING a prior lane in window '{window}'\n\n"
     "A predecessor agent was handed off out of this window. Do NOT cold-start:\n"
@@ -239,9 +291,14 @@ def execute(
     shared, byte-identical)."""
     kind = action["kind"]
     if kind == "dispatch":
+        payload = action["payload"]
+        # F14: a worktree lane can't read a tasks/ spec absent from its cut tree —
+        # embed it inline. Gated on worktree-isolation => shared lanes unchanged.
+        if _is_worktree_lane(paths, action["lane"]):
+            payload = _embed_task_spec(payload, paths)
         substrate.dispatch(
             action["lane"],
-            action["payload"],
+            payload,
             mode=action.get("mode", "text"),
             wait_ready=bool(action.get("wait_ready", False)),
         )
@@ -264,6 +321,10 @@ def execute(
         if not worktree and is_code_writer and code_writers is not None:
             worktree = gate.should_provision_worktree(code_writers)
         worktree = worktree or worktree_carry  # T0028 continuity: reuse the predecessor's tree
+        # F14: a worktree lane is cut from main HEAD — embed the task spec inline
+        # so it needs no tasks/ access. Gated on worktree => shared adds unchanged.
+        if worktree:
+            recovered_brief = _embed_task_spec(recovered_brief, paths)
         substrate.add_lane(
             action["window"],
             harness=action.get("harness"),

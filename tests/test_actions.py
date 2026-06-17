@@ -443,3 +443,102 @@ def test_mailbox_hint_falls_back_to_relative_only_without_engine_root():
     hint = actions._mailbox_message_hint(paths, "web")
     assert hint.startswith("/srv/leo-main/.loop/messages/")
     assert Path(hint).is_absolute()
+
+
+# ── F14 (T0040): worktree dispatches embed the task spec inline ──────────────
+# A worktree lane is cut from main HEAD, so a tasks/Txxxx-….md spec that is
+# uncommitted in main or seeded after the cut is ABSENT from its working tree.
+# When the engine dispatches to a worktree lane, the spec body must ride inline
+# in the payload; a shared (non-worktree) lane's dispatch stays byte-identical.
+
+_SPEC_SENTINEL = "embedded-spec-sentinel-line"
+
+
+def _seed_task(paths, task_id="T0040", slug="f14-demo"):
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    f = paths.tasks_dir / f"{task_id}-{slug}.md"
+    f.write_text(
+        f"---\nid: {task_id}\ntitle: t\nstatus: open\n---\n\n## Objective\n{_SPEC_SENTINEL}\n",
+        encoding="utf-8",
+    )
+    return f
+
+
+def _seed_branch(paths, window, branch="loop/demo/web"):
+    paths.state_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.state_file.write_text(
+        json.dumps({"loops": {window: {"branch": branch}}}), encoding="utf-8"
+    )
+
+
+_BRIEF_WITH_REF = "Do T0040. Read tasks/T0040-f14-demo.md for the full spec."
+
+
+def test_worktree_add_lane_embeds_task_spec_inline(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    sub = AddLaneSub()
+    action = {**_add(brief=_BRIEF_WITH_REF), "worktree": True}  # explicit T0025 opt-in
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.calls[0]["worktree"] is True
+    _, payload = sub.dispatched[0]
+    assert _SPEC_SENTINEL in payload  # (a) spec body rides inline
+    assert "embedded inline" in payload  # the self-contained marker
+    assert payload.startswith(_BRIEF_WITH_REF)  # original brief preserved, spec appended
+
+
+def test_nonworktree_add_lane_is_byte_identical(tmp_path):
+    # (b)+(c): a shared lane add is byte-for-byte the original brief — no embed.
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    sub = AddLaneSub()
+    actions.execute(
+        _add(brief=_BRIEF_WITH_REF), sub, events, EngineConfig(), paths=paths, code_writers=0
+    )
+    assert sub.calls[0]["worktree"] is False
+    assert sub.dispatched == [("w", _BRIEF_WITH_REF)]  # byte-identical, spec NOT embedded
+
+
+def test_worktree_dispatch_kind_embeds_task_spec_inline(tmp_path):
+    # The recurring task dispatch to an EXISTING worktree lane (ledger branch).
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    _seed_branch(paths, "web")
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": _BRIEF_WITH_REF, "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    _, payload = sub.dispatched[0]
+    assert _SPEC_SENTINEL in payload
+    assert payload.startswith(_BRIEF_WITH_REF)
+
+
+def test_nonworktree_dispatch_kind_is_byte_identical(tmp_path):
+    # No ledger branch => shared lane => byte-identical payload (regression guard).
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": _BRIEF_WITH_REF, "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", _BRIEF_WITH_REF)]  # unchanged
+
+
+def test_embed_is_noop_when_spec_file_absent(tmp_path):
+    # Worktree lane but the referenced spec isn't in the engine's tasks/ => the
+    # payload is left intact (graceful, never raises).
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web")  # worktree, but no _seed_task
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": _BRIEF_WITH_REF, "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", _BRIEF_WITH_REF)]  # no file => unchanged
+
+
+def test_embed_noop_when_payload_has_no_task_reference(tmp_path):
+    # Worktree lane, spec present, but the payload names no tasks/ path => no embed.
+    paths, events = _env(tmp_path)
+    _seed_task(paths)
+    _seed_branch(paths, "web")
+    sub = AddLaneSub()
+    action = {"kind": "dispatch", "lane": "web", "payload": "just do the thing", "rationale": "r"}
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+    assert sub.dispatched == [("web", "just do the thing")]
