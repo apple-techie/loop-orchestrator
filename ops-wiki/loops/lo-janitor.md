@@ -144,3 +144,22 @@ loop-orchestrator is the self-modifying substrate — highest blast radius.
   both the `add_lane` brief and the recurring `dispatch` payload. Non-worktree
   dispatches are byte-identical (regression-guarded). Bounded (≤16 KB), no-op when
   there is no reference / the file is absent / already embedded.
+
+### T0041 / F16 — checkpoint overflow degrades, never aborts the cycle (2026-06-17)
+- **Before:** `checkpoint_prompt` was the ONLY substrate call in `loop.run_once`
+  not wrapped in `try/except SubstrateError`. An over-ceiling checkpoint prompt
+  makes `scripts/loop-checkpoint.sh` exit 3 → `SubstrateError`, which aborted the
+  WHOLE cycle (at the `_assemble_prompt` call, ~loop.py:523) BEFORE the brain ran
+  — so the loop could not self-trim its own bloat, unlike observe/ingest/roster/
+  lanes which already degrade (F7/F11). (Harvested from leo, 2026-06-16: 2
+  over-ceiling crashes; leo self-recovered as state shrank — a degrade-consistency
+  gap, not a wedged hot-loop.)
+- **After:** the `_assemble_prompt` call is wrapped like its siblings: on overflow
+  it emits a `checkpoint-overflow` event and falls back to a header-only prompt
+  (`_degraded_checkpoint_body` — the contract header + an explicit directive to
+  trim `ops-wiki/checkpoint.md` + `index.md` this cycle), so the brain STILL runs
+  and the cycle resolves (`cycle-end`) instead of aborting. Surgical, `loop.py`
+  only; no `watch.py` backoff (out of scope — leo self-recovered, so no hot-loop
+  to guard). Regression guard in `tests/test_loop_integration.py`
+  (`test_checkpoint_overflow_degrades_and_brain_still_runs`): red before (cycle
+  aborts), green after (degrade + brain runs).
