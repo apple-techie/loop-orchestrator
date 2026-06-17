@@ -104,3 +104,15 @@ loop-orchestrator is the self-modifying substrate — highest blast radius.
   timeout, so the old foreground-blocking wrapper trips the timeout (red,
   verified) and only the background+poll wrapper exits 0 (green). The four
   pre-existing functional tests run against the same blocking stub.
+
+### T0038 / warmup — stale "deferred to Phase 5" handoff string (2026-06-16)
+- **Before:** `engine/wiki.py:152` (`append_handoff`) stamped every drop_lane
+  handoff breadcrumb with `working-tree: shared project root (per-lane isolation
+  deferred to Phase 5)` — but Phase 5 (worktree isolation, T0025/T0026/T0028) is
+  DONE, so the line lied about how lanes actually run.
+- **After:** the line now reflects `gate.should_provision_worktree`'s real rule —
+  `working-tree: shared project root while the sole serialized writer; a
+  dedicated git worktree once parallelism is real (T0025/T0026/T0028)`. One-line
+  string-accuracy fix, no behavior change; no test asserted the old string.
+  (Deliberate runbook rehearsal: a zero-risk change exercising the full
+  draft → gate → escalate → human-merge path.)

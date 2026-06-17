@@ -149,7 +149,8 @@ def append_handoff(lane_page: Path, window: str, harness: str, pane_tail: str, n
         f"### [{now}] {window} handoff — {harness} (drop_lane flush)\n"
         f"- as-of: {now}\n"
         f"- harness: {harness}\n"
-        "- working-tree: shared project root (per-lane isolation deferred to Phase 5)\n"
+        "- working-tree: shared project root while the sole serialized writer; a "
+        "dedicated git worktree once parallelism is real (T0025/T0026/T0028)\n"
         "- step / touched / blocked-on / assumptions — as the agent left the lane pane:\n\n"
         f"{indented}\n"
     )
