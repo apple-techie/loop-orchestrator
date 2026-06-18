@@ -1,7 +1,7 @@
 ---
 id: T0042
 title: "F17 — engine ingest resilience: bound the ingest timeout + quarantine repeatedly-failing mailbox messages (no 10-min cycle stall, no re-hang loop)"
-status: open
+status: done
 depends_on: []
 scope: src/loop_orchestrator/engine/loop.py (_headless_ingest + its caller) and engine/config.py (ingest timeout) so a hung/failed headless ingest degrades FAST and the offending message is NOT re-ingested every subsequent cycle. Engine-only; no harness/CLI/dispatch-gate changes.
 jira:
