@@ -678,3 +678,92 @@ def test_checkpoint_overflow_degraded_prompt_directs_self_trim(monkeypatch, proj
     body = _degraded_checkpoint_body()
     assert "checkpoint OVERFLOW (F16)" in body
     assert "trim" in body and "ops-wiki/checkpoint.md" in body and "ops-wiki/index.md" in body
+
+
+# ── F17 (T0042): ingest resilience — bound timeout + quarantine on failure ───
+
+from loop_orchestrator.engine.config import IngestConfig  # noqa: E402
+
+_MSG = "20260610-000000-web-to-coord.md"
+
+
+def _disk_digest(mailbox: Path):
+    """A digest whose pending list reflects what is actually on disk (the canned
+    fake digest is static, so it can't show the queue shrink after quarantine)."""
+
+    def digest(self) -> dict:
+        names = sorted(f.name for f in mailbox.glob("*.md"))
+        return {
+            "state": {"loops": {}},
+            "mailbox": {"pending": [{"file": n} for n in names], "processed_count": 0},
+        }
+
+    return digest
+
+
+def test_ingest_failure_quarantines_and_brain_still_runs(project, call_log, monkeypatch, tmp_path):
+    # F17: a hung/failed headless ingest must (a) move the stuck message OUT of
+    # .loop/messages/ so the next cycle does not re-hang on it, (b) emit
+    # ingest-quarantined (keeping ingest-timeout), and (c) still let the cycle
+    # reach the brain (degrade, don't abort).
+    paths = SessionPaths(project, "demo")
+    msg = paths.mailbox_dir / _MSG
+    msg.write_text("from: web\nto: coord\nsubject: demo\n\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(Substrate, "digest", _disk_digest(paths.mailbox_dir))
+
+    # a headless ingest that always stalls past its (1 s) timeout -> BrainError
+    slow = tmp_path / "slow-ingest"
+    slow.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    slow.chmod(0o755)
+    monkeypatch.setenv("LOOP_ENGINE_INGEST_CMD", str(slow))
+    config = EngineConfig(ingest=IngestConfig(mode="headless", timeout_s=1))
+
+    assert run_once(project, "demo", config) == 0  # cycle survives the stall
+
+    kinds = [e["event"] for e in _events(paths)]
+    assert "ingest-timeout" in kinds  # run_oneshot still reports the stall
+    assert "ingest-quarantined" in kinds  # F17 quarantine fired
+    assert "brain-call" in kinds  # degraded — the brain STILL ran
+    assert "cycle-end" in kinds
+    assert len(_brain_calls(call_log)) == 1
+
+    # the stuck message moved OUT of the pending queue into failed/ (add-only,
+    # not deleted) with a reason + timestamp note
+    assert not msg.exists()
+    moved = paths.mailbox_dir / "failed" / _MSG
+    note = paths.mailbox_dir / "failed" / f"{_MSG}.ingest-failed.txt"
+    assert moved.exists()
+    assert note.exists() and "quarantined" in note.read_text(encoding="utf-8")
+
+    # acceptance (b): the NEXT cycle's observation no longer lists it, so ingest
+    # is not re-invoked (and cannot re-hang) on the quarantined message
+    fresh = Observer(Substrate(project, "demo"), paths).snapshot()
+    assert _MSG not in fresh.mailbox_pending
+
+
+def test_ingest_quarantine_is_idempotent_and_skips_already_moved(project, monkeypatch):
+    # Re-running quarantine for a message already moved must not duplicate or
+    # crash — the second call finds nothing on disk and emits no second event.
+    from loop_orchestrator.engine.loop import _quarantine_failed_ingest
+
+    paths = SessionPaths(project, "demo")
+    msg = paths.mailbox_dir / _MSG
+    msg.write_text("body\n", encoding="utf-8")
+    events = EventLog(paths.events_path)
+
+    _quarantine_failed_ingest(paths, events, [_MSG], "timed out after 1s")
+    _quarantine_failed_ingest(paths, events, [_MSG], "timed out after 1s")
+
+    quarantined = [e for e in _events(paths) if e["event"] == "ingest-quarantined"]
+    assert len(quarantined) == 1  # exactly one move, second run is a no-op
+    assert (paths.mailbox_dir / "failed" / _MSG).exists()
+    assert not msg.exists()
+
+
+def test_ingest_timeout_default_is_below_brain_timeout():
+    # F17: ingest gets its own, materially-lower timeout; the brain/coord timeout
+    # MUST be untouched.
+    cfg = EngineConfig()
+    assert cfg.ingest.timeout_s == 120
+    assert cfg.brain.timeout_s == 300  # unchanged
+    assert cfg.ingest.timeout_s < cfg.brain.timeout_s

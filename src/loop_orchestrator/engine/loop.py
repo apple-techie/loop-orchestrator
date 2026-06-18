@@ -245,6 +245,43 @@ def _ingest_argv(substrate: Substrate, config: EngineConfig, prompt: str) -> lis
     return argv
 
 
+def _quarantine_failed_ingest(
+    paths: SessionPaths,
+    events: EventLog,
+    pending: list[str],
+    reason: str,
+) -> None:
+    """F17: move the message a timed-out/failed headless ingest hung on OUT of
+    `.loop/messages/` so the NEXT cycle does not re-ingest (and re-hang on) it.
+
+    Quarantine rule (the simplest correct one): the headless ingest works the
+    pending queue oldest-first, moving each processed file to processed/ as it
+    goes, so the OLDEST message still in `.loop/messages/` is exactly the one it
+    was stuck on. Move that single message to `.loop/messages/failed/` (NOT a
+    delete — mailbox single-writer/add-only rules; a human can re-queue it),
+    drop a sibling `<name>.ingest-failed.txt` with the reason + UTC timestamp,
+    and emit one `ingest-quarantined` event (the run_oneshot `ingest-timeout`/
+    `ingest-failed` event is kept). Idempotent: a message already moved (not on
+    disk) is skipped, so a re-run never duplicates or crashes."""
+    failed_dir = paths.mailbox_dir / "failed"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for name in pending:  # oldest first
+        src = paths.mailbox_dir / name
+        if not src.is_file():
+            continue  # already processed/moved — keep scanning for the stuck one
+        failed_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            src.replace(failed_dir / name)  # atomic move within the mailbox tree
+            (failed_dir / f"{name}.ingest-failed.txt").write_text(
+                f"{ts} ingest quarantined: {reason}\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            events.append("error", kind="ingest-quarantine-failed", file=name, error=str(exc))
+            return
+        events.append("ingest-quarantined", file=name, reason=reason)
+        return  # only the stuck (oldest-on-disk) message; the rest retry next cycle
+
+
 def _headless_ingest(
     substrate: Substrate,
     paths: SessionPaths,
@@ -255,7 +292,10 @@ def _headless_ingest(
     """One-shot harness performs the docs-lane ingest itself (no lane nudge).
 
     Emits ingest-done (with the re-checked pending count) on success;
-    run_oneshot already emits ingest-timeout/ingest-failed on failure.
+    run_oneshot already emits ingest-timeout/ingest-failed on failure. On
+    failure the offending message is quarantined (F17) so the cycle degrades
+    instead of re-hanging on it every subsequent cycle; the caller still
+    proceeds to the brain.
     """
     prompt = (
         f"You are the docs lane for the project at {paths.project_root}. "
@@ -282,8 +322,12 @@ def _headless_ingest(
             cwd=paths.project_root,
             harness=config.ingest.harness or config.brain.harness,
         )
-    except BrainError:
-        return  # run_oneshot appended ingest-timeout / ingest-failed already
+    except BrainError as exc:
+        # run_oneshot appended ingest-timeout / ingest-failed already. F17:
+        # quarantine the stuck message so the next cycle does not re-hang on it,
+        # then degrade — the caller proceeds to the brain regardless.
+        _quarantine_failed_ingest(paths, events, pending, str(exc))
+        return
     try:
         remaining = substrate.pending_count()
     except SubstrateError:

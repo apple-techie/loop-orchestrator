@@ -37,7 +37,12 @@ class BrainConfig:
 class IngestConfig:
     mode: str = "lane"  # lane | headless
     lane: str = "docs"
-    timeout_s: int = 600
+    # F17: the headless-ingest one-shot timeout, SEPARATE from and materially
+    # lower than the brain/coord BrainConfig.timeout_s (300). A hung ingest
+    # (observed: claude -p producing 0 bytes and stalling to the wall) must
+    # degrade fast — not block the decision cycle for ~10 min — so the cycle
+    # still reaches the brain and the offending message gets quarantined.
+    timeout_s: int = 120
     harness: str = ""  # headless one-shot harness ("" = use brain.harness)
     auto_approve: bool = True  # append the registry auto-approve flag (file writes needed)
 

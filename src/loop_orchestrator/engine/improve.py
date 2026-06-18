@@ -224,6 +224,12 @@ def _ingest_clusters(events: list[dict], paths: SessionPaths, cutoff: datetime) 
     if timeouts:
         samples = [f"ts={e.get('ts')} timeout_s={e.get('timeout_s')}" for e in timeouts]
         out.append(_cluster("ingest:timeout", len(timeouts), samples, "agents-md-append"))
+    # F17: a recurring quarantine means a message (or the ingest harness) keeps
+    # failing — surface it the same way so the brain can act on the pattern.
+    quarantined = [e for e in events if e.get("event") == "ingest-quarantined"]
+    if quarantined:
+        samples = [f"ts={e.get('ts')} file={e.get('file')}" for e in quarantined]
+        out.append(_cluster("ingest:quarantined", len(quarantined), samples, "agents-md-append"))
     trend = _pending_trend(paths.ops_wiki / "log.md", cutoff)
     if trend is not None:
         first_line, last_line, delta = trend
