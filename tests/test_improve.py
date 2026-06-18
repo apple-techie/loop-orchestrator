@@ -280,7 +280,10 @@ def test_human_intervention_windows_out_old_steers(project):
 def _latency_events(durations_s: list[int]) -> list[dict]:
     """A brain-call/decision pair per duration, on a steadily advancing clock."""
     events: list[dict] = []
-    base = datetime(2026, 6, 11, 0, 0, 0, tzinfo=timezone.utc)
+    # Anchor inside mine()'s rolling 7-day window (cutoff = now - 7d) regardless
+    # of the calendar date — a fixed past date silently falls out of the window
+    # as time advances. The series spans only minutes, so now-1d stays in-window.
+    base = datetime.now(timezone.utc) - timedelta(days=1)
     cursor = base
     for n, dur in enumerate(durations_s):
         events.append({"event": "brain-call", "ts": cursor.strftime("%Y-%m-%dT%H:%M:%SZ")})
