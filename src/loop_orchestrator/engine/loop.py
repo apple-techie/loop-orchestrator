@@ -52,6 +52,12 @@ _BUILD_TIMEOUT_S = 1500
 # build/verify on its worktree while it may be editing. idle/unknown/errored mean
 # the worktree is quiescent (no live agent) and safe to drive headlessly.
 _BUSY_LANE_STATES = frozenset({"working", "awaiting-approval"})
+# A finding at or above this severity blocks the merge gate; low/medium ride
+# along as residual caveats in the escalate summary. The adversarial lens nearly
+# always raises SOME low/medium nitpick, so gating escalate on overall==pass means
+# the merge gate is never reached — severity is the real block signal.
+_BLOCKING_SEVERITIES = frozenset({"high", "critical"})
+_SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 _VERIFY_DRIVE_OUTCOME_EVENTS = frozenset({"verify-passed", "verify-failed", "verify-timeout"})
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
@@ -70,6 +76,23 @@ _AUTO_CLASSES: dict[str, frozenset[str]] = {
     "auto": frozenset({"safe"}),
     "full": frozenset({"safe", "destructive"}),
 }
+
+
+def _max_finding_severity(findings_raw: object) -> str | None:
+    """The highest-ranked severity among a verify result's findings (or None).
+    Used to decide escalate-eligibility: a high/critical finding blocks the merge
+    gate, low/medium ride along as residual caveats."""
+    if not isinstance(findings_raw, list):
+        return None
+    best_rank, best_label = 0, None
+    for finding in findings_raw:
+        if not isinstance(finding, dict):
+            continue
+        label = str(finding.get("severity") or "").lower()
+        rank = _SEVERITY_RANK.get(label, 0)
+        if rank > best_rank:
+            best_rank, best_label = rank, label
+    return best_label
 
 
 def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: EventLog) -> None:
@@ -118,7 +141,18 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                     continue
                 findings_raw = result.get("findings")
                 findings = len(findings_raw) if isinstance(findings_raw, list) else 0
-                event = "verify-passed" if overall == "pass" else "verify-failed"
+                max_severity = _max_finding_severity(findings_raw)
+                gate = result.get("gate")
+                gate_passed = (
+                    bool(gate.get("passed")) if isinstance(gate, dict) else (overall == "pass")
+                )
+                # Escalate-eligible (verify-passed) when the gate passed, no lens
+                # hard-failed, and no finding is high/critical — EVEN on concerns.
+                # A hard `fail` or a high/critical finding still routes to a fix.
+                escalate_eligible = (
+                    gate_passed and overall != "fail" and max_severity not in _BLOCKING_SEVERITIES
+                )
+                event = "verify-passed" if escalate_eligible else "verify-failed"
                 window = marker.get("window")
                 _maybe_record_verified_tip(paths, marker)
                 events.append(
@@ -126,6 +160,7 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                     window=window,
                     overall=overall,
                     findings=findings,
+                    max_severity=max_severity,
                 )
                 changed = True
                 _save_verify_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
@@ -647,6 +682,8 @@ build in flight -> wait; do not propose another `build` for that window.
 latest build-done -> lane is ready-to-verify.
 latest build-timeout -> propose a narrower `build` for that lane.
 latest verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
+verify-passed = gate passed + NO high/critical finding (low/medium may remain) = mergeable.
+Escalate a verify-passed lane (note residual low/medium in the summary); do NOT keep fixing it.
 latest verify-failed/verify-timeout -> propose a `build` for that lane with a fix brief.
 ready-to-verify lane -> propose `verify` for that lane.
 These are headless worktree lanes: drive them with `build`/`verify`, NEVER `dispatch`/`steer`.

@@ -1356,12 +1356,24 @@ def test_ingest_timeout_default_is_below_brain_timeout():
 # ── T0048: completed async verify results surface in a later cycle ──────────
 
 
-def _write_verify_result(out_path: Path, overall: str, findings: int = 0) -> None:
+def _write_verify_result(
+    out_path: Path,
+    overall: str,
+    findings: int = 0,
+    gate_passed: bool | None = None,
+    severities: list[str] | None = None,
+) -> None:
+    if gate_passed is None:
+        gate_passed = overall == "pass"
+    if severities is not None:
+        findings_list = [{"id": str(i), "severity": s} for i, s in enumerate(severities)]
+    else:
+        findings_list = [{"id": str(i)} for i in range(findings)]
     result = {
         "overall": overall,
-        "gate": {"passed": overall == "pass"},
+        "gate": {"passed": gate_passed},
         "lenses": [],
-        "findings": [{"id": str(i)} for i in range(findings)],
+        "findings": findings_list,
         "generated_at": "2026-06-18T00:00:00Z",
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1567,6 +1579,52 @@ def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall,
     assert emitted[-1]["window"] == "web"
     assert emitted[-1]["overall"] == overall
     assert emitted[-1]["findings"] == 2
+    assert load_verify_markers(paths) == []
+
+
+@pytest.mark.parametrize(
+    ("overall", "gate_passed", "severities", "event"),
+    [
+        # concerns + gate passed + only low/medium -> escalate-eligible (verify-passed)
+        ("concerns", True, ["low", "medium", "low"], "verify-passed"),
+        # concerns + a high/critical finding -> blocked (fix)
+        ("concerns", True, ["low", "high"], "verify-failed"),
+        ("concerns", True, ["critical"], "verify-failed"),
+        # a hard `fail` always routes to a fix, even with only low findings
+        ("fail", True, ["low"], "verify-failed"),
+        # gate failed -> blocked regardless of severities
+        ("concerns", False, ["low"], "verify-failed"),
+        # clean pass stays passed
+        ("pass", True, [], "verify-passed"),
+    ],
+)
+def test_surface_verify_escalate_eligibility_is_severity_based(
+    project, overall, gate_passed, severities, event
+):
+    # The merge gate must be reachable: a build whose gate passes with no
+    # high/critical finding is escalate-eligible (verify-passed) even on concerns,
+    # so the loop stops perpetually fixing low/medium nitpicks.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-sev.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, overall, gate_passed=gate_passed, severities=severities)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    emitted = [e for e in _events(paths) if e["event"] in ("verify-passed", "verify-failed")]
+    assert emitted and emitted[-1]["event"] == event
+    assert emitted[-1]["window"] == "web"
     assert load_verify_markers(paths) == []
 
 
