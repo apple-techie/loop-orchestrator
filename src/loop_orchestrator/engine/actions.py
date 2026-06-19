@@ -23,6 +23,7 @@ from . import gate, wiki
 from .config import EngineConfig
 from .decisions import mark_action
 from .events import EventLog, utc_now
+from .observe import current_mailbox_pending
 
 IDLE_POLL_INTERVAL_S = 3.0
 IDLE_POLL_TIMEOUT_S = 120.0
@@ -271,6 +272,27 @@ def stop_suspected_idle_stall(
             continue
     if still_working:
         events.append("stop-suspected-idle-stall", lanes=still_working)
+        return True
+    return False
+
+
+def stop_suspected_mailbox_race(
+    substrate: Substrate, observed_pending: list[str], events: EventLog
+) -> bool:
+    """A brain `stop` is honored only when the mailbox did not change under it.
+
+    The cycle snapshot can observe an empty mailbox, then a steer/seed can land
+    before the stop is honored. Re-read the mailbox once; any file not present in
+    the cycle snapshot means the stop raced new work, so suppress it and let the
+    next cycle ingest the message.
+    """
+    try:
+        fresh_pending = current_mailbox_pending(substrate)
+    except SubstrateError:
+        return False
+    new_files = sorted(set(fresh_pending) - set(observed_pending))
+    if new_files:
+        events.append("stop-suspected-mailbox-race", files=new_files)
         return True
     return False
 

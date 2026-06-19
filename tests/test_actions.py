@@ -254,6 +254,21 @@ class _ReprobeSub:
         return status
 
 
+class _MailboxSub:
+    def __init__(self, pending: list[str]):
+        self.pending = pending
+        self.digest_calls = 0
+
+    def digest(self) -> dict:
+        self.digest_calls += 1
+        return {
+            "mailbox": {
+                "pending": [{"file": name} for name in self.pending],
+                "processed_count": 0,
+            },
+        }
+
+
 def test_stop_no_working_lane_executes_without_reprobe(tmp_path):
     # Genuinely-idle fleet => no re-probe, stop is honored (return False).
     paths, events = _env(tmp_path)
@@ -261,6 +276,23 @@ def test_stop_no_working_lane_executes_without_reprobe(tmp_path):
     assert actions.stop_suspected_idle_stall(sub, set(), events) is False
     assert sub.probed == []
     assert "stop-suspected-idle-stall" not in _events(events)
+
+
+def test_stop_new_mailbox_message_suppresses(tmp_path):
+    paths, events = _env(tmp_path)
+    sub = _MailboxSub(["20260610-010000-web-to-coord.md"])
+    assert actions.stop_suspected_mailbox_race(sub, [], events) is True
+    assert sub.digest_calls == 1
+    race = [e for e in events.tail(10) if e["event"] == "stop-suspected-mailbox-race"]
+    assert race and race[-1]["files"] == ["20260610-010000-web-to-coord.md"]
+
+
+def test_stop_unchanged_empty_mailbox_executes(tmp_path):
+    paths, events = _env(tmp_path)
+    sub = _MailboxSub([])
+    assert actions.stop_suspected_mailbox_race(sub, [], events) is False
+    assert sub.digest_calls == 1
+    assert "stop-suspected-mailbox-race" not in _events(events)
 
 
 def test_stop_reprobe_still_working_suppresses(tmp_path):

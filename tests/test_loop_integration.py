@@ -221,6 +221,13 @@ def test_observe_failed_skips_cycle_without_prior_snapshot(project, call_log, mo
     assert _brain_calls(call_log) == []  # never reached the brain
 
 
+def _empty_digest(self) -> dict:
+    return {
+        "state": {"loops": {}},
+        "mailbox": {"pending": [], "processed_count": 0},
+    }
+
+
 def test_stop_suppressed_when_lane_still_working(project, call_log, monkeypatch):
     # B2 (T0032): the brain stops while web shows working; a fresh re-probe still
     # shows web working => suspected idle-stall => the stop is suppressed and the
@@ -237,15 +244,49 @@ def test_stop_suppressed_when_lane_still_working(project, call_log, monkeypatch)
     assert len(_brain_calls(call_log)) == 1
 
 
+def test_stop_suppressed_when_mailbox_arrives_after_snapshot(project, call_log, monkeypatch):
+    # A steer/seed can land after observe but before the brain's stop is honored.
+    # The stop guard must re-read the mailbox and suppress the stop so the next
+    # cycle can ingest the new message.
+    paths = SessionPaths(project, "demo")
+    new_msg = "20260610-010000-web-to-coord.md"
+    calls = 0
+
+    def digest(self):
+        nonlocal calls
+        calls += 1
+        names = [] if calls == 1 else [new_msg]
+        return {
+            "state": {"loops": {}},
+            "mailbox": {"pending": [{"file": name} for name in names], "processed_count": 0},
+        }
+
+    monkeypatch.setattr(Substrate, "digest", digest)
+    monkeypatch.setenv("FAKE_BRAIN_MODE", "stop")
+
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+
+    events = _events(paths)
+    kinds = [e["event"] for e in events]
+    assert "stop-suspected-mailbox-race" in kinds
+    race = [e for e in events if e["event"] == "stop-suspected-mailbox-race"][-1]
+    assert race["files"] == [new_msg]
+    assert "gate" not in kinds
+    assert not paths.pending_decision_path.exists()
+    assert calls == 2
+
+
 def test_genuine_stop_executes_on_idle_fleet(project, call_log, monkeypatch):
-    # All lanes idle (no override) => no working lane => no re-probe => the stop
-    # is honored and processed normally (no idle-stall event).
+    # All lanes idle, with an empty mailbox that remains empty, is a real
+    # convergence stop and must still be honored.
+    monkeypatch.setattr(Substrate, "digest", _empty_digest)
     monkeypatch.setenv("FAKE_BRAIN_MODE", "stop")
     assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
 
     paths = SessionPaths(project, "demo")
     kinds = [e["event"] for e in _events(paths)]
     assert "stop-suspected-idle-stall" not in kinds
+    assert "stop-suspected-mailbox-race" not in kinds
     assert "gate" in kinds  # the stop decision was classified + processed
 
 

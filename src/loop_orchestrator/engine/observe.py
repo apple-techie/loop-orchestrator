@@ -121,6 +121,19 @@ def load_last_snapshot(snapshot_path: Path) -> EngineSnapshot | None:
     return EngineSnapshot.from_dict(data)
 
 
+def mailbox_pending_from_digest(digest: dict) -> list[str]:
+    mailbox = digest.get("mailbox") or {}
+    return [
+        str(item.get("file")) if isinstance(item, dict) else str(item)
+        for item in mailbox.get("pending") or []
+        if not isinstance(item, dict) or item.get("file")
+    ]
+
+
+def current_mailbox_pending(substrate: Substrate) -> list[str]:
+    return mailbox_pending_from_digest(substrate.digest())
+
+
 class Observer:
     def __init__(self, substrate: Substrate, paths: SessionPaths):
         self.substrate = substrate
@@ -132,10 +145,7 @@ class Observer:
         state = digest.get("state")
         loops = state.get("loops") if isinstance(state, dict) else None
         mailbox = digest.get("mailbox") or {}
-        pending = [
-            item["file"] if isinstance(item, dict) else str(item)
-            for item in mailbox.get("pending") or []
-        ]
+        pending = mailbox_pending_from_digest(digest)
         try:
             checkpoint_tokens: int | None = len(self.substrate.checkpoint_prompt()) // 4
         except SubstrateError:
