@@ -44,9 +44,7 @@ _INGEST_HEADING = "### Ingest protocol"
 
 # Timed-out asks stay visible in the checkpoint addendum this long.
 _ASK_TIMEOUT_RECENCY_S = 3600
-_VERIFY_DRIVE_OUTCOME_EVENTS = frozenset(
-    {"verify-passed", "verify-failed", "verify-timeout"}
-)
+_VERIFY_DRIVE_OUTCOME_EVENTS = frozenset({"verify-passed", "verify-failed", "verify-timeout"})
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
 _VERIFY_DIFF_TIMEOUT_S = 60
@@ -190,34 +188,22 @@ def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
 
 
 def _recent_verify_outcomes(paths: SessionPaths) -> list[dict]:
-    outcomes = [
-        event
-        for event in EventLog(paths.events_path).tail(_VERIFY_DRIVE_EVENT_TAIL)
-        if event.get("event") in _VERIFY_DRIVE_OUTCOME_EVENTS
-        and isinstance(event.get("window"), str)
-        and event.get("window")
-    ]
-    return outcomes[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
-
-
-def _loop_updated_after_outcome(snap: EngineSnapshot, window: str, outcome: dict) -> bool:
-    entry = snap.loops.get(window)
-    updated_at = entry.get("updated_at") if isinstance(entry, dict) else None
-    event_ts = outcome.get("ts")
-    if not isinstance(updated_at, str) or not isinstance(event_ts, str):
-        return False
-    try:
-        return parse_ts(updated_at) > parse_ts(event_ts)
-    except ValueError:
-        return False
+    latest_by_window: dict[str, dict] = {}
+    for event in EventLog(paths.events_path).tail(_VERIFY_DRIVE_EVENT_TAIL):
+        if event.get("event") not in _VERIFY_DRIVE_OUTCOME_EVENTS:
+            continue
+        window = event.get("window")
+        if not isinstance(window, str) or not window:
+            continue
+        latest_by_window.pop(window, None)
+        latest_by_window[window] = event
+    return list(latest_by_window.values())[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
 
 
 def _verify_drive_lines(snap: EngineSnapshot, paths: SessionPaths) -> list[str]:
     markers = actions_mod.load_verify_markers(paths)
     in_flight_windows = {
-        window
-        for marker in markers
-        if isinstance((window := marker.get("window")), str) and window
+        window for marker in markers if isinstance((window := marker.get("window")), str) and window
     }
     outcomes = _recent_verify_outcomes(paths)
     latest_outcome = {
@@ -234,8 +220,7 @@ def _verify_drive_lines(snap: EngineSnapshot, paths: SessionPaths) -> list[str]:
         branch = actions_mod._predecessor_branch(paths, lane)
         if branch is None:
             continue
-        outcome = latest_outcome.get(lane)
-        if outcome is not None and not _loop_updated_after_outcome(snap, lane, outcome):
+        if lane in latest_outcome:
             continue
         ready.append(f"- lane={lane} branch={branch} status=idle")
 
@@ -296,10 +281,11 @@ unattended + high-risk role -> the gate forces human approval."""
 
 
 _DRIVE_RUBRIC = """\
---- verify drive rubric (first match wins) ---
+--- verify drive rubric ---
+Act on each window's latest listed outcome only.
+latest verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
+latest verify-failed/verify-timeout -> propose `dispatch`/`steer` fix to that lane.
 ready-to-verify lane -> propose `verify` for that lane.
-recent verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
-recent verify-failed/verify-timeout -> propose `dispatch`/`steer` fix to that lane.
 Include the named findings in the fix payload.
 Never merge directly; the escalate action is the single human gate.
 Never escalate-merge a failed or timed-out build."""

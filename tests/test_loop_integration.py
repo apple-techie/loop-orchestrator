@@ -847,9 +847,7 @@ def test_prompt_verify_drive_addendum_and_rubric(project):
             "started_at": "2026-06-19T00:00:00Z",
         },
     )
-    EventLog(paths.events_path).append(
-        "verify-passed", window="passed", overall="pass", findings=2
-    )
+    EventLog(paths.events_path).append("verify-passed", window="passed", overall="pass", findings=2)
     snap = _prompt_snap(
         {
             "passed": {"status": "idle", "target": "", "kind": "claude"},
@@ -863,12 +861,36 @@ def test_prompt_verify_drive_addendum_and_rubric(project):
 
     assert "--- verify drive ---" in prompt
     assert "ready-to-verify:\n- lane=ready branch=loop/demo/ready status=idle" in prompt
+    assert "- lane=passed branch=loop/demo/passed status=idle" not in prompt
     assert "verify in flight:\n- window=verifying branch=loop/demo/verifying" in prompt
     assert (
         "recent verify outcomes:\n- window=passed event=verify-passed "
         "overall=pass findings=2 branch=loop/demo/passed"
     ) in prompt
     assert _DRIVE_RUBRIC in prompt
+
+
+def test_prompt_verify_drive_shows_latest_outcome_per_window(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append("verify-passed", window="flaky", overall="pass", findings=0)
+    events.append("verify-failed", window="flaky", overall="fail", findings=1)
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert (
+        "recent verify outcomes:\n- window=flaky event=verify-failed "
+        "overall=fail findings=1 branch=loop/demo/flaky"
+    ) in prompt
+    assert "window=flaky event=verify-passed" not in prompt
+    assert "- lane=flaky branch=loop/demo/flaky status=idle" not in prompt
 
 
 def test_prompt_without_verify_drive_state_is_byte_identical(project):
@@ -1140,9 +1162,7 @@ def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monke
     assert [pid for pid, _sig in killed] == [123, 123]
 
 
-def test_surface_verify_timeout_permission_error_does_not_crash_and_clears(
-    project, monkeypatch
-):
+def test_surface_verify_timeout_permission_error_does_not_crash_and_clears(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     events = EventLog(paths.events_path)
@@ -1154,9 +1174,7 @@ def test_surface_verify_timeout_permission_error_does_not_crash_and_clears(
         "started_at": "2000-01-01T00:00:00Z",
     }
     record_verify_marker(paths, marker)
-    monkeypatch.setattr(
-        Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify"
-    )
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify")
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
 
     def deny(_pgid, _sig):
@@ -1326,9 +1344,7 @@ def test_surface_verify_marker_read_modify_write_is_under_file_lock(project, mon
 
     monkeypatch.setattr(loop_mod, "file_lock", recording_lock)
     monkeypatch.setattr(loop_mod.actions_mod, "load_verify_markers", guarded_load)
-    monkeypatch.setattr(
-        Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify"
-    )
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify")
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: None)
 
