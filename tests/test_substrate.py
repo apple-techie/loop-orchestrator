@@ -206,6 +206,37 @@ def test_git_diff_failure_raises_substrate_error(sub, monkeypatch):
     assert "bad rev" in exc.value.stderr
 
 
+def test_branch_head_returns_rev_parse_stdout(sub, monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    calls: list[tuple[list[str], Path, float]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
+        return substrate_mod.subprocess.CompletedProcess(
+            argv, 0, stdout="abc123\n", stderr=""
+        )
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    assert sub.branch_head(worktree, "loop/demo/web") == "abc123"
+    assert calls == [(["git", "rev-parse", "loop/demo/web"], worktree, 5)]
+
+
+def test_branch_head_returns_none_on_git_error(sub, monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    def fake_run(argv, **kwargs):
+        return substrate_mod.subprocess.CompletedProcess(
+            argv, 128, stdout="", stderr="unknown revision\n"
+        )
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    assert sub.branch_head(worktree, "loop/demo/missing") is None
+
+
 def test_process_command_returns_ps_command(sub, monkeypatch):
     calls: list[tuple[list[str], float]] = []
 

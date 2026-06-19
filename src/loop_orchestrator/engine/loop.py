@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 
-from ..locking import atomic_write_json, file_lock
+from ..locking import atomic_write_json, file_lock, read_json
 from ..paths import SessionPaths
 from ..pm import registry as pm_registry
 from ..pm.base import PMAdapter
@@ -105,9 +105,17 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 findings_raw = result.get("findings")
                 findings = len(findings_raw) if isinstance(findings_raw, list) else 0
                 event = "verify-passed" if overall == "pass" else "verify-failed"
+                window = marker.get("window")
+                branch = marker.get("branch")
+                if isinstance(window, str) and window and isinstance(branch, str) and branch:
+                    verified_tip = substrate.branch_head(
+                        actions_mod._lane_worktree(paths, window), branch
+                    )
+                    if verified_tip is not None:
+                        _record_verified_tip(paths, window, verified_tip)
                 events.append(
                     event,
-                    window=marker.get("window"),
+                    window=window,
                     overall=overall,
                     findings=findings,
                 )
@@ -134,6 +142,22 @@ def _save_verify_markers_best_effort(
         events.append("verify-marker-save-failed", error=str(exc))
         return False
     return True
+
+
+def _record_verified_tip(paths: SessionPaths, window: str, verified_tip: str) -> None:
+    ledger = read_json(paths.state_file, {})
+    if not isinstance(ledger, dict):
+        ledger = {}
+    loops = ledger.get("loops")
+    if not isinstance(loops, dict):
+        loops = {}
+        ledger["loops"] = loops
+    entry = loops.get(window)
+    if not isinstance(entry, dict):
+        entry = {}
+        loops[window] = entry
+    entry["verified_tip"] = verified_tip
+    atomic_write_json(paths.state_file, ledger)
 
 
 def _terminate_verify_runner(
@@ -187,7 +211,7 @@ def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
     return lines or ["(none)"]
 
 
-def _recent_verify_outcomes(paths: SessionPaths) -> list[dict]:
+def _latest_verify_outcomes(paths: SessionPaths) -> list[dict]:
     latest_by_window: dict[str, dict] = {}
     for event in EventLog(paths.events_path).tail(_VERIFY_DRIVE_EVENT_TAIL):
         if event.get("event") not in _VERIFY_DRIVE_OUTCOME_EVENTS:
@@ -197,18 +221,35 @@ def _recent_verify_outcomes(paths: SessionPaths) -> list[dict]:
             continue
         latest_by_window.pop(window, None)
         latest_by_window[window] = event
-    return list(latest_by_window.values())[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
+    return list(latest_by_window.values())
 
 
-def _verify_drive_lines(snap: EngineSnapshot, paths: SessionPaths) -> list[str]:
+def _recent_verify_outcomes(paths: SessionPaths) -> list[dict]:
+    return _latest_verify_outcomes(paths)[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
+
+
+def _verified_tip(paths: SessionPaths, lane: str) -> str | None:
+    ledger = read_json(paths.state_file, {})
+    loops = ledger.get("loops") if isinstance(ledger, dict) else None
+    entry = loops.get(lane) if isinstance(loops, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    verified_tip = entry.get("verified_tip")
+    return verified_tip if isinstance(verified_tip, str) and verified_tip else None
+
+
+def _verify_drive_lines(
+    substrate: Substrate, snap: EngineSnapshot, paths: SessionPaths
+) -> list[str]:
     markers = actions_mod.load_verify_markers(paths)
     in_flight_windows = {
         window for marker in markers if isinstance((window := marker.get("window")), str) and window
     }
-    outcomes = _recent_verify_outcomes(paths)
+    latest_outcomes = _latest_verify_outcomes(paths)
+    outcomes = latest_outcomes[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
     latest_outcome = {
         str(outcome["window"]): outcome
-        for outcome in outcomes
+        for outcome in latest_outcomes
         if isinstance(outcome.get("window"), str)
     }
 
@@ -220,7 +261,11 @@ def _verify_drive_lines(snap: EngineSnapshot, paths: SessionPaths) -> list[str]:
         branch = actions_mod._predecessor_branch(paths, lane)
         if branch is None:
             continue
-        if lane in latest_outcome:
+        head = substrate.branch_head(actions_mod._lane_worktree(paths, lane), branch)
+        if head is None:
+            if lane in latest_outcome:
+                continue
+        elif head == _verified_tip(paths, lane):
             continue
         ready.append(f"- lane={lane} branch={branch} status=idle")
 
@@ -363,7 +408,7 @@ def _assemble_prompt(
         lines.append("(none)")
     lines.append("--- outstanding asks ---")
     lines.extend(_ask_lines(actions_mod.load_asks(paths), datetime.now(timezone.utc)))
-    verify_drive = _verify_drive_lines(snap, paths)
+    verify_drive = _verify_drive_lines(substrate, snap, paths)
     if verify_drive:
         lines.extend(verify_drive)
         lines.append(_DRIVE_RUBRIC)

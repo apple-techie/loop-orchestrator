@@ -182,6 +182,25 @@ class Substrate:
             raise SubstrateError(argv, proc.returncode, proc.stderr)
         return proc.stdout
 
+    def branch_head(self, worktree: str | Path, branch: str, timeout: float = 5) -> str | None:
+        if not branch.strip():
+            return None
+        argv = ["git", "rev-parse", branch]
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=Path(worktree),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        sha = proc.stdout.strip()
+        return sha or None
+
     def process_command(self, pid: int, timeout: float = 2) -> str | None:
         argv = ["ps", "-p", str(pid), "-o", "command="]
         proc = self._run_process(argv, timeout)
