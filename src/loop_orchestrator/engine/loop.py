@@ -647,8 +647,9 @@ build in flight -> wait; do not propose another `build` for that window.
 latest build-done -> lane is ready-to-verify.
 latest build-timeout -> propose a narrower `build` for that lane.
 latest verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
-latest verify-failed/verify-timeout -> propose a `build` for that lane with a fix brief listing the named findings. These are headless worktree lanes — fix via `build` (re-runs codex exec on the branch), NEVER `dispatch`/`steer` (the lane has no live agent to receive a paste).
+latest verify-failed/verify-timeout -> propose a `build` for that lane with a fix brief.
 ready-to-verify lane -> propose `verify` for that lane.
+These are headless worktree lanes: drive them with `build`/`verify`, NEVER `dispatch`/`steer`.
 Include the named findings in the build fix brief.
 Never merge directly; the escalate action is the single human gate.
 Never escalate-merge a failed or timed-out build."""
