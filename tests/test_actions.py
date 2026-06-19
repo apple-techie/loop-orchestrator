@@ -118,12 +118,16 @@ def test_handoff_breadcrumb_is_append_only(tmp_path):
 
 
 class AddLaneSub:
-    def __init__(self, branch_heads: list[str | None] | None = None):
+    def __init__(self, branch_heads: list[str | None] | None = None, dirty: bool = False):
         self.calls: list[dict] = []
         self.dispatched: list[tuple] = []
         self.verifies: list[dict] = []
         self.builds: list[dict] = []
         self.branch_heads = list(branch_heads or [])
+        self.dirty = dirty
+
+    def worktree_dirty(self, worktree):
+        return self.dirty
 
     def add_lane(self, window, **kwargs):
         self.calls.append({"window": window, **kwargs})
@@ -779,6 +783,28 @@ def test_build_action_skips_when_marker_exists(tmp_path):
     assert skipped
     assert skipped[-1]["window"] == "web"
     assert skipped[-1]["reason"] == "in-progress"
+
+
+def test_build_action_skips_when_worktree_dirty(tmp_path):
+    # Decoupled eligibility can hint a build for a lane an interactive agent is
+    # mid-task in; the spawn-boundary clean-tree guard must refuse it (no spawn,
+    # no marker) so uncommitted work is never built over.
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub(branch_heads=["sha-a"], dirty=True)
+
+    actions.execute(
+        {"kind": "build", "window": "web", "brief": "implement", "rationale": "ready"},
+        sub,
+        events,
+        EngineConfig(),
+        paths=paths,
+    )
+
+    assert sub.builds == []
+    assert actions.load_build_markers(paths) == []
+    skipped = [e for e in events.tail(10) if e["event"] == "build-skip"]
+    assert skipped and skipped[-1]["reason"] == "worktree-dirty"
 
 
 def test_build_action_omits_pre_build_sha_when_branch_head_is_unresolved(tmp_path):

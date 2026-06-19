@@ -529,6 +529,13 @@ def execute(
                     pid=existing.get("pid"),
                 )
                 return
+            # Never spawn a headless codex-exec build over a dirty worktree: drive
+            # eligibility is decoupled from the tmux pane, so a lane an interactive
+            # agent is mid-task in (with uncommitted edits) could otherwise be built
+            # over and its work buried. A clean tree is the spawn-boundary guard.
+            if substrate.worktree_dirty(worktree):
+                events.append("build-skip", window=window, reason="worktree-dirty")
+                return
             pre_build_sha = substrate.branch_head(worktree, branch)
             pid = substrate.spawn_build(worktree, _build_brief(str(action.get("brief") or "")))
             marker = {

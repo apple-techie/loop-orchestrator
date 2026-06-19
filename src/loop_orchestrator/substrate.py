@@ -201,6 +201,26 @@ class Substrate:
         sha = proc.stdout.strip()
         return sha or None
 
+    def worktree_dirty(self, worktree: str | Path, timeout: float = 5) -> bool:
+        """True if the worktree has uncommitted or untracked changes (git status
+        --porcelain non-empty) — so a headless build never writes over an
+        interactive agent's in-pane edits. Conservative on error: cannot-confirm
+        reads as dirty (refuse the build) rather than risk a clobber."""
+        argv = ["git", "status", "--porcelain"]
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=Path(worktree),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return True
+        if proc.returncode != 0:
+            return True
+        return bool(proc.stdout.strip())
+
     def process_command(self, pid: int, timeout: float = 2) -> str | None:
         argv = ["ps", "-p", str(pid), "-o", "command="]
         proc = self._run_process(argv, timeout)
@@ -246,9 +266,7 @@ class Substrate:
                 return bytes(chunks)
             chunks.extend(chunk)
 
-    def _spawn_detached(
-        self, argv: list[str], log_path: Path, cwd: str | Path, label: str
-    ) -> int:
+    def _spawn_detached(self, argv: list[str], log_path: Path, cwd: str | Path, label: str) -> int:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         pid_read_fd, pid_write_fd = self._cloexec_pipe()
         exec_read_fd, exec_write_fd = self._cloexec_pipe()
