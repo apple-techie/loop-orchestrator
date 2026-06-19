@@ -649,7 +649,15 @@ def run_once(
         if actions_mod.stop_suspected_idle_stall(substrate, working_lanes, events):
             events.append("cycle-end", outcome="stop-suspected-idle-stall")
             return 0
-        if actions_mod.stop_suspected_mailbox_race(substrate, snap.mailbox_pending, events):
+        # Skip the mailbox-race guard on a STALE snapshot: its baseline
+        # (snap.mailbox_pending) is then old/unreliable, so diffing the fresh
+        # mailbox against it would read every currently-pending message as "new"
+        # and spuriously suppress the stop every cycle. A stale observe already
+        # signalled degraded substrate; honor the stop (a no-op) and let a fresh
+        # cycle re-evaluate.
+        if not stale and actions_mod.stop_suspected_mailbox_race(
+            substrate, snap.mailbox_pending, events
+        ):
             events.append("cycle-end", outcome="stop-suspected-mailbox-race")
             return 0
     governed, governance_events = gate.govern_add_lanes(parsed.actions, config, roster)

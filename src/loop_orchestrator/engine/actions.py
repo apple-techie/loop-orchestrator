@@ -288,7 +288,10 @@ def stop_suspected_mailbox_race(
     """
     try:
         fresh_pending = current_mailbox_pending(substrate)
-    except SubstrateError:
+    except SubstrateError as exc:
+        # Fail-open (honor the stop) so a flaky digest can't wedge the loop open,
+        # but record it — previously the only silent degrade path in this module.
+        events.append("stop-mailbox-recheck-failed", error=str(exc))
         return False
     new_files = sorted(set(fresh_pending) - set(observed_pending))
     if new_files:

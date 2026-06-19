@@ -276,6 +276,44 @@ def test_stop_suppressed_when_mailbox_arrives_after_snapshot(project, call_log, 
     assert calls == 2
 
 
+def test_stop_not_suppressed_by_mailbox_race_when_snapshot_stale(project, call_log, monkeypatch):
+    # T0045 hardening: on a STALE snapshot the mailbox-race guard's baseline
+    # (snap.mailbox_pending) is unreliable, so diffing a fresh mailbox against it
+    # would read every pending message as "new" and spuriously suppress the stop
+    # every cycle. The guard must be SKIPPED when stale and the stop honored.
+    from loop_orchestrator.engine.observe import Observer
+    from loop_orchestrator.substrate import SubstrateError
+
+    # First cycle seeds snapshot.json with an empty mailbox baseline.
+    monkeypatch.setenv("FAKE_BRAIN_MODE", "stop")
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+    paths = SessionPaths(project, "demo")
+
+    # Next observe falls back to the stale snapshot; the fresh mailbox read (were
+    # the guard NOT skipped) would look like a new message arrived — which must be
+    # ignored on a stale baseline.
+    def boom(self):
+        raise SubstrateError(["loop-lane-status", "--json", "--all"], None, "timed out")
+
+    def digest(self):
+        return {
+            "state": {"loops": {}},
+            "mailbox": {
+                "pending": [{"file": "20260610-010000-web-to-coord.md"}],
+                "processed_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(Observer, "snapshot", boom)
+    monkeypatch.setattr(Substrate, "digest", digest)
+
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+    kinds = [e["event"] for e in _events(paths)]
+    assert "observe-stale" in kinds  # the cycle ran on a stale snapshot
+    assert "stop-suspected-mailbox-race" not in kinds  # guard skipped, not spurious-suppressed
+    assert "gate" in kinds  # the stop was honored (reached the gate)
+
+
 def test_genuine_stop_executes_on_idle_fleet(project, call_log, monkeypatch):
     # All lanes idle, with an empty mailbox that remains empty, is a real
     # convergence stop and must still be honored.

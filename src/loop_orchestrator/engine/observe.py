@@ -122,10 +122,13 @@ def load_last_snapshot(snapshot_path: Path) -> EngineSnapshot | None:
 
 
 def mailbox_pending_from_digest(digest: dict) -> list[str]:
-    mailbox = digest.get("mailbox") or {}
+    mailbox = digest.get("mailbox") if isinstance(digest.get("mailbox"), dict) else {}
+    pending = mailbox.get("pending")
+    if not isinstance(pending, list):
+        return []  # a malformed digest (e.g. a string) must not iterate char-by-char
     return [
         str(item.get("file")) if isinstance(item, dict) else str(item)
-        for item in mailbox.get("pending") or []
+        for item in pending
         if not isinstance(item, dict) or item.get("file")
     ]
 
