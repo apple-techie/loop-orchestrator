@@ -31,7 +31,7 @@ _TAIL_LINES = 80
 _VERDICTS = {"pass", "concerns", "fail"}
 _FAIL_SEVERITIES = {"critical", "high"}
 _CONCERN_SEVERITIES = {"medium", "low"}
-_JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
+_VERDICT_FENCE_RE = re.compile(r"```verdict[ \t]*\n(.*?)```", re.DOTALL)
 
 _LENS_INSTRUCTIONS = {
     "code-review": (
@@ -107,7 +107,9 @@ def _prompt(lens: str, diff: str) -> str:
             "",
             instruction,
             "",
-            "Reply with ONLY one fenced JSON block using this shape:",
+            "End your reply with EXACTLY ONE fenced block whose info-string is `verdict`; "
+            "do not put a `verdict` block anywhere else.",
+            "The verdict block body must be JSON using this shape:",
             '```json\n{"verdict":"pass|concerns|fail","findings":[{"severity":"critical|high|medium|low","title":"...","detail":"..."}],"summary":"..."}\n```',
             "",
             "--- diff ---",
@@ -132,17 +134,14 @@ def _argv_for_prompt(worktree: Path, prompt: str, harness: str | None) -> tuple[
 def _parse_lens_reply(lens: str, reply: str) -> LensResult:
     doc = None
     last_error: json.JSONDecodeError | None = None
-    for raw in reversed([match.group(1).strip() for match in _JSON_FENCE_RE.finditer(reply)]):
+    for raw in reversed([match.group(1).strip() for match in _VERDICT_FENCE_RE.finditer(reply)]):
         try:
             doc = json.loads(raw)
             break
         except json.JSONDecodeError as exc:
             last_error = exc
     if doc is None:
-        try:
-            doc = json.loads(reply.strip())
-        except json.JSONDecodeError as exc:
-            return _parse_note(lens, f"parse error: {last_error or exc}")
+        return _parse_note(lens, f"parse error: no parseable verdict fence ({last_error})")
     if not isinstance(doc, dict):
         return _parse_note(lens, "parse error: JSON block is not an object")
     verdict = str(doc.get("verdict", "")).lower()

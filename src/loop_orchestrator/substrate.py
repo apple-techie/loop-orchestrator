@@ -170,6 +170,10 @@ class Substrate:
         return True, "\n".join(chunks)
 
     def git_diff(self, base: str, tip: str, timeout: float = 60) -> str:
+        if not base.strip():
+            raise SubstrateError(["git", "diff"], None, "base ref must be non-empty")
+        if not tip.strip():
+            raise SubstrateError(["git", "diff"], None, "tip ref must be non-empty")
         argv = ["git", "diff", f"{base}..{tip}"]
         proc = self._run_process(argv, timeout)
         if proc.returncode != 0:

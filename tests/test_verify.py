@@ -46,6 +46,10 @@ def _json_reply(verdict: str, severity: str = "low") -> str:
     )
 
 
+def _verdict_reply(verdict: str, severity: str = "low") -> str:
+    return f"```verdict\n{_json_reply(verdict, severity)}\n```"
+
+
 def _set_gate(monkeypatch, passed: bool) -> None:
     monkeypatch.setattr(
         verify,
@@ -59,7 +63,7 @@ def _set_gate(monkeypatch, passed: bool) -> None:
 def test_all_pass_is_overall_pass(tmp_path, monkeypatch):
     worktree, base, tip = _repo(tmp_path)
     _set_gate(monkeypatch, True)
-    one = _stub(tmp_path / "one", f"cat <<'EOF'\n```json\n{_json_reply('pass')}\n```\nEOF\n")
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n{_verdict_reply('pass')}\nEOF\n")
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
 
     result = verify.run_verify(worktree, base, tip, timeout_s=5)
@@ -78,7 +82,7 @@ def test_lens_fail_is_overall_fail(tmp_path, monkeypatch):
         "prompt=\"${@: -1}\"\n"
         f"if [[ \"$prompt\" == *\"adversarial\"* ]]; then reply='{_json_reply('fail')}'; "
         f"else reply='{_json_reply('pass')}'; fi\n"
-        "printf '%s\\n%s\\n%s\\n' '```json' \"$reply\" '```'\n",
+        "printf '%s\\n%s\\n%s\\n' '```verdict' \"$reply\" '```'\n",
     )
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
 
@@ -118,7 +122,7 @@ def test_garbled_reply_degrades_to_concerns_parse_note(tmp_path, monkeypatch):
     assert result.findings[0]["title"] == "parse-note"
 
 
-def test_last_parseable_json_fence_wins(tmp_path, monkeypatch):
+def test_verdict_fence_wins_after_json_example(tmp_path, monkeypatch):
     worktree, base, tip = _repo(tmp_path)
     _set_gate(monkeypatch, True)
     reply = "\n".join(
@@ -128,8 +132,33 @@ def test_last_parseable_json_fence_wins(tmp_path, monkeypatch):
             _json_reply("pass"),
             "```",
             "Real verdict:",
-            "```json",
+            "```verdict",
             _json_reply("fail", "critical"),
+            "```",
+        ]
+    )
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n{reply}\nEOF\n")
+    monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
+
+    result = verify.run_verify(worktree, base, tip, lenses=("adversarial",), timeout_s=5)
+
+    assert result.overall == "fail"
+    assert result.lenses[0].verdict == "fail"
+    assert result.findings[0]["severity"] == "critical"
+
+
+def test_verdict_fence_wins_before_json_example(tmp_path, monkeypatch):
+    worktree, base, tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+    reply = "\n".join(
+        [
+            "Real verdict:",
+            "```verdict",
+            _json_reply("fail", "critical"),
+            "```",
+            "Example only:",
+            "```json",
+            _json_reply("pass"),
             "```",
         ]
     )
@@ -154,10 +183,21 @@ def test_empty_diff_is_concern_not_pass(tmp_path, monkeypatch):
     assert "nothing to review" in result.lenses[0].error
 
 
+def test_blank_base_ref_is_fail_not_empty_diff_concern(tmp_path, monkeypatch):
+    worktree, _base, tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+
+    result = verify.run_verify(worktree, "", tip, lenses=("code-review",), timeout_s=5)
+
+    assert result.overall == "fail"
+    assert result.lenses[0].lens == "diff"
+    assert "base ref must be non-empty" in result.lenses[0].error
+
+
 def test_verify_result_includes_generated_at(tmp_path, monkeypatch):
     worktree, base, tip = _repo(tmp_path)
     _set_gate(monkeypatch, True)
-    one = _stub(tmp_path / "one", f"cat <<'EOF'\n```json\n{_json_reply('pass')}\n```\nEOF\n")
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n{_verdict_reply('pass')}\nEOF\n")
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
 
     result = verify.run_verify(worktree, base, tip, lenses=("code-review",), timeout_s=5)
@@ -186,7 +226,7 @@ def test_parallel_lenses_use_distinct_transcript_locations(tmp_path, monkeypatch
     one = _stub(
         tmp_path / "one",
         "sleep 0.1\n"
-        f"cat <<'EOF'\n```json\n{_json_reply('pass')}\n```\nEOF\n",
+        f"cat <<'EOF'\n{_verdict_reply('pass')}\nEOF\n",
     )
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
 
@@ -214,7 +254,7 @@ def test_parallel_lenses_use_distinct_transcript_locations(tmp_path, monkeypatch
 def test_cli_exit_codes_and_out_write(tmp_path, monkeypatch):
     worktree, base, tip = _repo(tmp_path)
     _set_gate(monkeypatch, True)
-    one = _stub(tmp_path / "one", f"cat <<'EOF'\n```json\n{_json_reply('pass')}\n```\nEOF\n")
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n{_verdict_reply('pass')}\nEOF\n")
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
     out = tmp_path / "verify.json"
 
@@ -229,7 +269,7 @@ def test_cli_exit_codes_and_out_write(tmp_path, monkeypatch):
 
     fail_one = _stub(
         tmp_path / "fail-one",
-        f"cat <<'EOF'\n```json\n{_json_reply('fail')}\n```\nEOF\n",
+        f"cat <<'EOF'\n{_verdict_reply('fail')}\nEOF\n",
     )
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(fail_one))
     assert verify.main(["--worktree", str(worktree), "--base", base, "--tip", tip]) == 1
