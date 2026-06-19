@@ -136,6 +136,74 @@ def test_harness_roster_parses_entries(sub, monkeypatch):
     assert roster["amp"]["drift_pins"] == "high"
 
 
+def test_run_gate_runs_make_check_then_pytest(sub, monkeypatch):
+    calls: list[tuple[list[str], Path, float]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
+        return substrate_mod.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=f"ok {' '.join(argv)}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    passed, output = sub.run_gate(timeout=12)
+
+    assert passed is True
+    assert [argv for argv, _cwd, _timeout in calls] == [
+        ["make", "check"],
+        ["uv", "run", "pytest"],
+    ]
+    assert {cwd for _argv, cwd, _timeout in calls} == {sub.project_root}
+    assert {timeout for _argv, _cwd, timeout in calls} == {12}
+    assert "ok make check" in output
+    assert "ok uv run pytest" in output
+
+
+def test_run_gate_stops_on_first_failure(sub, monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return substrate_mod.subprocess.CompletedProcess(argv, 2, stdout="", stderr="bad\n")
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    passed, output = sub.run_gate(timeout=12)
+
+    assert passed is False
+    assert calls == [["make", "check"]]
+    assert "bad" in output
+
+
+def test_git_diff_returns_stdout(sub, monkeypatch):
+    calls: list[tuple[list[str], Path, float]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
+        return substrate_mod.subprocess.CompletedProcess(argv, 0, stdout="diff --git a b\n", stderr="")
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    assert sub.git_diff("base", "tip", timeout=8) == "diff --git a b\n"
+    assert calls == [(["git", "diff", "base..tip"], sub.project_root, 8)]
+
+
+def test_git_diff_failure_raises_substrate_error(sub, monkeypatch):
+    def fake_run(argv, **kwargs):
+        return substrate_mod.subprocess.CompletedProcess(argv, 128, stdout="", stderr="bad rev\n")
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    with pytest.raises(SubstrateError) as exc:
+        sub.git_diff("base", "tip")
+    assert exc.value.returncode == 128
+    assert "bad rev" in exc.value.stderr
+
+
 def test_dispatch_argv_order(sub, call_log):
     sub.dispatch("web", "echo hi", wait_ready=True, interrupt=True)
     sub.dispatch("docs", "hello", mode="command")

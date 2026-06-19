@@ -135,6 +135,47 @@ class Substrate:
             ) from exc
         return check_contract(payload, name)
 
+    def _run_process(self, argv: list[str], timeout: float) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=self.project_root,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            raise SubstrateError(
+                argv, None, f"timed out after {timeout}s\n{stdout}{stderr}"
+            ) from exc
+        except OSError as exc:
+            raise SubstrateError(argv, None, f"spawn failed: {exc}") from exc
+
+    # ── verify runner ─────────────────────────────────────────────────────
+
+    def run_gate(self, timeout: float) -> tuple[bool, str]:
+        chunks: list[str] = []
+        for argv in (["make", "check"], ["uv", "run", "pytest"]):
+            try:
+                proc = self._run_process(argv, timeout)
+            except SubstrateError as exc:
+                chunks.append(f"$ {' '.join(argv)}\n{exc.stderr}")
+                return False, "\n".join(chunks)
+            output = f"$ {' '.join(argv)}\n{proc.stdout}{proc.stderr}"
+            chunks.append(output)
+            if proc.returncode != 0:
+                return False, "\n".join(chunks)
+        return True, "\n".join(chunks)
+
+    def git_diff(self, base: str, tip: str, timeout: float = 60) -> str:
+        argv = ["git", "diff", f"{base}..{tip}"]
+        proc = self._run_process(argv, timeout)
+        if proc.returncode != 0:
+            raise SubstrateError(argv, proc.returncode, proc.stderr)
+        return proc.stdout
+
     # ── lanes ─────────────────────────────────────────────────────────────
 
     def lanes(self) -> list[LaneInfo]:

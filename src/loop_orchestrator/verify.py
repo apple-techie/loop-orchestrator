@@ -12,7 +12,6 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,9 +20,9 @@ from pathlib import Path
 
 from .engine.brain import BrainInvocationError, oneshot_argv, run_oneshot
 from .engine.config import load_config
-from .engine.events import EventLog
+from .engine.events import EventLog, utc_now
 from .paths import SessionPaths
-from .substrate import Substrate
+from .substrate import Substrate, SubstrateError
 
 DEFAULT_LENSES = ("code-review", "silent-failure", "adversarial")
 DEFAULT_GATE_TIMEOUT_S = 900
@@ -32,6 +31,7 @@ _TAIL_LINES = 80
 _VERDICTS = {"pass", "concerns", "fail"}
 _FAIL_SEVERITIES = {"critical", "high"}
 _CONCERN_SEVERITIES = {"medium", "low"}
+_JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 _LENS_INSTRUCTIONS = {
     "code-review": (
@@ -87,43 +87,16 @@ def _tail(text: str, lines: int = _TAIL_LINES) -> str:
     return "\n".join(parts[-lines:])
 
 
-def _run_cmd(worktree: Path, argv: list[str], timeout_s: int) -> tuple[int, str]:
-    try:
-        proc = subprocess.run(
-            argv,
-            cwd=worktree,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-        return 124, f"$ {' '.join(argv)}\nTIMED OUT after {timeout_s}s\n{stdout}{stderr}"
-    except OSError as exc:
-        return 127, f"$ {' '.join(argv)}\nspawn failed: {exc}"
-    return proc.returncode, f"$ {' '.join(argv)}\n{proc.stdout}{proc.stderr}"
-
-
 def _run_gate(worktree: str | Path, timeout_s: int = DEFAULT_GATE_TIMEOUT_S) -> GateResult:
-    root = Path(worktree)
-    chunks: list[str] = []
-    for argv in (["make", "check"], ["uv", "run", "pytest"]):
-        code, output = _run_cmd(root, argv, timeout_s)
-        chunks.append(output)
-        if code != 0:
-            return GateResult(False, _tail("\n".join(chunks)))
-    return GateResult(True, _tail("\n".join(chunks)))
+    passed, output = Substrate(worktree, "verify").run_gate(timeout_s)
+    return GateResult(passed, _tail(output))
 
 
 def _git_diff(worktree: Path, base: str, tip: str, timeout_s: int = 60) -> str:
-    code, output = _run_cmd(
-        worktree, ["git", "-C", str(worktree), "diff", f"{base}..{tip}"], timeout_s
-    )
-    if code != 0:
-        raise RuntimeError(_tail(output))
-    return output.split("\n", 1)[1] if output.startswith("$ ") and "\n" in output else output
+    try:
+        return Substrate(worktree, "verify").git_diff(base, tip, timeout_s)
+    except SubstrateError as exc:
+        raise RuntimeError(_tail(str(exc))) from exc
 
 
 def _prompt(lens: str, diff: str) -> str:
@@ -151,18 +124,25 @@ def _argv_for_prompt(worktree: Path, prompt: str, harness: str | None) -> tuple[
     config = load_config(worktree)
     effective_harness = harness or config.brain.harness
     argv = oneshot_argv(Substrate(worktree, "verify").oneshot_template(effective_harness), prompt)
-    if harness is None:
+    if effective_harness == config.brain.harness:
         argv += list(config.brain.extra_args)
     return argv, effective_harness
 
 
 def _parse_lens_reply(lens: str, reply: str) -> LensResult:
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", reply, re.DOTALL | re.IGNORECASE)
-    raw = match.group(1) if match else reply.strip()
-    try:
-        doc = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return _parse_note(lens, f"parse error: {exc}")
+    doc = None
+    last_error: json.JSONDecodeError | None = None
+    for raw in reversed([match.group(1).strip() for match in _JSON_FENCE_RE.finditer(reply)]):
+        try:
+            doc = json.loads(raw)
+            break
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    if doc is None:
+        try:
+            doc = json.loads(reply.strip())
+        except json.JSONDecodeError as exc:
+            return _parse_note(lens, f"parse error: {last_error or exc}")
     if not isinstance(doc, dict):
         return _parse_note(lens, "parse error: JSON block is not an object")
     verdict = str(doc.get("verdict", "")).lower()
@@ -224,6 +204,27 @@ def _error_note(lens: str, message: str) -> LensResult:
     )
 
 
+def _lens_transcript_dir(base_dir: Path, lens: str) -> Path:
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", lens).strip(".-") or "lens"
+    return base_dir / name
+
+
+def _result(
+    *,
+    overall: str,
+    gate: GateResult,
+    lenses: list[LensResult],
+    findings: list[dict],
+) -> VerifyResult:
+    return VerifyResult(
+        overall=overall,
+        gate=gate,
+        lenses=lenses,
+        findings=findings,
+        generated_at=utc_now(),
+    )
+
+
 def _run_lens(
     worktree: Path,
     lens: str,
@@ -239,7 +240,7 @@ def _run_lens(
         reply = run_oneshot(
             argv,
             prompt,
-            transcript_dir,
+            _lens_transcript_dir(transcript_dir, lens),
             timeout_s,
             events,
             "verify",
@@ -281,14 +282,22 @@ def run_verify(
     gate = _run_gate(root)
     if not gate.passed:
         overall, findings = _aggregate(gate, [])
-        return VerifyResult(overall=overall, gate=gate, lenses=[], findings=findings)
+        return _result(overall=overall, gate=gate, lenses=[], findings=findings)
 
     try:
         diff = _git_diff(root, base, tip)
     except RuntimeError as exc:
         lens_result = _error_note("diff", str(exc))
-        return VerifyResult(
+        return _result(
             overall="fail",
+            gate=gate,
+            lenses=[lens_result],
+            findings=lens_result.findings,
+        )
+    if not diff.strip():
+        lens_result = _error_note("diff", f"nothing to review: git diff {base}..{tip} is empty")
+        return _result(
+            overall="concerns",
             gate=gate,
             lenses=[lens_result],
             findings=lens_result.findings,
@@ -323,7 +332,7 @@ def run_verify(
 
     ordered = [by_lens[lens] for lens in lens_names]
     overall, findings = _aggregate(gate, ordered)
-    return VerifyResult(overall=overall, gate=gate, lenses=ordered, findings=findings)
+    return _result(overall=overall, gate=gate, lenses=ordered, findings=findings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

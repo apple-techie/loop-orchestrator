@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 
 from loop_orchestrator import verify
+from loop_orchestrator.paths import SessionPaths
 
 
 def _stub(path: Path, body: str) -> Path:
@@ -115,6 +116,99 @@ def test_garbled_reply_degrades_to_concerns_parse_note(tmp_path, monkeypatch):
     assert result.lenses[0].verdict == "concerns"
     assert "parse" in result.lenses[0].error
     assert result.findings[0]["title"] == "parse-note"
+
+
+def test_last_parseable_json_fence_wins(tmp_path, monkeypatch):
+    worktree, base, tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+    reply = "\n".join(
+        [
+            "Example only:",
+            "```json",
+            _json_reply("pass"),
+            "```",
+            "Real verdict:",
+            "```json",
+            _json_reply("fail", "critical"),
+            "```",
+        ]
+    )
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n{reply}\nEOF\n")
+    monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
+
+    result = verify.run_verify(worktree, base, tip, lenses=("adversarial",), timeout_s=5)
+
+    assert result.overall == "fail"
+    assert result.lenses[0].verdict == "fail"
+    assert result.findings[0]["severity"] == "critical"
+
+
+def test_empty_diff_is_concern_not_pass(tmp_path, monkeypatch):
+    worktree, base, _tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+
+    result = verify.run_verify(worktree, base, base, lenses=("code-review",), timeout_s=5)
+
+    assert result.overall != "pass"
+    assert result.lenses[0].lens == "diff"
+    assert "nothing to review" in result.lenses[0].error
+
+
+def test_verify_result_includes_generated_at(tmp_path, monkeypatch):
+    worktree, base, tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n```json\n{_json_reply('pass')}\n```\nEOF\n")
+    monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
+
+    result = verify.run_verify(worktree, base, tip, lenses=("code-review",), timeout_s=5)
+
+    assert result.generated_at
+    assert result.to_dict()["generated_at"] == result.generated_at
+
+
+def test_explicit_configured_harness_keeps_extra_args(tmp_path, monkeypatch, fakes_env):
+    worktree, _base, _tip = _repo(tmp_path)
+    (worktree / "lane-config.yaml").write_text(
+        "engine:\n  brain:\n    harness: claude\n    extra_args: ['--max-turns', '1']\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("LOOP_VERIFY_CMD", raising=False)
+
+    argv, effective_harness = verify._argv_for_prompt(worktree, "prompt", harness="claude")
+
+    assert effective_harness == "claude"
+    assert argv == ["claude", "-p", "prompt", "--max-turns", "1"]
+
+
+def test_parallel_lenses_use_distinct_transcript_locations(tmp_path, monkeypatch):
+    worktree, base, tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+    one = _stub(
+        tmp_path / "one",
+        "sleep 0.1\n"
+        f"cat <<'EOF'\n```json\n{_json_reply('pass')}\n```\nEOF\n",
+    )
+    monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
+
+    result = verify.run_verify(
+        worktree,
+        base,
+        tip,
+        lenses=("code-review", "silent-failure", "adversarial"),
+        timeout_s=5,
+    )
+
+    assert result.overall == "pass"
+    events = SessionPaths(worktree, "verify").events_path.read_text(encoding="utf-8").splitlines()
+    calls = [json.loads(line) for line in events if json.loads(line)["event"] == "verify-call"]
+    response_paths = [Path(call["response_path"]) for call in calls]
+    assert len(response_paths) == 3
+    assert len(set(response_paths)) == 3
+    assert {path.parent.name for path in response_paths} == {
+        "code-review",
+        "silent-failure",
+        "adversarial",
+    }
 
 
 def test_cli_exit_codes_and_out_write(tmp_path, monkeypatch):
