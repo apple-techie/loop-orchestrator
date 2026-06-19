@@ -17,8 +17,10 @@ Repo rule (enforced in CI): ``subprocess`` is imported only here and in
 from __future__ import annotations
 
 import os
+import select
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -180,6 +182,14 @@ class Substrate:
             raise SubstrateError(argv, proc.returncode, proc.stderr)
         return proc.stdout
 
+    def process_command(self, pid: int, timeout: float = 2) -> str | None:
+        argv = ["ps", "-p", str(pid), "-o", "command="]
+        proc = self._run_process(argv, timeout)
+        if proc.returncode != 0:
+            return None
+        command = proc.stdout.strip()
+        return command or None
+
     def _verify_argv(self) -> list[str]:
         hit = shutil.which("loop-verify")
         if hit:
@@ -198,6 +208,22 @@ class Substrate:
         os.set_inheritable(read_fd, False)
         os.set_inheritable(write_fd, False)
         return read_fd, write_fd
+
+    def _read_exec_error(self, fd: int, argv: list[str], timeout: float = 5.0) -> bytes:
+        deadline = time.monotonic() + timeout
+        chunks = bytearray()
+        timeout_message = f"verify exec handshake timed out after {timeout}s"
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SubstrateError(argv, None, timeout_message)
+            ready, _, _ = select.select([fd], [], [], remaining)
+            if not ready:
+                raise SubstrateError(argv, None, timeout_message)
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                return bytes(chunks)
+            chunks.extend(chunk)
 
     def spawn_verify(
         self,
@@ -261,12 +287,7 @@ class Substrate:
         try:
             data = os.read(pid_read_fd, 64)
             _, status = os.waitpid(child_pid, 0)
-            exec_error = bytearray()
-            while True:
-                chunk = os.read(exec_read_fd, 4096)
-                if not chunk:
-                    break
-                exec_error.extend(chunk)
+            exec_error = self._read_exec_error(exec_read_fd, argv)
         finally:
             os.close(pid_read_fd)
             os.close(exec_read_fd)

@@ -206,6 +206,30 @@ def test_git_diff_failure_raises_substrate_error(sub, monkeypatch):
     assert "bad rev" in exc.value.stderr
 
 
+def test_process_command_returns_ps_command(sub, monkeypatch):
+    calls: list[tuple[list[str], float]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        return substrate_mod.subprocess.CompletedProcess(
+            argv, 0, stdout="uv run loop-verify --out x\n", stderr=""
+        )
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    assert sub.process_command(123, timeout=3) == "uv run loop-verify --out x"
+    assert calls == [(["ps", "-p", "123", "-o", "command="], 3)]
+
+
+def test_process_command_missing_pid_returns_none(sub, monkeypatch):
+    def fake_run(argv, **kwargs):
+        return substrate_mod.subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    assert sub.process_command(123) is None
+
+
 def test_spawn_verify_exec_failure_raises_immediately(sub, tmp_path, monkeypatch):
     missing = tmp_path / "missing-loop-verify"
     monkeypatch.setattr(sub, "_verify_argv", lambda: [str(missing)])
@@ -215,6 +239,17 @@ def test_spawn_verify_exec_failure_raises_immediately(sub, tmp_path, monkeypatch
 
     assert exc.value.returncode == 127
     assert str(missing) in exc.value.stderr
+
+
+def test_verify_exec_handshake_timeout_raises(sub):
+    read_fd, write_fd = os.pipe()
+    try:
+        with pytest.raises(SubstrateError) as exc:
+            sub._read_exec_error(read_fd, ["loop-verify"], timeout=0.01)
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+    assert "exec handshake timed out" in exc.value.stderr
 
 
 def test_dispatch_argv_order(sub, call_log):

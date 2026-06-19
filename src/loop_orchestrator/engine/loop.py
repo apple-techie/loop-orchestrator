@@ -24,6 +24,7 @@ from ..paths import SessionPaths
 from ..pm import registry as pm_registry
 from ..pm.base import PMAdapter
 from ..substrate import Substrate, SubstrateError
+from ..verify import DEFAULT_GATE_TIMEOUT_S, DEFAULT_LENS_TIMEOUT_S
 from . import actions as actions_mod
 from . import decision as decision_mod
 from . import decisions, gate, wiki
@@ -43,7 +44,14 @@ _INGEST_HEADING = "### Ingest protocol"
 
 # Timed-out asks stay visible in the checkpoint addendum this long.
 _ASK_TIMEOUT_RECENCY_S = 3600
-_VERIFY_TIMEOUT_S = 1500
+_VERIFY_DIFF_TIMEOUT_S = 60
+_VERIFY_TIMEOUT_BUFFER_S = 1140
+_VERIFY_TIMEOUT_S = (
+    DEFAULT_GATE_TIMEOUT_S
+    + _VERIFY_DIFF_TIMEOUT_S
+    + DEFAULT_LENS_TIMEOUT_S
+    + _VERIFY_TIMEOUT_BUFFER_S
+)
 
 # approval mode -> classifications that execute without a human (blocked never runs).
 _AUTO_CLASSES: dict[str, frozenset[str]] = {
@@ -60,48 +68,74 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
             return
         remaining: list[dict] = []
         changed = False
-        for marker in markers:
+        for idx, marker in enumerate(markers):
             out_path = marker.get("out_path")
             if not isinstance(out_path, str) or not out_path:
                 remaining.append(marker)
                 continue
-            result = substrate.read_verify_result(out_path)
-            overall = result.get("overall") if result is not None else None
-            if overall not in ("pass", "concerns", "fail"):
-                try:
-                    started_at = parse_ts(str(marker.get("started_at") or ""))
-                    age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
-                except (TypeError, ValueError):
-                    age_s = 0
-                if age_s > _VERIFY_TIMEOUT_S:
-                    _terminate_verify_runner(marker.get("pid"))
-                    events.append(
-                        "verify-timeout",
-                        window=marker.get("window"),
-                        pid=marker.get("pid"),
-                        out_path=out_path,
-                        started_at=marker.get("started_at"),
-                        timeout_s=_VERIFY_TIMEOUT_S,
-                    )
-                    changed = True
+            try:
+                result = substrate.read_verify_result(out_path)
+                overall = result.get("overall") if result is not None else None
+                if overall not in ("pass", "concerns", "fail"):
+                    try:
+                        started_at = parse_ts(str(marker.get("started_at") or ""))
+                        age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
+                    except (TypeError, ValueError):
+                        age_s = _VERIFY_TIMEOUT_S + 1
+                    if age_s > _VERIFY_TIMEOUT_S:
+                        _terminate_verify_runner(substrate, marker.get("pid"), events)
+                        events.append(
+                            "verify-timeout",
+                            window=marker.get("window"),
+                            pid=marker.get("pid"),
+                            out_path=out_path,
+                            started_at=marker.get("started_at"),
+                            timeout_s=_VERIFY_TIMEOUT_S,
+                        )
+                        changed = True
+                        _save_verify_markers_best_effort(
+                            paths, remaining + markers[idx + 1 :], events
+                        )
+                        continue
+                    remaining.append(marker)
                     continue
+                findings_raw = result.get("findings")
+                findings = len(findings_raw) if isinstance(findings_raw, list) else 0
+                event = "verify-passed" if overall == "pass" else "verify-failed"
+                events.append(
+                    event,
+                    window=marker.get("window"),
+                    overall=overall,
+                    findings=findings,
+                )
+                changed = True
+                _save_verify_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
+            except Exception as exc:
+                events.append(
+                    "verify-surface-error",
+                    window=marker.get("window"),
+                    out_path=out_path,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 remaining.append(marker)
-                continue
-            findings_raw = result.get("findings")
-            findings = len(findings_raw) if isinstance(findings_raw, list) else 0
-            event = "verify-passed" if overall == "pass" else "verify-failed"
-            events.append(
-                event,
-                window=marker.get("window"),
-                overall=overall,
-                findings=findings,
-            )
-            changed = True
         if changed:
-            actions_mod.save_verify_markers(paths, remaining)
+            _save_verify_markers_best_effort(paths, remaining, events)
 
 
-def _terminate_verify_runner(pid_value: object) -> None:
+def _save_verify_markers_best_effort(
+    paths: SessionPaths, markers: list[dict], events: EventLog
+) -> bool:
+    try:
+        actions_mod.save_verify_markers(paths, markers)
+    except OSError as exc:
+        events.append("verify-marker-save-failed", error=str(exc))
+        return False
+    return True
+
+
+def _terminate_verify_runner(
+    substrate: Substrate, pid_value: object, events: EventLog | None = None
+) -> None:
     try:
         pid = int(pid_value)
     except (TypeError, ValueError):
@@ -109,11 +143,21 @@ def _terminate_verify_runner(pid_value: object) -> None:
     if pid <= 1:
         return
     try:
+        command = substrate.process_command(pid, timeout=2)
+    except SubstrateError as exc:
+        if events is not None:
+            events.append("verify-kill-skip", pid=pid, reason="ps-failed", error=str(exc))
+        return
+    if command is None or "loop-verify" not in command:
+        if events is not None:
+            events.append("verify-kill-skip", pid=pid, reason="identity-mismatch")
+        return
+    try:
         if os.getpgid(pid) != pid:
             return
         os.killpg(pid, signal.SIGTERM)
         os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except OSError:
         return
 
 
@@ -528,7 +572,9 @@ def run_once(
     events.append("cycle-start", session=session)
     approval = approval_mode_override or config.approval_mode
 
-    # Follow-up: these pre-existing early returns also defer async verify timeout surfacing.
+    substrate = Substrate(root, session)
+    surface_verify_results(substrate, paths, events)
+
     pending = decisions.get(paths)
     if pending is not None:
         print(
@@ -543,8 +589,6 @@ def run_once(
         print(f"engine is paused ({paths.paused_path}); run loop-engine resume")
         return 5
 
-    substrate = Substrate(root, session)
-    surface_verify_results(substrate, paths, events)
     # B5 (T0035): refresh the ledger loops registry from the task loop: fields (the
     # source of truth) so loop-digest / the deck show every active loop. Non-
     # destructive (F5/T0024): derived status only, hand-authored fields preserved;

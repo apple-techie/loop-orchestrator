@@ -114,11 +114,6 @@ def record_verify_marker(paths: SessionPaths, marker: dict) -> dict:
     return marker
 
 
-def replace_verify_markers(paths: SessionPaths, markers: list[dict]) -> None:
-    with file_lock(paths.lock_path):
-        save_verify_markers(paths, markers)
-
-
 # ── action execution ────────────────────────────────────────────────────────
 
 

@@ -208,6 +208,29 @@ def test_second_run_with_pending_returns_3(project, call_log):
     assert errors and errors[-1]["kind"] == "pending-exists"
 
 
+def test_pending_decision_still_surfaces_verify_timeout(project, call_log):
+    assert run_once(project, "demo", EngineConfig()) == 0
+    before = len(_brain_calls(call_log))
+    paths = SessionPaths(project, "demo")
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(paths.verify_dir / "web-missing.json"),
+            "pid": 123,
+            "started_at": "2000-01-01T00:00:00Z",
+        },
+    )
+
+    assert run_once(project, "demo", EngineConfig()) == 3
+
+    assert len(_brain_calls(call_log)) == before
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted
+
+
 def test_paused_returns_5_without_brain(project, call_log):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -217,6 +240,29 @@ def test_paused_returns_5_without_brain(project, call_log):
 
     assert _brain_calls(call_log) == []
     assert "paused" in [e["event"] for e in _events(paths)]
+
+
+def test_paused_engine_still_surfaces_verify_timeout(project, call_log):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.paused_path.touch()
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(paths.verify_dir / "web-missing.json"),
+            "pid": 123,
+            "started_at": "2000-01-01T00:00:00Z",
+        },
+    )
+
+    assert run_once(project, "demo", EngineConfig()) == 5
+
+    assert _brain_calls(call_log) == []
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted
 
 
 def test_observe_stale_proceeds_when_fanout_fails(project, call_log, monkeypatch):
@@ -1000,6 +1046,9 @@ def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monke
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"overall": "nonsense"}), encoding="utf-8")
     killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        Substrate, "process_command", lambda self, pid, timeout=2: "uv run loop-verify"
+    )
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
 
@@ -1011,6 +1060,95 @@ def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monke
     assert emitted[-1]["window"] == "web"
     assert emitted[-1]["pid"] == 123
     assert [pid for pid, _sig in killed] == [123, 123]
+
+
+def test_surface_verify_timeout_permission_error_does_not_crash_and_clears(
+    project, monkeypatch
+):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    monkeypatch.setattr(
+        Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify"
+    )
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+
+    def deny(_pgid, _sig):
+        raise PermissionError("cross-user process group")
+
+    monkeypatch.setattr(loop_mod.os, "killpg", deny)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted and emitted[-1]["pid"] == 123
+
+
+def test_surface_verify_timeout_save_error_retries_and_clears(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    real_save = loop_mod.actions_mod.save_verify_markers
+    calls = 0
+
+    def flaky_save(save_paths, markers):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError("disk full")
+        real_save(save_paths, markers)
+
+    monkeypatch.setattr(loop_mod.actions_mod, "save_verify_markers", flaky_save)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert calls >= 2
+    assert load_verify_markers(paths) == []
+    assert any(e["event"] == "verify-marker-save-failed" for e in _events(paths))
+
+
+def test_terminate_verify_runner_skips_when_pid_is_not_loop_verify(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        Substrate, "process_command", lambda self, pid, timeout=2: "python server.py"
+    )
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert killed == []
+    assert load_verify_markers(paths) == []
+    skipped = [e for e in _events(paths) if e["event"] == "verify-kill-skip"]
+    assert skipped and skipped[-1]["reason"] == "identity-mismatch"
 
 
 def test_surface_verify_ignores_stale_bare_window_result(project):
@@ -1058,6 +1196,27 @@ def test_surface_verify_timed_out_marker_emits_event_and_clears(project):
     assert emitted[-1]["pid"] == 123
 
 
+def test_surface_verify_unparseable_started_at_times_out_and_clears(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": "not-a-timestamp",
+    }
+    record_verify_marker(paths, marker)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted
+    assert emitted[-1]["started_at"] == "not-a-timestamp"
+
+
 def test_surface_verify_marker_read_modify_write_is_under_file_lock(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -1089,6 +1248,9 @@ def test_surface_verify_marker_read_modify_write_is_under_file_lock(project, mon
 
     monkeypatch.setattr(loop_mod, "file_lock", recording_lock)
     monkeypatch.setattr(loop_mod.actions_mod, "load_verify_markers", guarded_load)
+    monkeypatch.setattr(
+        Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify"
+    )
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: None)
 
