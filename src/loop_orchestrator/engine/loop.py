@@ -440,7 +440,10 @@ def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
     for path in task_paths:
         try:
             fm = taskfiles.parse_frontmatter(path)
-        except (ValueError, yaml.YAMLError):
+        except (OSError, ValueError, yaml.YAMLError):
+            # OSError too: parse_frontmatter read_text()s the file, which can race
+            # a lane deleting/renaming a task between list_tasks and the read.
+            # Skip the file, never abort the drive cycle ("never fatal").
             continue
         loop = fm.get("loop")
         task_id = fm.get("id")

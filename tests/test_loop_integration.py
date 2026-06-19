@@ -987,6 +987,26 @@ def test_prompt_verify_drive_no_awaiting_build_without_open_backlog(project, mon
     assert "ready-to-verify:" not in prompt
 
 
+def test_open_backlog_skips_unreadable_task_file(project, monkeypatch):
+    # A task file that races a delete/perm-flip between enumeration and read
+    # (OSError) must be skipped, never abort the drive cycle ("never fatal").
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    (paths.tasks_dir / "T1-x.md").write_text(
+        "---\nid: T1\ntitle: x\nstatus: open\nloop: code\ndepends_on: []\nscope: src\n---\n",
+        encoding="utf-8",
+    )
+    import loop_orchestrator.pm.taskfiles as tf
+
+    def boom(_path):
+        raise OSError("vanished mid-scan")
+
+    monkeypatch.setattr(tf, "parse_frontmatter", boom)
+
+    assert loop_mod._open_backlog_by_loop(paths) == {}
+
+
 def test_prompt_verify_drive_shows_latest_outcome_per_window(project):
     paths = SessionPaths(project, "demo")
     paths.ensure()
