@@ -291,9 +291,12 @@ def test_paused_engine_still_surfaces_build_timeout(project, call_log, monkeypat
             "started_at": "2000-01-01T00:00:00Z",
         },
     )
+    worktree = str(paths.project_root / ".loop" / "worktrees" / "demo" / "web")
     monkeypatch.setattr(loop_mod.Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
     monkeypatch.setattr(
-        loop_mod.Substrate, "process_command", lambda self, pid, timeout=2: "codex exec"
+        loop_mod.Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"codex exec --cd {worktree} <brief>",
     )
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: None)
@@ -1224,6 +1227,7 @@ def test_ingest_timeout_default_is_below_brain_timeout():
 
 # ── T0048: completed async verify results surface in a later cycle ──────────
 
+
 def _write_verify_result(out_path: Path, overall: str, findings: int = 0) -> None:
     result = {
         "overall": overall,
@@ -1251,6 +1255,8 @@ def test_surface_build_done_on_branch_advance_clears_marker(project, monkeypatch
         },
     )
     monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    # Runner has exited (ps finds nothing) → the branch advance is a completed build.
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)
 
     surface_build_results(Substrate(project, "demo"), paths, events)
 
@@ -1261,6 +1267,59 @@ def test_surface_build_done_on_branch_advance_clears_marker(project, monkeypatch
     assert emitted[-1]["branch"] == "loop/demo/web"
     assert emitted[-1]["pre_build_sha"] == "sha-a"
     assert emitted[-1]["branch_head"] == "sha-b"
+
+
+def test_surface_build_advance_with_live_runner_keeps_marker(project, monkeypatch):
+    # HIGH-1: a branch advance while the codex runner is STILL ALIVE is a mid-build
+    # WIP commit, not a completed build — build-done must NOT fire and the marker
+    # (and its runner) must stay tracked.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    worktree = str(paths.project_root / ".loop" / "worktrees" / "demo" / "web")
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "pre_build_sha": "sha-a",
+        "pid": 123,
+        "started_at": utc_now(),
+    }
+    record_build_marker(paths, marker)
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"codex exec --cd {worktree} <brief>",
+    )
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    assert not any(e["event"] == "build-done" for e in emitted)
+
+
+def test_surface_build_advance_without_pre_build_sha_no_done(project, monkeypatch):
+    # HIGH-2: a marker with no pre_build_sha (unresolved baseline at spawn) must
+    # never produce a build-done from a later non-None branch_head.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "pid": 123,
+        "started_at": utc_now(),
+    }
+    record_build_marker(paths, marker)
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    assert not any(e["event"] == "build-done" for e in emitted)
 
 
 def test_surface_build_no_advance_keeps_marker_in_progress(project, monkeypatch):
@@ -1299,8 +1358,13 @@ def test_surface_build_timeout_kills_runner_and_clears(project, monkeypatch):
         },
     )
     killed: list[tuple[int, int]] = []
+    worktree = str(paths.project_root / ".loop" / "worktrees" / "demo" / "web")
     monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
-    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: "codex exec")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"codex exec --cd {worktree} <brief>",
+    )
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
 

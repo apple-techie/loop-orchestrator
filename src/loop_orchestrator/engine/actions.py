@@ -534,10 +534,17 @@ def execute(
             marker = {
                 "window": window,
                 "branch": branch,
-                "pre_build_sha": pre_build_sha,
                 "pid": pid,
                 "started_at": started_at,
             }
+            # Omit pre_build_sha when the baseline could not be resolved (mirrors
+            # the verify action's tip_sha handling). A None baseline must NEVER be
+            # stored: surface_build_results would then read any later non-None
+            # branch_head as `!= None` and emit a false build-done with zero
+            # commits. Absent pre_build_sha → build-done can't fire → fail safe to
+            # the timeout path.
+            if pre_build_sha is not None:
+                marker["pre_build_sha"] = pre_build_sha
             markers = load_build_markers(paths)
             markers.append(marker)
             save_build_markers(paths, markers)

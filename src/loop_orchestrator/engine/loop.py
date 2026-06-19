@@ -156,46 +156,71 @@ def surface_build_results(substrate: Substrate, paths: SessionPaths, events: Eve
         remaining: list[dict] = []
         changed = False
         for idx, marker in enumerate(markers):
-            window = marker.get("window")
-            branch = marker.get("branch")
-            pre_build_sha = marker.get("pre_build_sha")
-            branch_head = None
-            if isinstance(window, str) and window and isinstance(branch, str) and branch:
-                branch_head = substrate.branch_head(
-                    actions_mod._lane_worktree(paths, window), branch
-                )
             try:
-                started_at = parse_ts(str(marker.get("started_at") or ""))
-                age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
-            except (TypeError, ValueError):
-                age_s = _BUILD_TIMEOUT_S + 1
-            if branch_head is not None and branch_head != pre_build_sha:
-                events.append(
-                    "build-done",
-                    window=window,
-                    branch=branch,
-                    pre_build_sha=pre_build_sha,
-                    branch_head=branch_head,
+                window = marker.get("window")
+                branch = marker.get("branch")
+                pre_build_sha = marker.get("pre_build_sha")
+                worktree = (
+                    actions_mod._lane_worktree(paths, window)
+                    if isinstance(window, str) and window
+                    else None
                 )
-                changed = True
-                _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
-                continue
-            if age_s > _BUILD_TIMEOUT_S:
-                _terminate_build_runner(substrate, marker.get("pid"), events)
-                events.append(
-                    "build-timeout",
-                    window=window,
-                    branch=branch,
-                    pid=marker.get("pid"),
-                    started_at=marker.get("started_at"),
-                    timeout_s=_BUILD_TIMEOUT_S,
-                    pre_build_sha=pre_build_sha,
-                    branch_head=branch_head,
+                branch_head = None
+                if worktree is not None and isinstance(branch, str) and branch:
+                    branch_head = substrate.branch_head(worktree, branch)
+                try:
+                    started_at = parse_ts(str(marker.get("started_at") or ""))
+                    age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
+                except (TypeError, ValueError):
+                    age_s = _BUILD_TIMEOUT_S + 1
+                # A branch advance only counts as a COMPLETED build once the codex
+                # runner has exited: a still-running codex's incremental/WIP commit
+                # would otherwise false-fire build-done, clear the marker (orphaning
+                # the live runner so it can never be timed-out/killed) and arm a
+                # verify against a branch codex is still mutating. pre_build_sha must
+                # be present (a None baseline never establishes an advance).
+                advanced = (
+                    pre_build_sha is not None
+                    and branch_head is not None
+                    and branch_head != pre_build_sha
                 )
-                changed = True
-                _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
-                continue
-            remaining.append(marker)
+                if advanced and not _build_runner_alive(substrate, marker.get("pid"), worktree):
+                    events.append(
+                        "build-done",
+                        window=window,
+                        branch=branch,
+                        pre_build_sha=pre_build_sha,
+                        branch_head=branch_head,
+                    )
+                    changed = True
+                    _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
+                    continue
+                if age_s > _BUILD_TIMEOUT_S:
+                    _terminate_build_runner(substrate, marker.get("pid"), worktree, events)
+                    events.append(
+                        "build-timeout",
+                        window=window,
+                        branch=branch,
+                        pid=marker.get("pid"),
+                        started_at=marker.get("started_at"),
+                        timeout_s=_BUILD_TIMEOUT_S,
+                        pre_build_sha=pre_build_sha,
+                        branch_head=branch_head,
+                    )
+                    changed = True
+                    _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
+                    continue
+                remaining.append(marker)
+            except Exception as exc:
+                # One bad marker must never abort the whole surface pass (and the
+                # cycle): re-append it and record a diagnostic, mirroring
+                # surface_verify_results' per-marker isolation.
+                events.append(
+                    "build-surface-error",
+                    window=marker.get("window"),
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                remaining.append(marker)
         if changed:
             _save_build_markers_best_effort(paths, remaining, events)
 
@@ -266,8 +291,34 @@ def _terminate_verify_runner(
         return
 
 
+def _build_runner_alive(substrate: Substrate, pid_value: object, worktree: object) -> bool:
+    """True while the build's codex-exec runner is still alive, identified by the
+    per-window worktree --cd path so a recycled PID running something else (or
+    another lane's build) reads as gone. On a ps failure, treat as ALIVE
+    (conservative: defer to the timeout path rather than declare a false
+    build-done on an unconfirmed PID)."""
+    try:
+        pid = int(pid_value)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    try:
+        command = substrate.process_command(pid, timeout=2)
+    except SubstrateError:
+        return True
+    if command is None:
+        return False
+    return (
+        isinstance(worktree, (str, Path)) and "codex exec" in command and str(worktree) in command
+    )
+
+
 def _terminate_build_runner(
-    substrate: Substrate, pid_value: object, events: EventLog | None = None
+    substrate: Substrate,
+    pid_value: object,
+    worktree: object,
+    events: EventLog | None = None,
 ) -> None:
     try:
         pid = int(pid_value)
@@ -281,7 +332,11 @@ def _terminate_build_runner(
         if events is not None:
             events.append("build-kill-skip", pid=pid, reason="ps-failed", error=str(exc))
         return
-    if command is None or "codex exec" not in command:
+    wt = str(worktree) if isinstance(worktree, (str, Path)) else ""
+    # Identity-guard on the worktree --cd path (per-window), not just "codex exec":
+    # a recycled PID landing on a DIFFERENT lane's codex-exec build is its own pgrp
+    # leader too, so the bare token would let us SIGKILL the wrong lane's build.
+    if command is None or "codex exec" not in command or not wt or wt not in command:
         if events is not None:
             events.append("build-kill-skip", pid=pid, reason="identity-mismatch")
         return
@@ -290,7 +345,14 @@ def _terminate_build_runner(
             return
         os.killpg(pid, signal.SIGTERM)
         os.killpg(pid, signal.SIGKILL)
-    except OSError:
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        # A real kill failure (e.g. EPERM, unkillable group) leaves a runaway
+        # --dangerously-bypass codex committing into a branch the engine now
+        # believes is dead — surface it so an operator can spot the orphan.
+        if events is not None:
+            events.append("build-kill-failed", pid=pid, error=str(exc))
         return
 
 

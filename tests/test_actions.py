@@ -781,6 +781,24 @@ def test_build_action_skips_when_marker_exists(tmp_path):
     assert skipped[-1]["reason"] == "in-progress"
 
 
+def test_build_action_omits_pre_build_sha_when_branch_head_is_unresolved(tmp_path):
+    # HIGH-2: an unresolved baseline at spawn must NOT be stored as None — else
+    # surface_build_results reads a later non-None branch_head as an advance and
+    # emits a false build-done with zero commits. Mirror the verify tip_sha guard.
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub(branch_heads=[None])
+    action = {"kind": "build", "window": "web", "brief": "implement", "rationale": "ready"}
+
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+
+    assert len(sub.builds) == 1
+    marker = actions.load_build_markers(paths)[0]
+    assert "pre_build_sha" not in marker
+    started = [e for e in events.tail(10) if e["event"] == "build-started"]
+    assert started and started[-1]["pre_build_sha"] is None
+
+
 def test_build_spawn_failure_marks_action_failed_without_marker(tmp_path):
     paths, events = _env(tmp_path)
     _seed_branch(paths, "web", branch="loop/demo/web")
