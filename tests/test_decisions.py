@@ -13,7 +13,11 @@ from loop_orchestrator.engine.decisions import (
     mark_action,
     resolve,
 )
-from loop_orchestrator.engine.decision import VerifyAction, parse_and_validate
+from loop_orchestrator.engine.decision import (
+    DecisionValidationError,
+    VerifyAction,
+    parse_and_validate,
+)
 from loop_orchestrator.paths import SessionPaths
 
 
@@ -153,3 +157,18 @@ actions:
         {"web"},
     )
     assert decision.actions == [VerifyAction(lane="web", rationale="ready for loop-verify")]
+
+
+def test_verify_action_rejects_unsafe_lane_name():
+    with pytest.raises(DecisionValidationError):
+        parse_and_validate(
+            """```decision
+version: 1
+critique: committed work is ready for read-only review
+actions:
+  - kind: verify
+    lane: web;touch /tmp/pwn
+    rationale: ready for loop-verify
+```""",
+            {"web;touch /tmp/pwn"},
+        )

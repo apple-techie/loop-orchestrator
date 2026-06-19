@@ -299,6 +299,33 @@ def test_cli_exit_codes_and_out_write(tmp_path, monkeypatch):
     assert verify.main(["--worktree", str(worktree), "--base", base, "--tip", tip]) == 1
 
 
+def test_cli_out_write_uses_atomic_json(tmp_path, monkeypatch):
+    out = tmp_path / "verify.json"
+    result = verify.VerifyResult(
+        overall="pass",
+        gate=verify.GateResult(True, ""),
+        lenses=[],
+        findings=[],
+        generated_at="2026-06-18T00:00:00Z",
+    )
+    monkeypatch.setattr(verify, "run_verify", lambda *args, **kwargs: result)
+    writes = []
+
+    def fake_atomic_write_json(path, payload):
+        writes.append((Path(path), payload))
+        Path(path).write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(verify, "atomic_write_json", fake_atomic_write_json)
+
+    code = verify.main(
+        ["--worktree", str(tmp_path), "--base", "main", "--tip", "HEAD", "--out", str(out)]
+    )
+
+    assert code == 0
+    assert writes == [(out, result.to_dict())]
+    assert json.loads(out.read_text(encoding="utf-8"))["overall"] == "pass"
+
+
 def test_console_script_registered():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     text = pyproject.read_text(encoding="utf-8")

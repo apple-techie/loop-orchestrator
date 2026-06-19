@@ -21,6 +21,7 @@ from pathlib import Path
 from .engine.brain import BrainInvocationError, oneshot_argv, run_oneshot
 from .engine.config import load_config
 from .engine.events import EventLog, utc_now
+from .locking import atomic_write_json
 from .paths import SessionPaths
 from .substrate import Substrate, SubstrateError
 
@@ -350,13 +351,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     result = run_verify(args.worktree, args.base, args.tip, harness=args.harness)
-    payload = json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n"
+    payload = result.to_dict()
     if args.out:
         out = Path(args.out)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(payload, encoding="utf-8")
+        atomic_write_json(out, payload)
     else:
-        sys.stdout.write(payload)
+        sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return 0 if result.overall == "pass" else 1
 
 

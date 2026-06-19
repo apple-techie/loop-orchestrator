@@ -15,7 +15,7 @@ import pytest
 from loop_orchestrator.engine import cli, decisions
 from loop_orchestrator.engine.actions import execute, load_asks
 from loop_orchestrator.engine.config import EngineConfig
-from loop_orchestrator.engine.events import EventLog
+from loop_orchestrator.engine.events import EventLog, utc_now
 from loop_orchestrator.engine.loop import action_line, run_once
 from loop_orchestrator.engine.wiki import MARKER
 from loop_orchestrator.locking import atomic_write_json
@@ -896,7 +896,7 @@ from loop_orchestrator.engine.actions import load_verify_markers, record_verify_
 from loop_orchestrator.engine.loop import surface_verify_results  # noqa: E402
 
 
-def _write_verify_result(paths: SessionPaths, window: str, overall: str, findings: int = 0) -> None:
+def _write_verify_result(out_path: Path, overall: str, findings: int = 0) -> None:
     result = {
         "overall": overall,
         "gate": {"passed": overall == "pass"},
@@ -904,8 +904,8 @@ def _write_verify_result(paths: SessionPaths, window: str, overall: str, finding
         "findings": [{"id": str(i)} for i in range(findings)],
         "generated_at": "2026-06-18T00:00:00Z",
     }
-    paths.verify_result_path(window).parent.mkdir(parents=True, exist_ok=True)
-    paths.verify_result_path(window).write_text(json.dumps(result), encoding="utf-8")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result), encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -916,17 +916,18 @@ def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall,
     paths = SessionPaths(project, "demo")
     paths.ensure()
     events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / f"web-run-{overall}.json"
     record_verify_marker(
         paths,
         {
             "window": "web",
             "branch": "loop/demo/web",
-            "out_path": str(paths.verify_result_path("web")),
+            "out_path": str(out_path),
             "pid": 123,
-            "started_at": "2026-06-18T00:00:00Z",
+            "started_at": utc_now(),
         },
     )
-    _write_verify_result(paths, "web", overall, findings=2)
+    _write_verify_result(out_path, overall, findings=2)
 
     surface_verify_results(Substrate(project, "demo"), paths, events)
 
@@ -945,9 +946,9 @@ def test_surface_verify_missing_result_leaves_marker_in_progress(project):
     marker = {
         "window": "web",
         "branch": "loop/demo/web",
-        "out_path": str(paths.verify_result_path("web")),
+        "out_path": str(paths.verify_dir / "web-current.json"),
         "pid": 123,
-        "started_at": "2026-06-18T00:00:00Z",
+        "started_at": utc_now(),
     }
     record_verify_marker(paths, marker)
 
@@ -965,16 +966,62 @@ def test_surface_verify_corrupt_result_leaves_marker_in_progress(project):
     marker = {
         "window": "web",
         "branch": "loop/demo/web",
-        "out_path": str(paths.verify_result_path("web")),
+        "out_path": str(paths.verify_dir / "web-corrupt.json"),
         "pid": 123,
-        "started_at": "2026-06-18T00:00:00Z",
+        "started_at": utc_now(),
     }
     record_verify_marker(paths, marker)
-    paths.verify_result_path("web").parent.mkdir(parents=True, exist_ok=True)
-    paths.verify_result_path("web").write_text("{not-json", encoding="utf-8")
+    out_path = Path(marker["out_path"])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("{not-json", encoding="utf-8")
 
     surface_verify_results(Substrate(project, "demo"), paths, events)
 
     assert load_verify_markers(paths) == [marker]
     emitted = _events(paths) if paths.events_path.exists() else []
     assert not any(e["event"].startswith("verify-") for e in emitted)
+
+
+def test_surface_verify_ignores_stale_bare_window_result(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    stale = paths.verify_result_path("web")
+    current = paths.verify_dir / "web-current-run.json"
+    _write_verify_result(stale, "pass", findings=0)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(current),
+        "pid": 123,
+        "started_at": utc_now(),
+    }
+    record_verify_marker(paths, marker)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    assert not any(e["event"] == "verify-passed" for e in emitted)
+
+
+def test_surface_verify_timed_out_marker_emits_event_and_clears(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted
+    assert emitted[-1]["window"] == "web"
+    assert emitted[-1]["pid"] == 123

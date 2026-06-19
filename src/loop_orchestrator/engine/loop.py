@@ -42,6 +42,7 @@ _INGEST_HEADING = "### Ingest protocol"
 
 # Timed-out asks stay visible in the checkpoint addendum this long.
 _ASK_TIMEOUT_RECENCY_S = 3600
+_VERIFY_TIMEOUT_S = 1500
 
 # approval mode -> classifications that execute without a human (blocked never runs).
 _AUTO_CLASSES: dict[str, frozenset[str]] = {
@@ -64,6 +65,22 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
             continue
         result = substrate.read_verify_result(out_path)
         if result is None:
+            try:
+                started_at = parse_ts(str(marker.get("started_at") or ""))
+                age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
+            except (TypeError, ValueError):
+                age_s = 0
+            if not Path(out_path).exists() and age_s > _VERIFY_TIMEOUT_S:
+                events.append(
+                    "verify-timeout",
+                    window=marker.get("window"),
+                    pid=marker.get("pid"),
+                    out_path=out_path,
+                    started_at=marker.get("started_at"),
+                    timeout_s=_VERIFY_TIMEOUT_S,
+                )
+                changed = True
+                continue
             remaining.append(marker)
             continue
         overall = result.get("overall")

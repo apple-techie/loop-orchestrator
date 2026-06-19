@@ -594,7 +594,12 @@ def test_verify_action_spawns_detached_runner_and_records_marker(tmp_path):
 
     actions.execute(action, sub, events, EngineConfig(), paths=paths)
 
-    out_path = paths.verify_result_path("web")
+    assert len(sub.verifies) == 1
+    out_path = sub.verifies[0]["out_path"]
+    assert out_path.parent == paths.verify_dir
+    assert out_path.name.startswith("web-")
+    assert out_path.name.endswith(".json")
+    assert out_path.name != "web.json"
     assert sub.verifies == [
         {
             "worktree": paths.project_root / ".loop" / "worktrees" / "demo" / "web",
@@ -614,3 +619,34 @@ def test_verify_action_spawns_detached_runner_and_records_marker(tmp_path):
     assert markers[0]["branch"] == "loop/demo/web"
     assert markers[0]["out_path"] == str(out_path)
     assert markers[0]["pid"] == 4242
+
+
+def test_verify_action_skips_when_marker_exists(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    existing = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "base": "main",
+        "tip": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-old.json"),
+        "pid": 123,
+        "started_at": "2026-06-18T00:00:00Z",
+    }
+    actions.record_verify_marker(paths, existing)
+    sub = AddLaneSub()
+
+    actions.execute(
+        {"kind": "verify", "lane": "web", "rationale": "again"},
+        sub,
+        events,
+        EngineConfig(),
+        paths=paths,
+    )
+
+    assert sub.verifies == []
+    assert actions.load_verify_markers(paths) == [existing]
+    skipped = [e for e in events.tail(10) if e["event"] == "verify-skip"]
+    assert skipped
+    assert skipped[-1]["window"] == "web"
+    assert skipped[-1]["reason"] == "in-progress"

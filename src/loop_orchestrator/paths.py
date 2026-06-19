@@ -89,6 +89,9 @@ class SessionPaths:
     def verify_result_path(self, window: str) -> Path:
         return self.verify_dir / f"{window}.json"
 
+    def verify_run_result_path(self, window: str, run_token: str) -> Path:
+        return self.verify_dir / f"{window}-{run_token}.json"
+
     @property
     def verify_markers_path(self) -> Path:
         return self.engine_dir / "verify-in-progress.json"

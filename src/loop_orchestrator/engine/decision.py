@@ -194,6 +194,10 @@ class VerifyAction:
     def __post_init__(self):
         _need_str("lane", self.lane)
         _need_str("rationale", self.rationale)
+        if not _WINDOW_RE.match(self.lane):
+            raise DecisionValidationError(
+                f"field 'lane' {self.lane!r} must match ^[A-Za-z][A-Za-z0-9_-]+$"
+            )
         _no_coord("lane", self.lane)
 
 

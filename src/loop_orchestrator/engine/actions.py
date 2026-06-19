@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from pathlib import Path
 
 from ..locking import atomic_write_json, file_lock, read_json
@@ -430,18 +431,33 @@ def execute(
         if branch is None:
             raise SubstrateError([kind, window], None, "target lane has no ledger branch")
         base = "main"
-        out_path = paths.verify_result_path(window)
-        pid = substrate.spawn_verify(_lane_worktree(paths, window), base, branch, out_path)
-        marker = {
-            "window": window,
-            "branch": branch,
-            "base": base,
-            "tip": branch,
-            "out_path": str(out_path),
-            "pid": pid,
-            "started_at": utc_now(),
-        }
-        record_verify_marker(paths, marker)
+        started_at = utc_now()
+        run_token = uuid.uuid4().hex[:12]
+        out_path = paths.verify_run_result_path(window, run_token)
+        with file_lock(paths.lock_path):
+            existing = next((m for m in load_verify_markers(paths) if m.get("window") == window), None)
+            if existing is not None:
+                events.append(
+                    "verify-skip",
+                    window=window,
+                    reason="in-progress",
+                    out_path=existing.get("out_path"),
+                    pid=existing.get("pid"),
+                )
+                return
+            pid = substrate.spawn_verify(_lane_worktree(paths, window), base, branch, out_path)
+            marker = {
+                "window": window,
+                "branch": branch,
+                "base": base,
+                "tip": branch,
+                "out_path": str(out_path),
+                "pid": pid,
+                "started_at": started_at,
+            }
+            markers = load_verify_markers(paths)
+            markers.append(marker)
+            save_verify_markers(paths, markers)
         events.append(
             "verify-started",
             window=window,

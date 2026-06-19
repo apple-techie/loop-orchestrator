@@ -211,18 +211,46 @@ class Substrate:
             "--out",
             str(out),
         ]
+        read_fd, write_fd = os.pipe()
         try:
-            with open(log_path, "ab") as log:
-                proc = subprocess.Popen(
-                    argv,
-                    cwd=self.project_root,
-                    stdout=log,
-                    stderr=log,
-                    start_new_session=True,
-                )
+            child_pid = os.fork()
         except OSError as exc:
+            os.close(read_fd)
+            os.close(write_fd)
             raise SubstrateError(argv, None, f"spawn failed: {exc}") from exc
-        return int(proc.pid)
+        if child_pid == 0:
+            os.close(read_fd)
+            try:
+                os.setsid()
+                grandchild_pid = os.fork()
+                if grandchild_pid != 0:
+                    os.write(write_fd, str(grandchild_pid).encode("ascii"))
+                    os._exit(0)
+                os.close(write_fd)
+                os.chdir(self.project_root)
+                log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+                try:
+                    os.dup2(log_fd, 1)
+                    os.dup2(log_fd, 2)
+                finally:
+                    os.close(log_fd)
+                os.execvp(argv[0], argv)
+            except BaseException as exc:
+                try:
+                    msg = f"spawn failed: {exc}\n".encode("utf-8", errors="replace")
+                    os.write(2, msg)
+                except OSError:
+                    pass
+                os._exit(127)
+        os.close(write_fd)
+        try:
+            data = os.read(read_fd, 64)
+            _, status = os.waitpid(child_pid, 0)
+        finally:
+            os.close(read_fd)
+        if not data or status != 0:
+            raise SubstrateError(argv, status, "verify child failed to detach")
+        return int(data.decode("ascii"))
 
     def read_verify_result(self, out_path: str | Path) -> dict | None:
         import json
