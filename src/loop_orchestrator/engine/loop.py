@@ -84,12 +84,23 @@ def _max_finding_severity(findings_raw: object) -> str | None:
     gate, low/medium ride along as residual caveats."""
     if not isinstance(findings_raw, list):
         return None
+    blocking_rank = _SEVERITY_RANK["critical"]
     best_rank, best_label = 0, None
     for finding in findings_raw:
         if not isinstance(finding, dict):
             continue
-        label = str(finding.get("severity") or "").lower()
-        rank = _SEVERITY_RANK.get(label, 0)
+        raw = finding.get("severity")
+        label = str(raw).strip().lower() if raw is not None else ""
+        if not label:
+            continue
+        # Fail CLOSED on an out-of-vocabulary severity ('blocker', 'sev1', …): treat
+        # it as blocking so a future/third-party producer can't slip past the
+        # escalate gate. (Empty/missing severity stays non-blocking — it may be a
+        # benign note, and the gate/overall clauses still apply.)
+        if label in _SEVERITY_RANK:
+            rank = _SEVERITY_RANK[label]
+        else:
+            rank, label = blocking_rank, "critical"
         if rank > best_rank:
             best_rank, best_label = rank, label
     return best_label

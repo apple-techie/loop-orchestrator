@@ -1596,6 +1596,10 @@ def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall,
         ("concerns", False, ["low"], "verify-failed"),
         # clean pass stays passed
         ("pass", True, [], "verify-passed"),
+        # fail CLOSED: an out-of-vocabulary severity label blocks (treated critical)
+        ("concerns", True, ["low", "blocker"], "verify-failed"),
+        # whitespace-padded known label still normalizes (low -> non-blocking)
+        ("concerns", True, [" low "], "verify-passed"),
     ],
 )
 def test_surface_verify_escalate_eligibility_is_severity_based(
