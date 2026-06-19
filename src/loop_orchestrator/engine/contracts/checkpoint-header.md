@@ -69,6 +69,16 @@ Action kinds and fields (optional fields shown with their defaults):
   wait_for_idle: false, expects_reply: false, reply_timeout_s: 1800,
   rationale: <why>}`
   `interrupt: true` cancels the lane's in-flight generation first.
+- build — implement an awaiting-build lane's open task HEADLESSLY (the engine
+  spawns codex exec in the lane's worktree; it commits ONLY on the lane branch,
+  never merges/pushes). Use this — NOT `dispatch` — for an `awaiting-build` lane
+  in the verify drive; the lane needs no live agent:
+  `{kind: build, window: <awaiting-build lane>, brief: <concise implementation
+  brief drawn from the named open task>, rationale: <why>}`
+- verify — run the headless multi-agent verify on a ready-to-verify lane's
+  branch (gate + review lenses; read-only, never merges). Use this — NOT
+  `dispatch` — for a `ready-to-verify` lane in the verify drive:
+  `{kind: verify, lane: <ready-to-verify lane>, rationale: <why>}`
 - stop — nothing is needed this cycle:
   `{kind: stop, rationale: <why>}`
 - escalate — a human must decide:
