@@ -401,6 +401,9 @@ def test_metrics_logged_after_each_cycle(project, cycle_recorder, call_log):
     assert metrics_calls == [f"loop-metrics --session demo --project-root {project} --log"]
     metrics_events = [e for e in _events(project) if e["event"] == "metrics"]
     assert metrics_events and metrics_events[0]["after_cycle"] is True
+    assert metrics_events[0]["autonomy_ratio"] == 0.75
+    assert metrics_events[0]["interventions_per_shipped_unit"] == 1.5
+    assert metrics_events[0]["escalations_7d"] == 2
     seq = {e["event"]: e["seq"] for e in _events(project)}
     assert seq["cycle-result"] < seq["metrics"]
 

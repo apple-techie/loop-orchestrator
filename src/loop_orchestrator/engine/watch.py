@@ -115,6 +115,53 @@ def parse_reset_deadline(excerpt: str, now: float) -> float | None:
     return deadline
 
 
+def _metrics_stdout_value(output: str, name: str) -> str | None:
+    prefix = f"{name}:"
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        rest = stripped[len(prefix) :].strip()
+        return rest.split(maxsplit=1)[0] if rest else None
+    return None
+
+
+def _metrics_stdout_float(output: str, name: str) -> float | None:
+    value = _metrics_stdout_value(output, name)
+    if not value or value == "n/a":
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _metrics_stdout_int(output: str, name: str) -> int:
+    value = _metrics_stdout_value(output, name)
+    if not value:
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def _metrics_event_fields(output: str) -> dict[str, float | int | None]:
+    return {
+        "autonomy_ratio": _metrics_stdout_float(output, "autonomy_ratio"),
+        "interventions_per_shipped_unit": _metrics_stdout_float(
+            output, "interventions_per_shipped_unit"
+        ),
+        "escalations_7d": _metrics_stdout_int(output, "escalations_7d"),
+        "rejects_7d": _metrics_stdout_int(output, "rejects_7d"),
+        "stops_7d": _metrics_stdout_int(output, "stops_7d"),
+        "ingest_timeouts_7d": _metrics_stdout_int(output, "ingest_timeouts_7d"),
+        "lane_restarts_7d": _metrics_stdout_int(output, "lane_restarts_7d"),
+        "unsolicited_steers_7d": _metrics_stdout_int(output, "unsolicited_steers_7d"),
+        "brain_calls_7d": _metrics_stdout_int(output, "brain_calls_7d"),
+    }
+
+
 def pid_alive(pid: int) -> bool:
     """True when `pid` is a live process (signal-0 probe)."""
     try:
@@ -405,11 +452,16 @@ class Watch:
         self._maybe_arm_quota_backoff(now, rc)
         if self.config.metrics.log_after_cycle:
             try:
-                self.substrate.metrics_log()
+                metrics_stdout = self.substrate.metrics_log()
             except SubstrateError as exc:
                 self.events.append("error", kind="metrics-failed", error=str(exc))
             else:
-                self.events.append("metrics", after_cycle=True, rc=rc)
+                self.events.append(
+                    "metrics",
+                    after_cycle=True,
+                    rc=rc,
+                    **_metrics_event_fields(metrics_stdout),
+                )
 
     def _maybe_arm_quota_backoff(self, now: float, rc: int) -> None:
         """When the cycle just ended on a brain failure that must NOT be retried

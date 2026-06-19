@@ -8,6 +8,11 @@
 #   restarts_24h        lane-restarts.jsonl lines with NO `event` field
 #                       (lane-health restart records — see CONTRACT.md)
 #   giveups_24h         lane-restarts.jsonl lines with event "giving-up"
+#   autonomy_ratio / interventions_per_shipped_unit
+#                       derived from events.jsonl + mailbox steers
+#   escalations_7d / rejects_7d / stops_7d / ingest_timeouts_7d /
+#   lane_restarts_7d / unsolicited_steers_7d / brain_calls_7d
+#                       7-day attention/autonomy frontier signals
 #   ingests_7d / lints_7d / checkpoints_7d / experiments
 #                       counted from ops-wiki/log.md `## [date] <type> |`
 #   dispatches          n/a — not derivable from substrate surfaces
@@ -45,9 +50,10 @@ Usage:
   loop-metrics.sh [options]
 
 Prints the coordinator-efficiency summary block: checkpoint_tokens,
-pending_messages, restarts_24h, giveups_24h, ingests_7d, lints_7d,
-checkpoints_7d, experiments (dispatch counts are n/a). Missing inputs
-degrade to 0/n-a with a note instead of failing.
+pending_messages, restarts_24h, giveups_24h, autonomy_ratio,
+interventions_per_shipped_unit, event-derived 7d attention/autonomy counts,
+ingests_7d, lints_7d, checkpoints_7d, experiments (dispatch counts are n/a).
+Missing inputs degrade to 0/n-a with a note instead of failing.
 
 Options:
   --log                 Also append `## [YYYY-MM-DD] metrics | <summary>`
@@ -151,19 +157,22 @@ fi
 # ---- restarts_24h / giveups_24h ------------------------------------------------
 RESTARTS_24H=0
 GIVEUPS_24H=0
+LANE_RESTARTS_7D=0
 RESTARTS_FILE=""
 [[ -n "$SESSION_NAME" ]] && RESTARTS_FILE="$SESSIONS_DIR/$SESSION_NAME/lane-restarts.jsonl"
 if [[ -n "$RESTARTS_FILE" && -f "$RESTARTS_FILE" ]]; then
   # Restart lines carry NO `event` field ({timestamp, session, lane, target,
   # cmd}); lifecycle lines carry `event` (e.g. "giving-up") — CONTRACT.md.
-  read -r RESTARTS_24H GIVEUPS_24H <<EOF
+  read -r RESTARTS_24H GIVEUPS_24H LANE_RESTARTS_7D <<EOF
 $(python3 - "$RESTARTS_FILE" <<'PYEOF'
 import datetime
 import json
 import sys
 
-cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
-restarts = giveups = 0
+now = datetime.datetime.now(datetime.timezone.utc)
+cutoff_24h = now - datetime.timedelta(hours=24)
+cutoff_7d = now - datetime.timedelta(days=7)
+restarts_24h = giveups_24h = lane_restarts_7d = 0
 with open(sys.argv[1], encoding="utf-8") as fh:
     for line in fh:
         line = line.strip()
@@ -179,20 +188,22 @@ with open(sys.argv[1], encoding="utf-8") as fh:
             ).replace(tzinfo=datetime.timezone.utc)
         except ValueError:
             continue
-        if when < cutoff:
+        if when >= cutoff_7d and "event" not in rec:
+            lane_restarts_7d += 1
+        if when < cutoff_24h:
             continue
         if "event" not in rec:
-            restarts += 1
+            restarts_24h += 1
         elif rec["event"] == "giving-up":
-            giveups += 1
-print(restarts, giveups)
+            giveups_24h += 1
+print(restarts_24h, giveups_24h, lane_restarts_7d)
 PYEOF
 )
 EOF
 elif [[ -n "$SESSION_NAME" ]]; then
-  add_note "no lane-restarts.jsonl for session '$SESSION_NAME' — restarts_24h/giveups_24h read 0"
+  add_note "no lane-restarts.jsonl for session '$SESSION_NAME' — restarts_24h/giveups_24h/lane_restarts_7d read 0"
 elif [[ ! -d "$SESSIONS_DIR" ]]; then
-  add_note "no .loop/sessions/ directory — restarts_24h/giveups_24h read 0"
+  add_note "no .loop/sessions/ directory — restarts_24h/giveups_24h/lane_restarts_7d read 0"
 fi
 
 # ---- log.md prefix counts ------------------------------------------------------
@@ -200,8 +211,9 @@ INGESTS_7D=0
 LINTS_7D=0
 CHECKPOINTS_7D=0
 EXPERIMENTS=0
+TASKS_DONE_7D=0
 if [[ -f "$LOG_FILE" ]]; then
-  read -r INGESTS_7D LINTS_7D CHECKPOINTS_7D EXPERIMENTS <<EOF
+  read -r INGESTS_7D LINTS_7D CHECKPOINTS_7D EXPERIMENTS TASKS_DONE_7D <<EOF
 $(python3 - "$LOG_FILE" <<'PYEOF'
 import datetime
 import re
@@ -210,7 +222,8 @@ import sys
 cutoff = datetime.date.today() - datetime.timedelta(days=7)
 counts = {"ingest": 0, "lint": 0, "checkpoint": 0}
 experiments = 0
-pat = re.compile(r"^## \[(\d{4})-(\d{2})-(\d{2})\] ([a-z-]+) \|")
+tasks_done = 0
+pat = re.compile(r"^## \[(\d{4})-(\d{2})-(\d{2})\] ([a-z-]+) \| ?(.*)$")
 with open(sys.argv[1], encoding="utf-8") as fh:
     for line in fh:
         m = pat.match(line)
@@ -225,13 +238,168 @@ with open(sys.argv[1], encoding="utf-8") as fh:
             experiments += 1
         elif kind in counts and day >= cutoff:
             counts[kind] += 1
-print(counts["ingest"], counts["lint"], counts["checkpoint"], experiments)
+        elif kind == "task" and day >= cutoff and re.match(r"T\d+\s+done\b", m.group(5)):
+            tasks_done += 1
+print(counts["ingest"], counts["lint"], counts["checkpoint"], experiments, tasks_done)
 PYEOF
 )
 EOF
 else
-  add_note "no ops-wiki/log.md — ingests_7d/lints_7d/checkpoints_7d/experiments read 0"
+  add_note "no ops-wiki/log.md — ingests_7d/lints_7d/checkpoints_7d/experiments/tasks_done_7d read 0"
 fi
+
+# ---- events.jsonl + mailbox attention/autonomy metrics ------------------------
+AUTONOMY_RATIO="n/a"
+AUTONOMY_ENGINE=0
+AUTONOMY_TOTAL=0
+INTERVENTIONS_PER_SHIPPED_UNIT="n/a"
+INTERVENTIONS_TOTAL=0
+ESCALATIONS_7D=0
+REJECTS_7D=0
+STOPS_7D=0
+INGEST_TIMEOUTS_7D=0
+UNSOLICITED_STEERS_7D=0
+BRAIN_CALLS_7D=0
+EVENTS_FILE=""
+[[ -n "$SESSION_NAME" ]] && EVENTS_FILE="$SESSIONS_DIR/$SESSION_NAME/engine/events.jsonl"
+if [[ -z "$SESSION_NAME" ]]; then
+  add_note "no session selected — events.jsonl metrics read 0/n/a"
+elif [[ ! -f "$EVENTS_FILE" ]]; then
+  add_note "no events.jsonl for session '$SESSION_NAME' — event counts/autonomy read 0/n/a"
+fi
+read -r \
+  AUTONOMY_RATIO \
+  AUTONOMY_ENGINE \
+  AUTONOMY_TOTAL \
+  INTERVENTIONS_PER_SHIPPED_UNIT \
+  INTERVENTIONS_TOTAL \
+  TASKS_DONE_7D \
+  ESCALATIONS_7D \
+  REJECTS_7D \
+  STOPS_7D \
+  INGEST_TIMEOUTS_7D \
+  UNSOLICITED_STEERS_7D \
+  BRAIN_CALLS_7D <<EOF
+$(python3 - "$EVENTS_FILE" "$PROJECT_ROOT/.loop/messages" "$TASKS_DONE_7D" <<'PYEOF'
+import datetime
+import json
+import re
+import sys
+from pathlib import Path
+
+EVENT_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+MAILBOX_TS_FORMAT = "%Y%m%d-%H%M%S"
+mailbox_name_re = re.compile(r"^(\d{8}-\d{6})-([^-]+(?:-[^-]+)*?)-to-([^-]+)\.md$")
+reply_subject_re = re.compile(r"re\s*:", re.IGNORECASE)
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+
+events_path = Path(sys.argv[1]) if sys.argv[1] else None
+mailbox_dir = Path(sys.argv[2])
+shipped = int(sys.argv[3])
+
+escalations = rejects = stops = ingest_timeouts = brain_calls = 0
+engine_approvals = total_decisions = 0
+
+
+def parse_event_ts(value):
+    return datetime.datetime.strptime(value, EVENT_TS_FORMAT).replace(
+        tzinfo=datetime.timezone.utc
+    )
+
+
+def parse_mailbox_subject(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            head = [fh.readline() for _ in range(40)]
+    except OSError:
+        return ""
+    if not head or head[0].strip() != "---":
+        return ""
+    for line in head[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("subject:"):
+            return line[len("subject:") :].strip()
+    return ""
+
+
+if events_path and events_path.is_file():
+    with open(events_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                when = parse_event_ts(rec.get("ts", ""))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if when < cutoff:
+                continue
+            kind = rec.get("event")
+            if kind == "decision-approved":
+                total_decisions += 1
+                if rec.get("decided_by") == "engine":
+                    engine_approvals += 1
+            elif kind == "decision-rejected":
+                rejects += 1
+                total_decisions += 1
+            elif kind == "escalate":
+                escalations += 1
+            elif kind == "action" and rec.get("kind") == "stop":
+                stops += 1
+            elif kind == "ingest-timeout":
+                ingest_timeouts += 1
+            elif kind == "brain-call":
+                brain_calls += 1
+
+seen = set()
+unsolicited_steers = 0
+for directory in (mailbox_dir, mailbox_dir / "processed"):
+    if not directory.is_dir():
+        continue
+    for path in sorted(directory.glob("*-to-*.md")):
+        if path.name in seen:
+            continue
+        match = mailbox_name_re.match(path.name)
+        if not match:
+            continue
+        stamp_raw, sender, recipient = match.group(1), match.group(2), match.group(3)
+        try:
+            stamp = datetime.datetime.strptime(stamp_raw, MAILBOX_TS_FORMAT).replace(
+                tzinfo=datetime.timezone.utc
+            )
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            continue
+        seen.add(path.name)
+        if recipient != "coord" or sender == "coord":
+            continue
+        if reply_subject_re.match(parse_mailbox_subject(path).strip()):
+            continue
+        unsolicited_steers += 1
+
+interventions = escalations + unsolicited_steers + rejects
+autonomy = f"{engine_approvals / total_decisions:.2f}" if total_decisions else "n/a"
+per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
+print(
+    autonomy,
+    engine_approvals,
+    total_decisions,
+    per_shipped,
+    interventions,
+    shipped,
+    escalations,
+    rejects,
+    stops,
+    ingest_timeouts,
+    unsolicited_steers,
+    brain_calls,
+)
+PYEOF
+)
+EOF
 
 # ---- summary block --------------------------------------------------------------
 TODAY="$(date +%Y-%m-%d)"
@@ -241,6 +409,15 @@ echo "  checkpoint_tokens: ${CHECKPOINT_TOKENS}${CHECKPOINT_DETAIL}"
 echo "  pending_messages:  $PENDING"
 echo "  restarts_24h:      $RESTARTS_24H"
 echo "  giveups_24h:       $GIVEUPS_24H"
+echo "  autonomy_ratio:                  $AUTONOMY_RATIO ($AUTONOMY_ENGINE/$AUTONOMY_TOTAL)"
+echo "  interventions_per_shipped_unit: $INTERVENTIONS_PER_SHIPPED_UNIT ($INTERVENTIONS_TOTAL interventions / $TASKS_DONE_7D shipped)"
+echo "  escalations_7d:                  $ESCALATIONS_7D"
+echo "  rejects_7d:                      $REJECTS_7D"
+echo "  stops_7d:                        $STOPS_7D"
+echo "  ingest_timeouts_7d:              $INGEST_TIMEOUTS_7D"
+echo "  lane_restarts_7d:                $LANE_RESTARTS_7D"
+echo "  unsolicited_steers_7d:           $UNSOLICITED_STEERS_7D"
+echo "  brain_calls_7d:                  $BRAIN_CALLS_7D"
 echo "  ingests_7d:        $INGESTS_7D"
 echo "  lints_7d:          $LINTS_7D"
 echo "  checkpoints_7d:    $CHECKPOINTS_7D"
@@ -257,7 +434,7 @@ if [[ "$DO_LOG" -eq 1 ]]; then
     echo "error: --log needs $LOG_FILE" >&2
     exit 1
   fi
-  SUMMARY="tokens=$CHECKPOINT_TOKENS pending=$PENDING restarts24h=$RESTARTS_24H giveups24h=$GIVEUPS_24H ingests7d=$INGESTS_7D lints7d=$LINTS_7D checkpoints7d=$CHECKPOINTS_7D experiments=$EXPERIMENTS"
+  SUMMARY="tokens=$CHECKPOINT_TOKENS pending=$PENDING restarts24h=$RESTARTS_24H giveups24h=$GIVEUPS_24H autonomy=$AUTONOMY_RATIO($AUTONOMY_ENGINE/$AUTONOMY_TOTAL) interventions_per_shipped=$INTERVENTIONS_PER_SHIPPED_UNIT($INTERVENTIONS_TOTAL/$TASKS_DONE_7D) escalations7d=$ESCALATIONS_7D rejects7d=$REJECTS_7D stops7d=$STOPS_7D ingest_timeouts7d=$INGEST_TIMEOUTS_7D lane_restarts7d=$LANE_RESTARTS_7D unsolicited_steers7d=$UNSOLICITED_STEERS_7D brain_calls7d=$BRAIN_CALLS_7D ingests7d=$INGESTS_7D lints7d=$LINTS_7D checkpoints7d=$CHECKPOINTS_7D experiments=$EXPERIMENTS"
   printf '\n## [%s] metrics | %s\n' "$TODAY" "$SUMMARY" >> "$LOG_FILE"
   echo "logged: ## [$TODAY] metrics | $SUMMARY" >&2
 fi

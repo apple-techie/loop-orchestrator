@@ -103,8 +103,11 @@ def test_approve_flow_executes_and_archives(project, call_log):
     archived = json.loads((paths.decisions_dir / f"{doc['id']}.json").read_text(encoding="utf-8"))
     assert archived["status"] == "approved"
     assert archived["actions"][0]["status"] == "executed"
-    kinds = [e["event"] for e in _events(paths)]
+    events = _events(paths)
+    kinds = [e["event"] for e in events]
     assert "decision-approved" in kinds and "action" in kinds
+    approved = [e for e in events if e["event"] == "decision-approved"][-1]
+    assert approved["decided_by"] == "human"
 
 
 def test_approve_flow_dispatch_failure(project, call_log, monkeypatch):

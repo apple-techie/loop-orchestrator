@@ -223,7 +223,7 @@ def _resolve_and_finish(args: argparse.Namespace, root: Path, approve: bool) -> 
         return 1
     config = load_config(root)
     if approve:
-        events.append("decision-approved", id=doc["id"], indices=indices)
+        events.append("decision-approved", id=doc["id"], indices=indices, decided_by="human")
         doc = execute_batch(doc, Substrate(root, session), events, config, paths=paths)
     else:
         events.append("decision-rejected", id=doc["id"], reason=doc.get("reason", ""))
