@@ -130,10 +130,13 @@ class AddLaneSub:
         self.dispatched.append((lane, payload))
 
     def spawn_verify(self, worktree, base, tip, out_path):
-        self.verifies.append(
-            {"worktree": worktree, "base": base, "tip": tip, "out_path": out_path}
-        )
+        self.verifies.append({"worktree": worktree, "base": base, "tip": tip, "out_path": out_path})
         return 4242
+
+
+class FailingVerifySub(AddLaneSub):
+    def spawn_verify(self, worktree, base, tip, out_path):
+        raise SubstrateError(["missing-loop-verify"], 127, "exec failed")
 
 
 def _add(harness="claude", cmd=None, window="w", brief="b"):
@@ -650,3 +653,29 @@ def test_verify_action_skips_when_marker_exists(tmp_path):
     assert skipped
     assert skipped[-1]["window"] == "web"
     assert skipped[-1]["reason"] == "in-progress"
+
+
+def test_verify_spawn_failure_marks_action_failed_without_marker(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    doc = {
+        "id": "d-verify",
+        "actions": [
+            {
+                "idx": 0,
+                "kind": "verify",
+                "lane": "web",
+                "status": "approved",
+                "rationale": "ready",
+            }
+        ],
+    }
+
+    updated = actions.execute_batch(doc, FailingVerifySub(), events, EngineConfig(), paths=paths)
+
+    assert updated["actions"][0]["status"] == "failed"
+    assert actions.load_verify_markers(paths) == []
+    failed = [e for e in events.tail(10) if e["event"] == "action-failed"]
+    assert failed
+    assert failed[-1]["kind"] == "verify"
+    assert failed[-1]["lane"] == "web"

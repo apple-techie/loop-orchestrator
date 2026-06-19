@@ -206,6 +206,17 @@ def test_git_diff_failure_raises_substrate_error(sub, monkeypatch):
     assert "bad rev" in exc.value.stderr
 
 
+def test_spawn_verify_exec_failure_raises_immediately(sub, tmp_path, monkeypatch):
+    missing = tmp_path / "missing-loop-verify"
+    monkeypatch.setattr(sub, "_verify_argv", lambda: [str(missing)])
+
+    with pytest.raises(SubstrateError) as exc:
+        sub.spawn_verify(tmp_path, "main", "feature", tmp_path / "verify.json")
+
+    assert exc.value.returncode == 127
+    assert str(missing) in exc.value.stderr
+
+
 def test_dispatch_argv_order(sub, call_log):
     sub.dispatch("web", "echo hi", wait_ready=True, interrupt=True)
     sub.dispatch("docs", "hello", mode="command")

@@ -21,7 +21,11 @@ from pathlib import Path
 def file_lock(lock_path: Path):
     """Exclusive advisory lock; blocks until acquired."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    fd = os.open(lock_path, flags, 0o644)
+    os.set_inheritable(fd, False)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield

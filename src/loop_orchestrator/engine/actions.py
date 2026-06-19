@@ -435,7 +435,10 @@ def execute(
         run_token = uuid.uuid4().hex[:12]
         out_path = paths.verify_run_result_path(window, run_token)
         with file_lock(paths.lock_path):
-            existing = next((m for m in load_verify_markers(paths) if m.get("window") == window), None)
+            existing = next(
+                (m for m in load_verify_markers(paths) if m.get("window") == window),
+                None,
+            )
             if existing is not None:
                 events.append(
                     "verify-skip",

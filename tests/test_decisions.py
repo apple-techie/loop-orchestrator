@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from loop_orchestrator.engine.decision import (
+    DecisionValidationError,
+    VerifyAction,
+    parse_and_validate,
+)
 from loop_orchestrator.engine.decisions import (
     DecisionStateError,
     archive,
@@ -12,11 +17,6 @@ from loop_orchestrator.engine.decisions import (
     get,
     mark_action,
     resolve,
-)
-from loop_orchestrator.engine.decision import (
-    DecisionValidationError,
-    VerifyAction,
-    parse_and_validate,
 )
 from loop_orchestrator.paths import SessionPaths
 

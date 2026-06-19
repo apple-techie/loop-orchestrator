@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from loop_orchestrator.engine import cli, decisions
+from loop_orchestrator.engine import loop as loop_mod
 from loop_orchestrator.engine.actions import execute, load_asks
 from loop_orchestrator.engine.config import EngineConfig
 from loop_orchestrator.engine.events import EventLog, utc_now
@@ -982,6 +984,35 @@ def test_surface_verify_corrupt_result_leaves_marker_in_progress(project):
     assert not any(e["event"].startswith("verify-") for e in emitted)
 
 
+def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-invalid.json"),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    out_path = Path(marker["out_path"])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({"overall": "nonsense"}), encoding="utf-8")
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted
+    assert emitted[-1]["window"] == "web"
+    assert emitted[-1]["pid"] == 123
+    assert [pid for pid, _sig in killed] == [123, 123]
+
+
 def test_surface_verify_ignores_stale_bare_window_result(project):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -1025,3 +1056,42 @@ def test_surface_verify_timed_out_marker_emits_event_and_clears(project):
     assert emitted
     assert emitted[-1]["window"] == "web"
     assert emitted[-1]["pid"] == 123
+
+
+def test_surface_verify_marker_read_modify_write_is_under_file_lock(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    lock_active = False
+
+    @contextmanager
+    def recording_lock(lock_path):
+        nonlocal lock_active
+        lock_active = True
+        try:
+            yield
+        finally:
+            lock_active = False
+
+    real_load = loop_mod.actions_mod.load_verify_markers
+
+    def guarded_load(load_paths):
+        assert lock_active
+        return real_load(load_paths)
+
+    monkeypatch.setattr(loop_mod, "file_lock", recording_lock)
+    monkeypatch.setattr(loop_mod.actions_mod, "load_verify_markers", guarded_load)
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: None)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []

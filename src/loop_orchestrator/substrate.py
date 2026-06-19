@@ -191,6 +191,14 @@ class Substrate:
             ["loop-verify"], None, "loop-verify not found on PATH and uv is unavailable"
         )
 
+    def _cloexec_pipe(self) -> tuple[int, int]:
+        if hasattr(os, "pipe2") and hasattr(os, "O_CLOEXEC"):
+            return os.pipe2(os.O_CLOEXEC)
+        read_fd, write_fd = os.pipe()
+        os.set_inheritable(read_fd, False)
+        os.set_inheritable(write_fd, False)
+        return read_fd, write_fd
+
     def spawn_verify(
         self,
         worktree: str | Path,
@@ -211,22 +219,28 @@ class Substrate:
             "--out",
             str(out),
         ]
-        read_fd, write_fd = os.pipe()
+        pid_read_fd, pid_write_fd = self._cloexec_pipe()
+        exec_read_fd, exec_write_fd = self._cloexec_pipe()
         try:
             child_pid = os.fork()
         except OSError as exc:
-            os.close(read_fd)
-            os.close(write_fd)
+            os.close(pid_read_fd)
+            os.close(pid_write_fd)
+            os.close(exec_read_fd)
+            os.close(exec_write_fd)
             raise SubstrateError(argv, None, f"spawn failed: {exc}") from exc
         if child_pid == 0:
-            os.close(read_fd)
+            os.close(pid_read_fd)
+            os.close(exec_read_fd)
             try:
                 os.setsid()
                 grandchild_pid = os.fork()
                 if grandchild_pid != 0:
-                    os.write(write_fd, str(grandchild_pid).encode("ascii"))
+                    os.close(exec_write_fd)
+                    os.write(pid_write_fd, str(grandchild_pid).encode("ascii"))
                     os._exit(0)
-                os.close(write_fd)
+                os.close(pid_write_fd)
+                os.setpgid(0, 0)
                 os.chdir(self.project_root)
                 log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
                 try:
@@ -237,17 +251,27 @@ class Substrate:
                 os.execvp(argv[0], argv)
             except BaseException as exc:
                 try:
-                    msg = f"spawn failed: {exc}\n".encode("utf-8", errors="replace")
-                    os.write(2, msg)
+                    msg = f"spawn failed: {argv[0]}: {exc}\n".encode("utf-8", errors="replace")
+                    os.write(exec_write_fd, msg)
                 except OSError:
                     pass
                 os._exit(127)
-        os.close(write_fd)
+        os.close(pid_write_fd)
+        os.close(exec_write_fd)
         try:
-            data = os.read(read_fd, 64)
+            data = os.read(pid_read_fd, 64)
             _, status = os.waitpid(child_pid, 0)
+            exec_error = bytearray()
+            while True:
+                chunk = os.read(exec_read_fd, 4096)
+                if not chunk:
+                    break
+                exec_error.extend(chunk)
         finally:
-            os.close(read_fd)
+            os.close(pid_read_fd)
+            os.close(exec_read_fd)
+        if exec_error:
+            raise SubstrateError(argv, 127, exec_error.decode("utf-8", errors="replace"))
         if not data or status != 0:
             raise SubstrateError(argv, status, "verify child failed to detach")
         return int(data.decode("ascii"))

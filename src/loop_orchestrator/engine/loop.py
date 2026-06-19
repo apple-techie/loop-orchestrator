@@ -13,6 +13,7 @@ import dataclasses
 import json
 import os
 import shlex
+import signal
 import sys
 from datetime import datetime, timezone
 from importlib import resources
@@ -53,52 +54,67 @@ _AUTO_CLASSES: dict[str, frozenset[str]] = {
 
 
 def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: EventLog) -> None:
-    markers = actions_mod.load_verify_markers(paths)
-    if not markers:
-        return
-    remaining: list[dict] = []
-    changed = False
-    for marker in markers:
-        out_path = marker.get("out_path")
-        if not isinstance(out_path, str) or not out_path:
-            remaining.append(marker)
-            continue
-        result = substrate.read_verify_result(out_path)
-        if result is None:
-            try:
-                started_at = parse_ts(str(marker.get("started_at") or ""))
-                age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
-            except (TypeError, ValueError):
-                age_s = 0
-            if not Path(out_path).exists() and age_s > _VERIFY_TIMEOUT_S:
-                events.append(
-                    "verify-timeout",
-                    window=marker.get("window"),
-                    pid=marker.get("pid"),
-                    out_path=out_path,
-                    started_at=marker.get("started_at"),
-                    timeout_s=_VERIFY_TIMEOUT_S,
-                )
-                changed = True
+    with file_lock(paths.lock_path):
+        markers = actions_mod.load_verify_markers(paths)
+        if not markers:
+            return
+        remaining: list[dict] = []
+        changed = False
+        for marker in markers:
+            out_path = marker.get("out_path")
+            if not isinstance(out_path, str) or not out_path:
+                remaining.append(marker)
                 continue
-            remaining.append(marker)
-            continue
-        overall = result.get("overall")
-        if overall not in ("pass", "concerns", "fail"):
-            remaining.append(marker)
-            continue
-        findings_raw = result.get("findings")
-        findings = len(findings_raw) if isinstance(findings_raw, list) else 0
-        event = "verify-passed" if overall == "pass" else "verify-failed"
-        events.append(
-            event,
-            window=marker.get("window"),
-            overall=overall,
-            findings=findings,
-        )
-        changed = True
-    if changed:
-        actions_mod.replace_verify_markers(paths, remaining)
+            result = substrate.read_verify_result(out_path)
+            overall = result.get("overall") if result is not None else None
+            if overall not in ("pass", "concerns", "fail"):
+                try:
+                    started_at = parse_ts(str(marker.get("started_at") or ""))
+                    age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
+                except (TypeError, ValueError):
+                    age_s = 0
+                if age_s > _VERIFY_TIMEOUT_S:
+                    _terminate_verify_runner(marker.get("pid"))
+                    events.append(
+                        "verify-timeout",
+                        window=marker.get("window"),
+                        pid=marker.get("pid"),
+                        out_path=out_path,
+                        started_at=marker.get("started_at"),
+                        timeout_s=_VERIFY_TIMEOUT_S,
+                    )
+                    changed = True
+                    continue
+                remaining.append(marker)
+                continue
+            findings_raw = result.get("findings")
+            findings = len(findings_raw) if isinstance(findings_raw, list) else 0
+            event = "verify-passed" if overall == "pass" else "verify-failed"
+            events.append(
+                event,
+                window=marker.get("window"),
+                overall=overall,
+                findings=findings,
+            )
+            changed = True
+        if changed:
+            actions_mod.save_verify_markers(paths, remaining)
+
+
+def _terminate_verify_runner(pid_value: object) -> None:
+    try:
+        pid = int(pid_value)
+    except (TypeError, ValueError):
+        return
+    if pid <= 1:
+        return
+    try:
+        if os.getpgid(pid) != pid:
+            return
+        os.killpg(pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
 
 
 def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
@@ -512,6 +528,7 @@ def run_once(
     events.append("cycle-start", session=session)
     approval = approval_mode_override or config.approval_mode
 
+    # Follow-up: these pre-existing early returns also defer async verify timeout surfacing.
     pending = decisions.get(paths)
     if pending is not None:
         print(
