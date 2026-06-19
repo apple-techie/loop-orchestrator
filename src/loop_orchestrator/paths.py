@@ -20,10 +20,12 @@ class SessionPaths:
     engine_dir: Path = field(init=False)
 
     def __post_init__(self):
+        root = Path(self.project_root).resolve()
+        object.__setattr__(self, "project_root", root)
         object.__setattr__(
             self,
             "engine_dir",
-            self.project_root / ".loop" / "sessions" / self.session / "engine",
+            root / ".loop" / "sessions" / self.session / "engine",
         )
 
     @property
