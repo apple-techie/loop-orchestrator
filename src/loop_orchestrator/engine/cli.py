@@ -15,7 +15,7 @@ import sys
 import time
 from pathlib import Path
 
-from ..paths import SessionPaths
+from ..paths import SessionPaths, normalize_project_root
 from ..substrate import Substrate
 from . import decisions, improve, wiki
 from .actions import execute_batch
@@ -367,7 +367,7 @@ _HANDLERS = {
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    root = Path(args.project_root).resolve()
+    root = normalize_project_root(args.project_root)
     return _HANDLERS[args.command](args, root)
 
 

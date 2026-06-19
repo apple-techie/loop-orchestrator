@@ -714,19 +714,19 @@ def _loop_summary(project_root: Path, session: str) -> LoopSummary:
 def discover_loops(roots: list[Path]) -> list[LoopSummary]:
     """Every loop with engine state under any of `roots`
     (`<root>/.loop/sessions/<session>/engine/`) as read-only LoopSummary rows —
-    running, paused, AND stopped. De-duped by (resolved root, session); a root
-    with no sessions contributes nothing. Pure reads — never writes."""
+    running, paused, AND stopped. De-duped by (normalized root, session); a
+    root with no sessions contributes nothing. Pure reads — never writes."""
     out: list[LoopSummary] = []
     seen: set[tuple[str, str]] = set()
     for root in roots:
-        root = Path(root)
+        root = normalize_project_root(root)
         sessions_dir = root / ".loop" / "sessions"
         if not sessions_dir.is_dir():
             continue
         for session_dir in sorted(sessions_dir.iterdir()):
             if not (session_dir / "engine").is_dir():
                 continue
-            key = (str(root.resolve()), session_dir.name)
+            key = (str(root), session_dir.name)
             if key in seen:
                 continue
             seen.add(key)

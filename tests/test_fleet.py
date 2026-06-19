@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from loop_orchestrator.deck import cli as deck_cli
 from loop_orchestrator.substrate import discover_loops, render_fleet
 
@@ -111,6 +113,21 @@ def test_two_loops_across_two_roots(tmp_path):
 def test_discover_dedupes_repeated_roots(tmp_path):
     _make_loop(tmp_path, "demo", pid=os.getpid())
     assert len(discover_loops([tmp_path, tmp_path])) == 1
+
+
+def test_discover_dedup_uses_reported_root_normalization(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    _make_loop(target, "demo", pid=os.getpid())
+
+    roots = {summary.project_root for summary in discover_loops([link, target])}
+    assert roots == {str(Path(os.path.abspath(link))), str(Path(os.path.abspath(target)))}
 
 
 def test_discover_writes_nothing(tmp_path):

@@ -12,6 +12,8 @@ import os
 import sys
 from pathlib import Path
 
+from ..paths import normalize_project_root
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -56,14 +58,14 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             print("loop-deck --check: textual is not installed", file=sys.stderr)
             return 1
-        root = Path(args.project_root).resolve()
+        root = normalize_project_root(args.project_root)
         print(f"loop-deck --check: ok (textual importable, project={root})")
         return 0
     session = args.session or os.environ.get("LOOP_SESSION")
     if not session:
         print("error: --session <name> (or $LOOP_SESSION) is required", file=sys.stderr)
         return 2
-    root = Path(args.project_root).resolve()
+    root = normalize_project_root(args.project_root)
 
     from ..substrate import Substrate
     from .app import LoopDeckApp
