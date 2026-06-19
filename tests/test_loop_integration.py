@@ -1555,7 +1555,9 @@ def test_surface_build_timeout_kills_runner_and_clears(project, monkeypatch):
     ("overall", "event"),
     [("pass", "verify-passed"), ("concerns", "verify-failed"), ("fail", "verify-failed")],
 )
-def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall, event):
+def test_surface_verify_result_emits_verdict_and_clears_marker(
+    project, overall, event, monkeypatch
+):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     events = EventLog(paths.events_path)
@@ -1571,6 +1573,9 @@ def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall,
         },
     )
     _write_verify_result(out_path, overall, findings=2)
+    # Branch is current (clean ff-merge) — isolate the verdict logic from the
+    # currency gate.
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: True)
 
     surface_verify_results(Substrate(project, "demo"), paths, events)
 
@@ -1603,7 +1608,7 @@ def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall,
     ],
 )
 def test_surface_verify_escalate_eligibility_is_severity_based(
-    project, overall, gate_passed, severities, event
+    project, overall, gate_passed, severities, event, monkeypatch
 ):
     # The merge gate must be reachable: a build whose gate passes with no
     # high/critical finding is escalate-eligible (verify-passed) even on concerns,
@@ -1623,6 +1628,8 @@ def test_surface_verify_escalate_eligibility_is_severity_based(
         },
     )
     _write_verify_result(out_path, overall, gate_passed=gate_passed, severities=severities)
+    # Branch is current — isolate the severity gate from the currency gate.
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: True)
 
     surface_verify_results(Substrate(project, "demo"), paths, events)
 
@@ -1630,6 +1637,62 @@ def test_surface_verify_escalate_eligibility_is_severity_based(
     assert emitted and emitted[-1]["event"] == event
     assert emitted[-1]["window"] == "web"
     assert load_verify_markers(paths) == []
+
+
+def test_surface_verify_stale_branch_does_not_escalate(project, monkeypatch):
+    # Mergeability gate: a quality-clean verify (gate passed, no high/critical) on a
+    # branch that is NOT current (main is not an ancestor — a stale-base branch that
+    # would conflict on a 3-way merge) must route to verify-stale, NOT verify-passed,
+    # so the escalate gate never surfaces an unmergeable branch as "merge, verified".
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-stale.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, "concerns", gate_passed=True, severities=["low", "medium"])
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: False)  # branch stale
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    emitted = [e for e in _events(paths) if e["event"].startswith("verify-")]
+    assert emitted and emitted[-1]["event"] == "verify-stale"
+    assert emitted[-1]["window"] == "web"
+    assert load_verify_markers(paths) == []
+
+
+def test_surface_verify_current_branch_escalates(project, monkeypatch):
+    # The same quality-clean verify on a CURRENT branch (main is an ancestor) routes
+    # to verify-passed — confirming the gate keys on currency, not the verdict alone.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-current.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, "concerns", gate_passed=True, severities=["low", "medium"])
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: True)  # branch current
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    emitted = [e for e in _events(paths) if e["event"].startswith("verify-")]
+    assert emitted and emitted[-1]["event"] == "verify-passed"
 
 
 def test_surface_verify_result_records_verified_tip_from_marker(project, monkeypatch):

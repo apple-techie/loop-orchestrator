@@ -202,6 +202,29 @@ class Substrate:
         sha = proc.stdout.strip()
         return sha or None
 
+    def is_ancestor(
+        self, worktree: str | Path, ancestor: str, ref: str, timeout: float = 5
+    ) -> bool:
+        """True if `ancestor` is an ancestor of `ref` (so `ancestor` merges into
+        `ref` as a clean fast-forward). Used to gate escalate-eligibility on a lane
+        branch being CURRENT: main must be fully contained in the branch, else the
+        branch forked from a stale main and a 3-way merge could conflict.
+        Conservative on error/ambiguity: returns False (treat as not-mergeable)."""
+        if not ancestor.strip() or not ref.strip():
+            return False
+        argv = ["git", "merge-base", "--is-ancestor", ancestor, ref]
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=Path(worktree),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return proc.returncode == 0
+
     def worktree_dirty(self, worktree: str | Path, timeout: float = 5) -> bool:
         """True if the worktree has uncommitted or untracked changes (git status
         --porcelain non-empty) — so a headless build never writes over an

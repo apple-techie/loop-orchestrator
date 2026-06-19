@@ -261,6 +261,43 @@ def test_branch_head_returns_none_on_git_error(sub, monkeypatch, tmp_path):
     assert sub.branch_head(worktree, "loop/demo/missing") is None
 
 
+def test_is_ancestor_true_on_zero_exit(sub, monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    calls: list[tuple[list[str], Path, float]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
+        return substrate_mod.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
+
+    assert sub.is_ancestor(worktree, "main", "loop/demo/web") is True
+    assert calls == [(["git", "merge-base", "--is-ancestor", "main", "loop/demo/web"], worktree, 5)]
+
+
+def test_is_ancestor_false_on_nonzero_and_error(sub, monkeypatch, tmp_path):
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    # exit 1 = not an ancestor (stale-base branch)
+    monkeypatch.setattr(
+        substrate_mod.subprocess,
+        "run",
+        lambda argv, **k: substrate_mod.subprocess.CompletedProcess(argv, 1, stdout="", stderr=""),
+    )
+    assert sub.is_ancestor(worktree, "main", "loop/demo/web") is False
+
+    # conservative on a git error / OSError -> not mergeable
+    def boom(argv, **k):
+        raise OSError("git missing")
+
+    monkeypatch.setattr(substrate_mod.subprocess, "run", boom)
+    assert sub.is_ancestor(worktree, "main", "loop/demo/web") is False
+    # empty refs short-circuit to False
+    assert sub.is_ancestor(worktree, "", "loop/demo/web") is False
+
+
 def test_process_command_returns_ps_command(sub, monkeypatch):
     calls: list[tuple[list[str], float]] = []
 

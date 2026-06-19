@@ -58,7 +58,9 @@ _BUSY_LANE_STATES = frozenset({"working", "awaiting-approval"})
 # the merge gate is never reached — severity is the real block signal.
 _BLOCKING_SEVERITIES = frozenset({"high", "critical"})
 _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-_VERIFY_DRIVE_OUTCOME_EVENTS = frozenset({"verify-passed", "verify-failed", "verify-timeout"})
+_VERIFY_DRIVE_OUTCOME_EVENTS = frozenset(
+    {"verify-passed", "verify-failed", "verify-timeout", "verify-stale"}
+)
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
 _VERIFY_DIFF_TIMEOUT_S = 60
@@ -163,8 +165,28 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 escalate_eligible = (
                     gate_passed and overall != "fail" and max_severity not in _BLOCKING_SEVERITIES
                 )
-                event = "verify-passed" if escalate_eligible else "verify-failed"
                 window = marker.get("window")
+                branch = marker.get("branch")
+                # A quality-clean build must also be CURRENT to merge: main must be
+                # an ancestor of the lane branch (a clean fast-forward). A branch
+                # forked from a stale main reviews+passes on its own diff base but a
+                # 3-way merge would conflict — it must NOT escalate as "merge,
+                # verified". It routes to verify-stale (a rebase signal) instead.
+                mergeable = (
+                    isinstance(window, str)
+                    and bool(window)
+                    and isinstance(branch, str)
+                    and bool(branch)
+                    and substrate.is_ancestor(
+                        actions_mod._lane_worktree(paths, window), "main", branch
+                    )
+                )
+                if escalate_eligible and not mergeable:
+                    event = "verify-stale"
+                elif escalate_eligible:
+                    event = "verify-passed"
+                else:
+                    event = "verify-failed"
                 _maybe_record_verified_tip(paths, marker)
                 events.append(
                     event,
@@ -696,6 +718,8 @@ latest verify-passed -> propose `escalate` summary: merge <branch> — verified,
 verify-passed = gate passed + NO high/critical finding (low/medium may remain) = mergeable.
 Escalate a verify-passed lane (note residual low/medium in the summary); do NOT keep fixing it.
 latest verify-failed/verify-timeout -> propose a `build` for that lane with a fix brief.
+latest verify-stale -> the branch is behind main and cannot clean-merge.
+propose `escalate`: rebase <branch> onto main, then re-verify — do NOT merge a stale branch.
 ready-to-verify lane -> propose `verify` for that lane.
 These are headless worktree lanes: drive them with `build`/`verify`, NEVER `dispatch`/`steer`.
 Include the named findings in the build fix brief.
