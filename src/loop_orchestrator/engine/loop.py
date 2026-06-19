@@ -48,6 +48,10 @@ _BUILD_DRIVE_OUTCOME_EVENTS = frozenset({"build-done", "build-timeout"})
 _BUILD_DRIVE_EVENT_TAIL = 100
 _BUILD_DRIVE_OUTCOME_LIMIT = 5
 _BUILD_TIMEOUT_S = 1500
+# A lane an interactive agent is actively occupying — never spawn a headless
+# build/verify on its worktree while it may be editing. idle/unknown/errored mean
+# the worktree is quiescent (no live agent) and safe to drive headlessly.
+_BUSY_LANE_STATES = frozenset({"working", "awaiting-approval"})
 _VERIFY_DRIVE_OUTCOME_EVENTS = frozenset({"verify-passed", "verify-failed", "verify-timeout"})
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
@@ -488,13 +492,34 @@ def _verify_drive_lines(
     base_head = substrate.branch_head(paths.project_root, "main")
     open_backlog = _open_backlog_by_loop(paths)
 
+    # Candidate lanes = the worktree lanes (ledger loops with a branch, T0025) UNION
+    # the live tmux lanes. build/verify are HEADLESS (codex exec / loop-verify run
+    # detached, never touching the lane's pane), so a worktree lane is drivable even
+    # with no booted AI harness — it need not be a tmux window at all, and one that
+    # is reads status "unknown" rather than "idle". Eligibility therefore keys off
+    # the registered branch + a quiescent worktree, NOT a live idle pane.
+    ledger = read_json(paths.state_file, {})
+    loops_doc = ledger.get("loops") if isinstance(ledger, dict) else None
+    branch_lanes = (
+        {
+            window
+            for window, entry in loops_doc.items()
+            if isinstance(entry, dict)
+            and isinstance(entry.get("branch"), str)
+            and entry.get("branch")
+        }
+        if isinstance(loops_doc, dict)
+        else set()
+    )
+
     ready: list[str] = []
     ready_lanes: set[str] = set()
     awaiting: list[str] = []
-    for lane in sorted(snap.lanes):
-        info = snap.lanes[lane]
+    for lane in sorted(set(snap.lanes) | branch_lanes):
+        info = snap.lanes.get(lane) or {}
+        status = info.get("status")
         if (
-            info.get("status") != "idle"
+            status in _BUSY_LANE_STATES
             or lane in in_flight_windows
             or lane in build_in_flight_windows
         ):
@@ -504,6 +529,7 @@ def _verify_drive_lines(
             continue
         head = substrate.branch_head(actions_mod._lane_worktree(paths, lane), branch)
         verified_tip = _verified_tip(paths, lane)
+        status_label = status or "unknown"
         # Awaiting-build: the branch is AT base (nothing built) and the lane has
         # open backlog -> the brain should propose a `build`, not a `verify`. This
         # closes the cold-start gap: without it a fresh lane at main false-read as
@@ -513,7 +539,7 @@ def _verify_drive_lines(
             tasks = open_backlog.get(lane)
             if tasks:
                 awaiting.append(
-                    f"- lane={lane} branch={branch} status=idle at-base "
+                    f"- lane={lane} branch={branch} status={status_label} at-base "
                     f"open-tasks={','.join(tasks)}"
                 )
             continue
@@ -527,7 +553,7 @@ def _verify_drive_lines(
         elif head == verified_tip:
             continue
         ready_lanes.add(lane)
-        ready.append(f"- lane={lane} branch={branch} status=idle")
+        ready.append(f"- lane={lane} branch={branch} status={status_label}")
 
     outcomes = [outcome for outcome in outcomes if str(outcome["window"]) not in ready_lanes]
 

@@ -1007,6 +1007,54 @@ def test_open_backlog_skips_unreadable_task_file(project, monkeypatch):
     assert loop_mod._open_backlog_by_loop(paths) == {}
 
 
+def test_prompt_verify_drive_awaiting_build_headless_lane_not_in_snapshot(project, monkeypatch):
+    # Decouple from tmux-idle: a worktree lane (ledger branch) that is NOT a tmux
+    # window — absent from snap.lanes — is still build-eligible headlessly.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"code": {"branch": "loop/demo/code"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    (paths.tasks_dir / "T9999-demo.md").write_text(
+        "---\nid: T9999\ntitle: demo\nstatus: open\nloop: code\ndepends_on: []\nscope: src\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "base-sha")
+    # snap has NO 'code' lane (it is not a tmux window) — only an unrelated web lane.
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert (
+        "awaiting-build:\n- lane=code branch=loop/demo/code status=unknown at-base open-tasks=T9999"
+        in prompt
+    )
+    assert _DRIVE_RUBRIC in prompt
+
+
+def test_prompt_verify_drive_excludes_busy_worktree_lane(project, monkeypatch):
+    # A worktree lane an interactive agent is actively occupying (working) must be
+    # excluded — never spawn a headless build/verify over in-pane edits.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"code": {"branch": "loop/demo/code"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    (paths.tasks_dir / "T9999-demo.md").write_text(
+        "---\nid: T9999\ntitle: demo\nstatus: open\nloop: code\ndepends_on: []\nscope: src\n---\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "base-sha")
+    snap = _prompt_snap(
+        {"code": {"status": "working", "target": "", "kind": "claude"}}, loops=loops
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "awaiting-build:" not in prompt
+    assert "ready-to-verify:" not in prompt
+
+
 def test_prompt_verify_drive_shows_latest_outcome_per_window(project):
     paths = SessionPaths(project, "demo")
     paths.ensure()
