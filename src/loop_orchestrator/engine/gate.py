@@ -278,6 +278,10 @@ def classify(
         if lane_kinds is not None and lane_kinds.get(getattr(action, "window", None)) == "standing":
             return BLOCKED
         return DESTRUCTIVE
+    if action.kind == "escalate":
+        # A help-request is not dangerous, but it must surface to an operator
+        # instead of being consumed by auto mode.
+        return DESTRUCTIVE
     if action.kind == "steer" and action.interrupt:
         return DESTRUCTIVE
     # SHAPE rule (HIGH-1): a dispatch/steer that injects a raw command into the

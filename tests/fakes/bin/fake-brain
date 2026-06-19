@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fake one-shot brain. Default: preamble + ONE valid ```decision fence.
-# FAKE_BRAIN_MODE: garbage (no fence) | invalid (version 99) | two-fences
+# FAKE_BRAIN_MODE: garbage (no fence) | invalid (version 99) | two-fences | escalate
 # (bogus fence first, valid fence last — last-fence-wins). Drains stdin and
 # ignores argv so any oneshot template shape works.
 set -u
@@ -68,6 +68,20 @@ critique: the fleet looks busy, so there is nothing for me to do this cycle
 actions:
   - kind: stop
     rationale: fleet busy, no action needed
+```
+EOF
+    ;;
+  escalate)
+    cat <<'EOF'
+Observations: the loop needs operator judgment before it can continue.
+
+```decision
+version: 1
+critique: the loop needs human judgment
+actions:
+  - kind: escalate
+    summary: need operator
+    rationale: ambiguous next step
 ```
 EOF
     ;;

@@ -139,6 +139,28 @@ def test_auto_mode_executes_inline(project, call_log):
     assert doc["actions"][0]["status"] == "executed"
 
 
+def test_auto_mode_surfaces_escalate_but_still_executes_safe_actions(
+    project, call_log, monkeypatch
+):
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="auto") == 0
+    safe_paths = SessionPaths(project, "demo")
+    assert not safe_paths.pending_decision_path.exists()
+    assert BRAIN_DISPATCH in call_log()
+
+    monkeypatch.setenv("FAKE_BRAIN_MODE", "escalate")
+    assert run_once(project, "escalate", EngineConfig(), approval_mode_override="auto") == 0
+
+    paths = SessionPaths(project, "escalate")
+    doc = decisions.get(paths)
+    assert doc is not None
+    assert paths.pending_decision_path.exists()
+    assert doc["status"] == "pending"
+    assert doc["decided_by"] != "engine"
+    assert doc["actions"][0]["kind"] == "escalate"
+    assert doc["actions"][0]["status"] == "awaiting-approval"
+    assert "escalate" not in [e["event"] for e in _events(paths)]
+
+
 def test_garbage_brain_files_needs_human(project, call_log, monkeypatch):
     monkeypatch.setenv("FAKE_BRAIN_MODE", "garbage")
 

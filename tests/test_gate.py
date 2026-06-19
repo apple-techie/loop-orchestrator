@@ -50,9 +50,12 @@ def test_safe_defaults():
     assert classify(add_lane(), 3, CFG) == "safe"
 
 
-def test_stop_and_escalate_always_safe():
+def test_stop_always_safe():
     assert classify(StopAction(rationale="r"), 99, CFG) == "safe"
-    assert classify(EscalateAction(summary="s", rationale="r"), 99, CFG) == "safe"
+
+
+def test_escalate_requires_operator():
+    assert classify(EscalateAction(summary="s", rationale="r"), 99, CFG) == "destructive"
 
 
 def test_drop_lane_always_destructive():
