@@ -180,6 +180,64 @@ class Substrate:
             raise SubstrateError(argv, proc.returncode, proc.stderr)
         return proc.stdout
 
+    def _verify_argv(self) -> list[str]:
+        hit = shutil.which("loop-verify")
+        if hit:
+            return [hit]
+        uv = shutil.which("uv")
+        if uv:
+            return [uv, "run", "loop-verify"]
+        raise SubstrateError(
+            ["loop-verify"], None, "loop-verify not found on PATH and uv is unavailable"
+        )
+
+    def spawn_verify(
+        self,
+        worktree: str | Path,
+        base: str,
+        tip: str,
+        out_path: str | Path,
+    ) -> int:
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        log_path = out.with_suffix(".log")
+        argv = self._verify_argv() + [
+            "--worktree",
+            str(worktree),
+            "--base",
+            base,
+            "--tip",
+            tip,
+            "--out",
+            str(out),
+        ]
+        try:
+            with open(log_path, "ab") as log:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=self.project_root,
+                    stdout=log,
+                    stderr=log,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            raise SubstrateError(argv, None, f"spawn failed: {exc}") from exc
+        return int(proc.pid)
+
+    def read_verify_result(self, out_path: str | Path) -> dict | None:
+        import json
+
+        path = Path(out_path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return result if isinstance(result, dict) else None
+
     # ── lanes ─────────────────────────────────────────────────────────────
 
     def lanes(self) -> list[LaneInfo]:

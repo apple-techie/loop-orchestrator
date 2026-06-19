@@ -89,6 +89,35 @@ def record_ask(paths: SessionPaths, ask_id: str, lane: str, reply_timeout_s: int
     return ask
 
 
+# ── verify marker ledger ───────────────────────────────────────────────────
+
+
+def load_verify_markers(paths: SessionPaths) -> list[dict]:
+    doc = read_json(paths.verify_markers_path, {"verifies": []})
+    verifies = doc.get("verifies") if isinstance(doc, dict) else None
+    if not isinstance(verifies, list):
+        return []
+    return [marker for marker in verifies if isinstance(marker, dict)]
+
+
+def save_verify_markers(paths: SessionPaths, markers: list[dict]) -> None:
+    atomic_write_json(paths.verify_markers_path, {"verifies": markers})
+
+
+def record_verify_marker(paths: SessionPaths, marker: dict) -> dict:
+    window = marker.get("window")
+    with file_lock(paths.lock_path):
+        markers = [m for m in load_verify_markers(paths) if m.get("window") != window]
+        markers.append(marker)
+        save_verify_markers(paths, markers)
+    return marker
+
+
+def replace_verify_markers(paths: SessionPaths, markers: list[dict]) -> None:
+    with file_lock(paths.lock_path):
+        save_verify_markers(paths, markers)
+
+
 # ── action execution ────────────────────────────────────────────────────────
 
 
@@ -156,6 +185,10 @@ def _predecessor_branch(paths: SessionPaths, window: str) -> str | None:
     entry = loops.get(window) if isinstance(loops, dict) else None
     branch = entry.get("branch") if isinstance(entry, dict) else None
     return branch if isinstance(branch, str) and branch else None
+
+
+def _lane_worktree(paths: SessionPaths, window: str) -> Path:
+    return paths.project_root / ".loop" / "worktrees" / paths.session / window
 
 
 def _is_worktree_lane(paths: SessionPaths | None, window: str) -> bool:
@@ -387,6 +420,35 @@ def execute(
             timeout_s = int(action.get("reply_timeout_s") or 1800)
             record_ask(paths, ask_id, action["lane"], timeout_s)
             events.append("ask", id=ask_id, lane=action["lane"], reply_timeout_s=timeout_s)
+    elif kind == "verify":
+        if paths is None:
+            raise SubstrateError([kind], None, "verify requires engine session paths")
+        window = action.get("lane") or action.get("window")
+        if not isinstance(window, str) or not window:
+            raise SubstrateError([kind], None, "verify requires a target lane")
+        branch = _predecessor_branch(paths, window)
+        if branch is None:
+            raise SubstrateError([kind, window], None, "target lane has no ledger branch")
+        base = "main"
+        out_path = paths.verify_result_path(window)
+        pid = substrate.spawn_verify(_lane_worktree(paths, window), base, branch, out_path)
+        marker = {
+            "window": window,
+            "branch": branch,
+            "base": base,
+            "tip": branch,
+            "out_path": str(out_path),
+            "pid": pid,
+            "started_at": utc_now(),
+        }
+        record_verify_marker(paths, marker)
+        events.append(
+            "verify-started",
+            window=window,
+            branch=branch,
+            out_path=str(out_path),
+            pid=pid,
+        )
     elif kind == "stop":
         pass
     elif kind == "escalate":

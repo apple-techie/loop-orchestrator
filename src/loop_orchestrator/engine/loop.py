@@ -51,6 +51,39 @@ _AUTO_CLASSES: dict[str, frozenset[str]] = {
 }
 
 
+def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: EventLog) -> None:
+    markers = actions_mod.load_verify_markers(paths)
+    if not markers:
+        return
+    remaining: list[dict] = []
+    changed = False
+    for marker in markers:
+        out_path = marker.get("out_path")
+        if not isinstance(out_path, str) or not out_path:
+            remaining.append(marker)
+            continue
+        result = substrate.read_verify_result(out_path)
+        if result is None:
+            remaining.append(marker)
+            continue
+        overall = result.get("overall")
+        if overall not in ("pass", "concerns", "fail"):
+            remaining.append(marker)
+            continue
+        findings_raw = result.get("findings")
+        findings = len(findings_raw) if isinstance(findings_raw, list) else 0
+        event = "verify-passed" if overall == "pass" else "verify-failed"
+        events.append(
+            event,
+            window=marker.get("window"),
+            overall=overall,
+            findings=findings,
+        )
+        changed = True
+    if changed:
+        actions_mod.replace_verify_markers(paths, remaining)
+
+
 def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
     """Checkpoint-addendum lines: outstanding asks + recently timed-out ones."""
     lines: list[str] = []
@@ -477,6 +510,7 @@ def run_once(
         return 5
 
     substrate = Substrate(root, session)
+    surface_verify_results(substrate, paths, events)
     # B5 (T0035): refresh the ledger loops registry from the task loop: fields (the
     # source of truth) so loop-digest / the deck show every active loop. Non-
     # destructive (F5/T0024): derived status only, hand-authored fields preserved;

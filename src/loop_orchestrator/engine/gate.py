@@ -270,6 +270,10 @@ def classify(
         return BLOCKED
     if text is not None and _ADR_ACCEPT_RE.search(text):
         return BLOCKED
+    if action.kind == "verify":
+        # loop-verify is a read-only review; any merge it justifies remains a
+        # separate human-gated escalate action.
+        return SAFE
     if action.kind == "drop_lane":
         # T0019: a declared 'standing' lane is never auto-dropped — the engine
         # never passes --force, and dropping coord/ops/docs or a long-lived

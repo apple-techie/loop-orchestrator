@@ -13,6 +13,7 @@ from loop_orchestrator.engine.decisions import (
     mark_action,
     resolve,
 )
+from loop_orchestrator.engine.decision import VerifyAction, parse_and_validate
 from loop_orchestrator.paths import SessionPaths
 
 
@@ -137,3 +138,18 @@ def test_mark_action(paths):
     assert doc["actions"][0]["status"] == "executed"
     with pytest.raises(DecisionStateError):
         mark_action(doc, 99, "executed")
+
+
+def test_verify_action_contract_is_minimal_lane_and_rationale():
+    decision = parse_and_validate(
+        """```decision
+version: 1
+critique: committed work is ready for read-only review
+actions:
+  - kind: verify
+    lane: web
+    rationale: ready for loop-verify
+```""",
+        {"web"},
+    )
+    assert decision.actions == [VerifyAction(lane="web", rationale="ready for loop-verify")]

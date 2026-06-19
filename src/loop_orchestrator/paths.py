@@ -83,6 +83,17 @@ class SessionPaths:
         return self.engine_dir / "proposals"
 
     @property
+    def verify_dir(self) -> Path:
+        return self.project_root / ".loop" / "sessions" / self.session / "verify"
+
+    def verify_result_path(self, window: str) -> Path:
+        return self.verify_dir / f"{window}.json"
+
+    @property
+    def verify_markers_path(self) -> Path:
+        return self.engine_dir / "verify-in-progress.json"
+
+    @property
     def pid_path(self) -> Path:
         return self.engine_dir / "engine.pid"
 

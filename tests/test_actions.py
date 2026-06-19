@@ -121,12 +121,19 @@ class AddLaneSub:
     def __init__(self):
         self.calls: list[dict] = []
         self.dispatched: list[tuple] = []
+        self.verifies: list[dict] = []
 
     def add_lane(self, window, **kwargs):
         self.calls.append({"window": window, **kwargs})
 
     def dispatch(self, lane, payload, **k):
         self.dispatched.append((lane, payload))
+
+    def spawn_verify(self, worktree, base, tip, out_path):
+        self.verifies.append(
+            {"worktree": worktree, "base": base, "tip": tip, "out_path": out_path}
+        )
+        return 4242
 
 
 def _add(harness="claude", cmd=None, window="w", brief="b"):
@@ -574,3 +581,36 @@ def test_embed_noop_when_payload_has_no_task_reference(tmp_path):
     action = {"kind": "dispatch", "lane": "web", "payload": "just do the thing", "rationale": "r"}
     actions.execute(action, sub, events, EngineConfig(), paths=paths)
     assert sub.dispatched == [("web", "just do the thing")]
+
+
+# ── T0048: async verify action ──────────────────────────────────────────────
+
+
+def test_verify_action_spawns_detached_runner_and_records_marker(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub()
+    action = {"kind": "verify", "lane": "web", "rationale": "ready for review"}
+
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+
+    out_path = paths.verify_result_path("web")
+    assert sub.verifies == [
+        {
+            "worktree": paths.project_root / ".loop" / "worktrees" / "demo" / "web",
+            "base": "main",
+            "tip": "loop/demo/web",
+            "out_path": out_path,
+        }
+    ]
+    started = [e for e in events.tail(10) if e["event"] == "verify-started"]
+    assert started
+    assert started[-1]["window"] == "web"
+    assert started[-1]["branch"] == "loop/demo/web"
+    assert started[-1]["out_path"] == str(out_path)
+    markers = actions.load_verify_markers(paths)
+    assert len(markers) == 1
+    assert markers[0]["window"] == "web"
+    assert markers[0]["branch"] == "loop/demo/web"
+    assert markers[0]["out_path"] == str(out_path)
+    assert markers[0]["pid"] == 4242

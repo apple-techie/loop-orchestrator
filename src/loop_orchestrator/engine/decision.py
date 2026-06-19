@@ -185,7 +185,27 @@ class EscalateAction:
         _need_str("rationale", self.rationale)
 
 
-Action = DispatchAction | AddLaneAction | DropLaneAction | SteerAction | StopAction | EscalateAction
+@dataclass(frozen=True)
+class VerifyAction:
+    lane: str
+    rationale: str
+    kind: ClassVar[str] = "verify"
+
+    def __post_init__(self):
+        _need_str("lane", self.lane)
+        _need_str("rationale", self.rationale)
+        _no_coord("lane", self.lane)
+
+
+Action = (
+    DispatchAction
+    | AddLaneAction
+    | DropLaneAction
+    | SteerAction
+    | StopAction
+    | EscalateAction
+    | VerifyAction
+)
 
 _ACTION_TYPES: dict[str, type] = {
     "dispatch": DispatchAction,
@@ -194,6 +214,7 @@ _ACTION_TYPES: dict[str, type] = {
     "steer": SteerAction,
     "stop": StopAction,
     "escalate": EscalateAction,
+    "verify": VerifyAction,
 }
 
 
@@ -280,7 +301,9 @@ def validate(raw: dict, live_lanes: set[str], raw_text: str = "") -> Decision:
     for idx, raw_action in enumerate(raw_actions):
         action = _build_action(idx, raw_action)
         live = ", ".join(sorted(live_lanes)) or "(none)"
-        if isinstance(action, DispatchAction | SteerAction) and action.lane not in live_lanes:
+        if isinstance(action, DispatchAction | SteerAction | VerifyAction) and (
+            action.lane not in live_lanes
+        ):
             raise DecisionValidationError(
                 f"action {idx} ({action.kind}): unknown lane {action.lane!r}; live lanes: {live}"
             )

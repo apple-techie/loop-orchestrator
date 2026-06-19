@@ -11,6 +11,7 @@ from loop_orchestrator.engine.decision import (
     EscalateAction,
     SteerAction,
     StopAction,
+    VerifyAction,
 )
 from loop_orchestrator.engine.gate import classify, classify_batch
 
@@ -52,6 +53,10 @@ def test_safe_defaults():
 
 def test_stop_always_safe():
     assert classify(StopAction(rationale="r"), 99, CFG) == "safe"
+
+
+def test_verify_is_safe_read_only_review():
+    assert classify(VerifyAction(lane="web", rationale="review committed work"), 99, CFG) == "safe"
 
 
 def test_escalate_requires_operator():

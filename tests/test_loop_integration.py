@@ -888,3 +888,93 @@ def test_ingest_timeout_default_is_below_brain_timeout():
     assert cfg.ingest.timeout_s == 120
     assert cfg.brain.timeout_s == 300  # unchanged
     assert cfg.ingest.timeout_s < cfg.brain.timeout_s
+
+
+# ── T0048: completed async verify results surface in a later cycle ──────────
+
+from loop_orchestrator.engine.actions import load_verify_markers, record_verify_marker  # noqa: E402
+from loop_orchestrator.engine.loop import surface_verify_results  # noqa: E402
+
+
+def _write_verify_result(paths: SessionPaths, window: str, overall: str, findings: int = 0) -> None:
+    result = {
+        "overall": overall,
+        "gate": {"passed": overall == "pass"},
+        "lenses": [],
+        "findings": [{"id": str(i)} for i in range(findings)],
+        "generated_at": "2026-06-18T00:00:00Z",
+    }
+    paths.verify_result_path(window).parent.mkdir(parents=True, exist_ok=True)
+    paths.verify_result_path(window).write_text(json.dumps(result), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("overall", "event"),
+    [("pass", "verify-passed"), ("concerns", "verify-failed"), ("fail", "verify-failed")],
+)
+def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall, event):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(paths.verify_result_path("web")),
+            "pid": 123,
+            "started_at": "2026-06-18T00:00:00Z",
+        },
+    )
+    _write_verify_result(paths, "web", overall, findings=2)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    emitted = [e for e in _events(paths) if e["event"] == event]
+    assert emitted
+    assert emitted[-1]["window"] == "web"
+    assert emitted[-1]["overall"] == overall
+    assert emitted[-1]["findings"] == 2
+    assert load_verify_markers(paths) == []
+
+
+def test_surface_verify_missing_result_leaves_marker_in_progress(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_result_path("web")),
+        "pid": 123,
+        "started_at": "2026-06-18T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    assert not any(e["event"].startswith("verify-") for e in emitted)
+
+
+def test_surface_verify_corrupt_result_leaves_marker_in_progress(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_result_path("web")),
+        "pid": 123,
+        "started_at": "2026-06-18T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    paths.verify_result_path("web").parent.mkdir(parents=True, exist_ok=True)
+    paths.verify_result_path("web").write_text("{not-json", encoding="utf-8")
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    assert not any(e["event"].startswith("verify-") for e in emitted)
