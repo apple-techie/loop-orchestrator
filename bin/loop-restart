@@ -153,7 +153,11 @@ restart_pid=$!
 
 _dump_restart_log() { [[ -s "$restart_log" ]] && sed 's/^/  | /' "$restart_log" >&2 || true; }
 
-restart_timeout="${LOOP_RESTART_TIMEOUT:-30}"
+# A genuine swap (stop the old daemon — which may be mid-cycle — then start the
+# new one and wait for its first fresh heartbeat) routinely takes >30s, so the
+# strict swap-confirmation needs real headroom; the old 30s false-passed only
+# because it accepted the OLD daemon's heartbeat. Override with LOOP_RESTART_TIMEOUT.
+restart_timeout="${LOOP_RESTART_TIMEOUT:-60}"
 max_heartbeat="${LOOP_RESTART_MAX_HEARTBEAT:-15}"
 ready=""
 deadline=$((SECONDS + restart_timeout))
