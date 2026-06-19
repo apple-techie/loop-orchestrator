@@ -44,6 +44,11 @@ _INGEST_HEADING = "### Ingest protocol"
 
 # Timed-out asks stay visible in the checkpoint addendum this long.
 _ASK_TIMEOUT_RECENCY_S = 3600
+_VERIFY_DRIVE_OUTCOME_EVENTS = frozenset(
+    {"verify-passed", "verify-failed", "verify-timeout"}
+)
+_VERIFY_DRIVE_EVENT_TAIL = 100
+_VERIFY_DRIVE_OUTCOME_LIMIT = 5
 _VERIFY_DIFF_TIMEOUT_S = 60
 _VERIFY_TIMEOUT_BUFFER_S = 1140
 _VERIFY_TIMEOUT_S = (
@@ -184,6 +189,89 @@ def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
     return lines or ["(none)"]
 
 
+def _recent_verify_outcomes(paths: SessionPaths) -> list[dict]:
+    outcomes = [
+        event
+        for event in EventLog(paths.events_path).tail(_VERIFY_DRIVE_EVENT_TAIL)
+        if event.get("event") in _VERIFY_DRIVE_OUTCOME_EVENTS
+        and isinstance(event.get("window"), str)
+        and event.get("window")
+    ]
+    return outcomes[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
+
+
+def _loop_updated_after_outcome(snap: EngineSnapshot, window: str, outcome: dict) -> bool:
+    entry = snap.loops.get(window)
+    updated_at = entry.get("updated_at") if isinstance(entry, dict) else None
+    event_ts = outcome.get("ts")
+    if not isinstance(updated_at, str) or not isinstance(event_ts, str):
+        return False
+    try:
+        return parse_ts(updated_at) > parse_ts(event_ts)
+    except ValueError:
+        return False
+
+
+def _verify_drive_lines(snap: EngineSnapshot, paths: SessionPaths) -> list[str]:
+    markers = actions_mod.load_verify_markers(paths)
+    in_flight_windows = {
+        window
+        for marker in markers
+        if isinstance((window := marker.get("window")), str) and window
+    }
+    outcomes = _recent_verify_outcomes(paths)
+    latest_outcome = {
+        str(outcome["window"]): outcome
+        for outcome in outcomes
+        if isinstance(outcome.get("window"), str)
+    }
+
+    ready: list[str] = []
+    for lane in sorted(snap.lanes):
+        info = snap.lanes[lane]
+        if info.get("status") != "idle" or lane in in_flight_windows:
+            continue
+        branch = actions_mod._predecessor_branch(paths, lane)
+        if branch is None:
+            continue
+        outcome = latest_outcome.get(lane)
+        if outcome is not None and not _loop_updated_after_outcome(snap, lane, outcome):
+            continue
+        ready.append(f"- lane={lane} branch={branch} status=idle")
+
+    lines: list[str] = []
+    if ready:
+        lines.append("ready-to-verify:")
+        lines.extend(ready)
+    if markers:
+        lines.append("verify in flight:")
+        for marker in markers:
+            window = marker.get("window")
+            if not isinstance(window, str) or not window:
+                continue
+            branch = marker.get("branch") or actions_mod._predecessor_branch(paths, window)
+            lines.append(
+                f"- window={window} branch={branch or '(unknown)'} "
+                f"started_at={marker.get('started_at')} pid={marker.get('pid')}"
+            )
+    if outcomes:
+        lines.append("recent verify outcomes:")
+        for outcome in outcomes:
+            window = str(outcome["window"])
+            branch = actions_mod._predecessor_branch(paths, window)
+            overall = outcome.get("overall")
+            if outcome.get("event") == "verify-timeout" and not overall:
+                overall = "timeout"
+            lines.append(
+                f"- window={window} event={outcome.get('event')} "
+                f"overall={overall or '(unknown)'} findings={outcome.get('findings', '?')} "
+                f"branch={branch or '(unknown)'}"
+            )
+    if not lines:
+        return []
+    return ["--- verify drive ---", *lines]
+
+
 # Condensed plan-A.4 selection rubric, appended to the brain prompt alongside
 # the roster (only once a harness_policy is written — the empty policy keeps
 # the prompt byte-identical to today). ~700 chars, far under the 24000-token
@@ -205,6 +293,16 @@ watcher / probe / log tail: shell; process dashboard: mprocs
 tie-breakers: reproducibility required -> exclude amp (cannot pin a model);
 unattended-destructive -> only claude/codex/hermes/amp; high drift +
 unattended + high-risk role -> the gate forces human approval."""
+
+
+_DRIVE_RUBRIC = """\
+--- verify drive rubric (first match wins) ---
+ready-to-verify lane -> propose `verify` for that lane.
+recent verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
+recent verify-failed/verify-timeout -> propose `dispatch`/`steer` fix to that lane.
+Include the named findings in the fix payload.
+Never merge directly; the escalate action is the single human gate.
+Never escalate-merge a failed or timed-out build."""
 
 
 def _roster_lines(roster: dict[str, dict], config: EngineConfig) -> list[str]:
@@ -279,6 +377,10 @@ def _assemble_prompt(
         lines.append("(none)")
     lines.append("--- outstanding asks ---")
     lines.extend(_ask_lines(actions_mod.load_asks(paths), datetime.now(timezone.utc)))
+    verify_drive = _verify_drive_lines(snap, paths)
+    if verify_drive:
+        lines.extend(verify_drive)
+        lines.append(_DRIVE_RUBRIC)
     if roster is not None and config is not None:
         lines.extend(_roster_lines(roster, config))
     return "\n".join(lines) + "\n"

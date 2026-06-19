@@ -702,8 +702,12 @@ def test_action_line_truncates_long_payload():
 # ── boot validation + brain-prompt roster rubric (T0014) ───────────────────
 
 from loop_orchestrator.engine.config import HarnessPolicy  # noqa: E402
-from loop_orchestrator.engine.loop import _assemble_prompt, validate_boot_config  # noqa: E402
-from loop_orchestrator.engine.observe import Observer  # noqa: E402
+from loop_orchestrator.engine.loop import (  # noqa: E402
+    _DRIVE_RUBRIC,
+    _assemble_prompt,
+    validate_boot_config,
+)
+from loop_orchestrator.engine.observe import EngineSnapshot, Observer  # noqa: E402
 from loop_orchestrator.substrate import Substrate  # noqa: E402
 
 
@@ -788,6 +792,18 @@ ROSTER_FIXTURE = {
 }
 
 
+def _prompt_snap(lanes: dict[str, dict[str, str]], loops: dict | None = None) -> EngineSnapshot:
+    return EngineSnapshot(
+        generated_at="2026-06-19T00:00:00Z",
+        lanes=lanes,
+        loops=loops or {},
+        mailbox_pending=[],
+        processed_count=0,
+        restarts_tail=[],
+        checkpoint_tokens=None,
+    )
+
+
 def test_prompt_roster_block_filtered_and_rubric(project):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -810,6 +826,68 @@ def test_prompt_unchanged_without_roster(project):
     prompt = _assemble_prompt(sub, snap, paths)
     assert "harness roster" not in prompt
     assert "selection rubric" not in prompt
+
+
+def test_prompt_verify_drive_addendum_and_rubric(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {
+        "ready": {"branch": "loop/demo/ready"},
+        "verifying": {"branch": "loop/demo/verifying"},
+        "passed": {"branch": "loop/demo/passed"},
+    }
+    atomic_write_json(paths.state_file, {"loops": loops})
+    record_verify_marker(
+        paths,
+        {
+            "window": "verifying",
+            "branch": "loop/demo/verifying",
+            "out_path": str(paths.verify_dir / "verifying-current.json"),
+            "pid": 123,
+            "started_at": "2026-06-19T00:00:00Z",
+        },
+    )
+    EventLog(paths.events_path).append(
+        "verify-passed", window="passed", overall="pass", findings=2
+    )
+    snap = _prompt_snap(
+        {
+            "passed": {"status": "idle", "target": "", "kind": "claude"},
+            "ready": {"status": "idle", "target": "", "kind": "claude"},
+            "verifying": {"status": "idle", "target": "", "kind": "claude"},
+        },
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "--- verify drive ---" in prompt
+    assert "ready-to-verify:\n- lane=ready branch=loop/demo/ready status=idle" in prompt
+    assert "verify in flight:\n- window=verifying branch=loop/demo/verifying" in prompt
+    assert (
+        "recent verify outcomes:\n- window=passed event=verify-passed "
+        "overall=pass findings=2 branch=loop/demo/passed"
+    ) in prompt
+    assert _DRIVE_RUBRIC in prompt
+
+
+def test_prompt_without_verify_drive_state_is_byte_identical(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}})
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert prompt == (
+        "# Base\n"
+        "\n"
+        "--- live lane status ---\n"
+        "web idle claude\n"
+        "--- lane restarts (tail) ---\n"
+        "(none)\n"
+        "--- outstanding asks ---\n"
+        "(none)\n"
+    )
 
 
 # ── F16 (T0041): checkpoint overflow degrades, never aborts the cycle ────────
