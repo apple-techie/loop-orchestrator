@@ -423,6 +423,39 @@ def _verified_tip(paths: SessionPaths, lane: str) -> str | None:
     return verified_tip if isinstance(verified_tip, str) and verified_tip else None
 
 
+def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
+    """Map loop-id -> open task ids (status open/in-progress/review) parsed from
+    tasks/, so the awaiting-build drive section can point the brain at the backlog
+    for an idle lane. Mirrors derive_loops_from_tasks' frontmatter parsing; a
+    malformed task file is skipped, never fatal."""
+    import yaml
+
+    from ..pm import taskfiles
+
+    backlog: dict[str, list[str]] = {}
+    try:
+        task_paths = taskfiles.list_tasks(paths.tasks_dir)
+    except OSError:
+        return backlog
+    for path in task_paths:
+        try:
+            fm = taskfiles.parse_frontmatter(path)
+        except (ValueError, yaml.YAMLError):
+            continue
+        loop = fm.get("loop")
+        task_id = fm.get("id")
+        status = str(fm.get("status") or "")
+        if (
+            isinstance(loop, str)
+            and loop
+            and isinstance(task_id, str)
+            and task_id
+            and status in ("open", "in-progress", "review")
+        ):
+            backlog.setdefault(loop, []).append(task_id)
+    return backlog
+
+
 def _verify_drive_lines(
     substrate: Substrate, snap: EngineSnapshot, paths: SessionPaths
 ) -> list[str]:
@@ -445,8 +478,16 @@ def _verify_drive_lines(
         if isinstance(outcome.get("window"), str)
     }
 
+    # Shared base (main HEAD): a lane whose branch is AT base has nothing built
+    # yet (awaiting-build), and a lane ahead of base has a non-empty diff to
+    # review (ready-to-verify). Resolving main from the project root is
+    # worktree-independent (linked worktrees share .git).
+    base_head = substrate.branch_head(paths.project_root, "main")
+    open_backlog = _open_backlog_by_loop(paths)
+
     ready: list[str] = []
     ready_lanes: set[str] = set()
+    awaiting: list[str] = []
     for lane in sorted(snap.lanes):
         info = snap.lanes[lane]
         if (
@@ -460,6 +501,21 @@ def _verify_drive_lines(
             continue
         head = substrate.branch_head(actions_mod._lane_worktree(paths, lane), branch)
         verified_tip = _verified_tip(paths, lane)
+        # Awaiting-build: the branch is AT base (nothing built) and the lane has
+        # open backlog -> the brain should propose a `build`, not a `verify`. This
+        # closes the cold-start gap: without it a fresh lane at main false-read as
+        # ready-to-verify (head != verified_tip=None) and there was no signal that
+        # an idle lane was waiting for its first build.
+        if head is not None and base_head is not None and head == base_head:
+            tasks = open_backlog.get(lane)
+            if tasks:
+                awaiting.append(
+                    f"- lane={lane} branch={branch} status=idle at-base "
+                    f"open-tasks={','.join(tasks)}"
+                )
+            continue
+        # Ready-to-verify requires the branch to be AHEAD of base (the at-base
+        # case is handled above), so a lane sitting at main never false-reads ready.
         if head is None:
             if lane in latest_outcome:
                 continue
@@ -473,6 +529,9 @@ def _verify_drive_lines(
     outcomes = [outcome for outcome in outcomes if str(outcome["window"]) not in ready_lanes]
 
     lines: list[str] = []
+    if awaiting:
+        lines.append("awaiting-build:")
+        lines.extend(awaiting)
     if ready:
         lines.append("ready-to-verify:")
         lines.extend(ready)
@@ -554,7 +613,7 @@ unattended + high-risk role -> the gate forces human approval."""
 _DRIVE_RUBRIC = """\
 --- verify drive rubric ---
 Act on each window's latest listed outcome only.
-assigned/unbuilt task on an idle lane -> propose `build` with a concise implementation brief.
+awaiting-build lane -> propose a `build` for that lane with a brief drawn from a named open task.
 build in flight -> wait; do not propose another `build` for that window.
 latest build-done -> lane is ready-to-verify.
 latest build-timeout -> propose `dispatch`/`steer` fix or a narrower `build`.

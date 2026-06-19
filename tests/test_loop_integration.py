@@ -937,6 +937,56 @@ def test_prompt_verify_drive_addendum_and_rubric(project):
     assert _DRIVE_RUBRIC in prompt
 
 
+def test_prompt_verify_drive_awaiting_build_for_idle_lane_at_base(project, monkeypatch):
+    # Cold-start: an idle worktree lane whose branch is AT base (nothing built)
+    # with open backlog must surface as awaiting-build (so the brain proposes a
+    # `build`), NOT ready-to-verify.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"code": {"branch": "loop/demo/code"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    (paths.tasks_dir / "T9999-demo.md").write_text(
+        "---\nid: T9999\ntitle: demo\nstatus: open\nloop: code\n"
+        "depends_on: []\nscope: src\n---\n\n# T9999\n",
+        encoding="utf-8",
+    )
+    # Lane branch and main resolve to the SAME sha -> the lane is at base.
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "base-sha")
+    snap = _prompt_snap(
+        {"code": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert (
+        "awaiting-build:\n- lane=code branch=loop/demo/code status=idle at-base open-tasks=T9999"
+        in prompt
+    )
+    assert "ready-to-verify:" not in prompt
+    assert _DRIVE_RUBRIC in prompt
+
+
+def test_prompt_verify_drive_no_awaiting_build_without_open_backlog(project, monkeypatch):
+    # An idle lane at base with NO open backlog must produce no awaiting-build
+    # line (no spurious build prompt).
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"code": {"branch": "loop/demo/code"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "base-sha")
+    snap = _prompt_snap(
+        {"code": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "awaiting-build:" not in prompt
+    assert "ready-to-verify:" not in prompt
+
+
 def test_prompt_verify_drive_shows_latest_outcome_per_window(project):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -966,7 +1016,13 @@ def test_prompt_verify_drive_rearms_after_failed_verify_when_head_advances(proje
     loops = {"fix": {"branch": "loop/demo/fix", "verified_tip": "old-sha"}}
     atomic_write_json(paths.state_file, {"loops": loops})
     EventLog(paths.events_path).append("verify-failed", window="fix", overall="fail", findings=1)
-    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "new-sha")
+    # main resolves to a distinct base so the lane reads ahead-of-base (ready),
+    # not at-base (awaiting-build).
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "base-sha" if branch == "main" else "new-sha",
+    )
     snap = _prompt_snap(
         {"fix": {"status": "idle", "target": "", "kind": "claude"}},
         loops=loops,
@@ -999,7 +1055,11 @@ def test_prompt_verify_drive_rearms_after_branch_advances_past_spawn_sha(project
     )
     _write_verify_result(out_path, "pass")
     surface_verify_results(Substrate(project, "demo"), paths, events)
-    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "base-sha" if branch == "main" else "sha-b",
+    )
     snap = _prompt_snap(
         {"web": {"status": "idle", "target": "", "kind": "claude"}},
         loops=loops,
