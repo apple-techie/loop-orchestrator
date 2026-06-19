@@ -213,9 +213,7 @@ def test_branch_head_returns_rev_parse_stdout(sub, monkeypatch, tmp_path):
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
-        return substrate_mod.subprocess.CompletedProcess(
-            argv, 0, stdout="abc123\n", stderr=""
-        )
+        return substrate_mod.subprocess.CompletedProcess(argv, 0, stdout="abc123\n", stderr="")
 
     monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
 

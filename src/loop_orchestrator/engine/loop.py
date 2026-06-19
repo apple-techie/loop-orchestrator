@@ -87,6 +87,12 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                         age_s = _VERIFY_TIMEOUT_S + 1
                     if age_s > _VERIFY_TIMEOUT_S:
                         _terminate_verify_runner(substrate, marker.get("pid"), events)
+                        # Record verified_tip on timeout too (as pass/fail do) so the
+                        # ready-to-verify gate re-arms when the branch ADVANCES past the
+                        # timed-out SHA; otherwise verified_tip stays None and the
+                        # None-fallback suppresses the lane head-blind, stalling a
+                        # timed-out-then-fixed build forever.
+                        _maybe_record_verified_tip(paths, marker)
                         events.append(
                             "verify-timeout",
                             window=marker.get("window"),
@@ -106,9 +112,7 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 findings = len(findings_raw) if isinstance(findings_raw, list) else 0
                 event = "verify-passed" if overall == "pass" else "verify-failed"
                 window = marker.get("window")
-                tip_sha = marker.get("tip_sha")
-                if isinstance(window, str) and window and isinstance(tip_sha, str) and tip_sha:
-                    _record_verified_tip(paths, window, tip_sha)
+                _maybe_record_verified_tip(paths, marker)
                 events.append(
                     event,
                     window=window,
@@ -154,6 +158,17 @@ def _record_verified_tip(paths: SessionPaths, window: str, verified_tip: str) ->
         loops[window] = entry
     entry["verified_tip"] = verified_tip
     atomic_write_json(paths.state_file, ledger)
+
+
+def _maybe_record_verified_tip(paths: SessionPaths, marker: dict) -> None:
+    """Record loops.<window>.verified_tip = the SHA this verify ran against
+    (marker['tip_sha'], snapshotted at spawn) when both are present. Called for
+    pass, fail, AND timeout so the ready-to-verify gate re-arms only when the
+    branch advances past the verified SHA."""
+    window = marker.get("window")
+    tip_sha = marker.get("tip_sha")
+    if isinstance(window, str) and window and isinstance(tip_sha, str) and tip_sha:
+        _record_verified_tip(paths, window, tip_sha)
 
 
 def _terminate_verify_runner(

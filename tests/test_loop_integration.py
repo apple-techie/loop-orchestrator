@@ -893,9 +893,7 @@ def test_prompt_verify_drive_shows_latest_outcome_per_window(project):
     assert "- lane=flaky branch=loop/demo/flaky status=idle" not in prompt
 
 
-def test_prompt_verify_drive_rearms_after_failed_verify_when_head_advances(
-    project, monkeypatch
-):
+def test_prompt_verify_drive_rearms_after_failed_verify_when_head_advances(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     loops = {"fix": {"branch": "loop/demo/fix", "verified_tip": "old-sha"}}
@@ -912,9 +910,7 @@ def test_prompt_verify_drive_rearms_after_failed_verify_when_head_advances(
     assert "ready-to-verify:\n- lane=fix branch=loop/demo/fix status=idle" in prompt
 
 
-def test_prompt_verify_drive_rearms_after_branch_advances_past_spawn_sha(
-    project, monkeypatch
-):
+def test_prompt_verify_drive_rearms_after_branch_advances_past_spawn_sha(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     loops = {"web": {"branch": "loop/demo/web"}}
@@ -1338,6 +1334,37 @@ def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monke
     assert emitted[-1]["window"] == "web"
     assert emitted[-1]["pid"] == 123
     assert [pid for pid, _sig in killed] == [123, 123]
+
+
+def test_surface_verify_timeout_records_verified_tip_for_rearm(project, monkeypatch):
+    # A timed-out verify records verified_tip from the spawn-time tip_sha (as pass/
+    # fail do), so the ready-to-verify gate re-arms when the branch advances past the
+    # timed-out SHA — a timed-out-then-fixed build must not stall forever.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    atomic_write_json(paths.state_file, {"loops": {"web": {"branch": "loop/demo/web"}}})
+    events = EventLog(paths.events_path)
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(paths.verify_dir / "web-missing.json"),
+            "pid": 123,
+            "tip_sha": "timed-out-sha",
+            "started_at": "2000-01-01T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify")
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: None)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []
+    assert [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    state = json.loads(paths.state_file.read_text(encoding="utf-8"))
+    assert state["loops"]["web"]["verified_tip"] == "timed-out-sha"
 
 
 def test_surface_verify_timeout_permission_error_does_not_crash_and_clears(project, monkeypatch):
