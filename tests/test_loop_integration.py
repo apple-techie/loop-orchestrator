@@ -912,6 +912,44 @@ def test_prompt_verify_drive_rearms_after_failed_verify_when_head_advances(
     assert "ready-to-verify:\n- lane=fix branch=loop/demo/fix status=idle" in prompt
 
 
+def test_prompt_verify_drive_rearms_after_branch_advances_past_spawn_sha(
+    project, monkeypatch
+):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-run-pass.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "base": "main",
+            "tip": "sha-a",
+            "tip_sha": "sha-a",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, "pass")
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    snap = _prompt_snap(
+        {"web": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    state = json.loads(paths.state_file.read_text(encoding="utf-8"))
+    assert state["loops"]["web"]["verified_tip"] == "sha-a"
+    assert "ready-to-verify:\n- lane=web branch=loop/demo/web status=idle" in prompt
+    assert "window=web event=verify-passed" not in prompt
+
+
 @pytest.mark.parametrize(
     ("event", "overall"),
     [("verify-passed", "pass"), ("verify-failed", "fail")],
@@ -933,6 +971,24 @@ def test_prompt_verify_drive_suppresses_outcome_when_head_has_not_advanced(
     prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
 
     assert "- lane=web branch=loop/demo/web status=idle" not in prompt
+
+
+def test_prompt_verify_drive_suppresses_git_error_with_recent_outcome(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    EventLog(paths.events_path).append("verify-passed", window="web", overall="pass", findings=0)
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: None)
+    snap = _prompt_snap(
+        {"web": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "ready-to-verify:" not in prompt
+    assert "window=web event=verify-passed overall=pass findings=0 branch=loop/demo/web" in prompt
 
 
 def test_prompt_verify_drive_suppression_uses_full_outcome_tail_not_display_cap(
@@ -1155,7 +1211,37 @@ def test_surface_verify_result_emits_verdict_and_clears_marker(project, overall,
     assert load_verify_markers(paths) == []
 
 
-def test_surface_verify_result_records_verified_tip(project, monkeypatch):
+def test_surface_verify_result_records_verified_tip_from_marker(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    atomic_write_json(paths.state_file, {"loops": {"web": {"branch": "loop/demo/web"}}})
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-run-pass.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "tip_sha": "spawn-sha",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, "pass")
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, _branch: pytest.fail("surface must use marker tip_sha"),
+    )
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    state = json.loads(paths.state_file.read_text(encoding="utf-8"))
+    assert state["loops"]["web"]["verified_tip"] == "spawn-sha"
+
+
+def test_surface_verify_result_without_tip_sha_does_not_record_verified_tip(project):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     atomic_write_json(paths.state_file, {"loops": {"web": {"branch": "loop/demo/web"}}})
@@ -1172,12 +1258,11 @@ def test_surface_verify_result_records_verified_tip(project, monkeypatch):
         },
     )
     _write_verify_result(out_path, "pass")
-    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "tip-sha")
 
     surface_verify_results(Substrate(project, "demo"), paths, events)
 
     state = json.loads(paths.state_file.read_text(encoding="utf-8"))
-    assert state["loops"]["web"]["verified_tip"] == "tip-sha"
+    assert "verified_tip" not in state["loops"]["web"]
 
 
 def test_surface_verify_missing_result_leaves_marker_in_progress(project):

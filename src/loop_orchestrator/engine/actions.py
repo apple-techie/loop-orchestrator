@@ -429,6 +429,7 @@ def execute(
         started_at = utc_now()
         run_token = uuid.uuid4().hex[:12]
         out_path = paths.verify_run_result_path(window, run_token)
+        worktree = _lane_worktree(paths, window)
         with file_lock(paths.lock_path):
             existing = next(
                 (m for m in load_verify_markers(paths) if m.get("window") == window),
@@ -443,16 +444,20 @@ def execute(
                     pid=existing.get("pid"),
                 )
                 return
-            pid = substrate.spawn_verify(_lane_worktree(paths, window), base, branch, out_path)
+            tip_sha = substrate.branch_head(worktree, branch)
+            verify_tip = tip_sha or branch
+            pid = substrate.spawn_verify(worktree, base, verify_tip, out_path)
             marker = {
                 "window": window,
                 "branch": branch,
                 "base": base,
-                "tip": branch,
+                "tip": verify_tip,
                 "out_path": str(out_path),
                 "pid": pid,
                 "started_at": started_at,
             }
+            if tip_sha is not None:
+                marker["tip_sha"] = tip_sha
             markers = load_verify_markers(paths)
             markers.append(marker)
             save_verify_markers(paths, markers)

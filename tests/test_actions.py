@@ -118,10 +118,11 @@ def test_handoff_breadcrumb_is_append_only(tmp_path):
 
 
 class AddLaneSub:
-    def __init__(self):
+    def __init__(self, branch_heads: list[str | None] | None = None):
         self.calls: list[dict] = []
         self.dispatched: list[tuple] = []
         self.verifies: list[dict] = []
+        self.branch_heads = list(branch_heads or [])
 
     def add_lane(self, window, **kwargs):
         self.calls.append({"window": window, **kwargs})
@@ -132,6 +133,11 @@ class AddLaneSub:
     def spawn_verify(self, worktree, base, tip, out_path):
         self.verifies.append({"worktree": worktree, "base": base, "tip": tip, "out_path": out_path})
         return 4242
+
+    def branch_head(self, worktree, branch):
+        if self.branch_heads:
+            return self.branch_heads.pop(0)
+        return None
 
 
 class FailingVerifySub(AddLaneSub):
@@ -592,7 +598,7 @@ def test_embed_noop_when_payload_has_no_task_reference(tmp_path):
 def test_verify_action_spawns_detached_runner_and_records_marker(tmp_path):
     paths, events = _env(tmp_path)
     _seed_branch(paths, "web", branch="loop/demo/web")
-    sub = AddLaneSub()
+    sub = AddLaneSub(branch_heads=["sha-a"])
     action = {"kind": "verify", "lane": "web", "rationale": "ready for review"}
 
     actions.execute(action, sub, events, EngineConfig(), paths=paths)
@@ -607,7 +613,7 @@ def test_verify_action_spawns_detached_runner_and_records_marker(tmp_path):
         {
             "worktree": paths.project_root / ".loop" / "worktrees" / "demo" / "web",
             "base": "main",
-            "tip": "loop/demo/web",
+            "tip": "sha-a",
             "out_path": out_path,
         }
     ]
@@ -620,8 +626,29 @@ def test_verify_action_spawns_detached_runner_and_records_marker(tmp_path):
     assert len(markers) == 1
     assert markers[0]["window"] == "web"
     assert markers[0]["branch"] == "loop/demo/web"
+    assert markers[0]["tip"] == "sha-a"
+    assert markers[0]["tip_sha"] == "sha-a"
     assert markers[0]["out_path"] == str(out_path)
     assert markers[0]["pid"] == 4242
+
+
+def test_verify_action_omits_tip_sha_when_branch_head_is_unresolved(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub(branch_heads=[None])
+
+    actions.execute(
+        {"kind": "verify", "lane": "web", "rationale": "ready"},
+        sub,
+        events,
+        EngineConfig(),
+        paths=paths,
+    )
+
+    assert sub.verifies[0]["tip"] == "loop/demo/web"
+    marker = actions.load_verify_markers(paths)[0]
+    assert marker["tip"] == "loop/demo/web"
+    assert "tip_sha" not in marker
 
 
 def test_verify_action_skips_when_marker_exists(tmp_path):

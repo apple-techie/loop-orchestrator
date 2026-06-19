@@ -106,13 +106,9 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 findings = len(findings_raw) if isinstance(findings_raw, list) else 0
                 event = "verify-passed" if overall == "pass" else "verify-failed"
                 window = marker.get("window")
-                branch = marker.get("branch")
-                if isinstance(window, str) and window and isinstance(branch, str) and branch:
-                    verified_tip = substrate.branch_head(
-                        actions_mod._lane_worktree(paths, window), branch
-                    )
-                    if verified_tip is not None:
-                        _record_verified_tip(paths, window, verified_tip)
+                tip_sha = marker.get("tip_sha")
+                if isinstance(window, str) and window and isinstance(tip_sha, str) and tip_sha:
+                    _record_verified_tip(paths, window, tip_sha)
                 events.append(
                     event,
                     window=window,
@@ -224,10 +220,6 @@ def _latest_verify_outcomes(paths: SessionPaths) -> list[dict]:
     return list(latest_by_window.values())
 
 
-def _recent_verify_outcomes(paths: SessionPaths) -> list[dict]:
-    return _latest_verify_outcomes(paths)[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
-
-
 def _verified_tip(paths: SessionPaths, lane: str) -> str | None:
     ledger = read_json(paths.state_file, {})
     loops = ledger.get("loops") if isinstance(ledger, dict) else None
@@ -254,6 +246,7 @@ def _verify_drive_lines(
     }
 
     ready: list[str] = []
+    ready_lanes: set[str] = set()
     for lane in sorted(snap.lanes):
         info = snap.lanes[lane]
         if info.get("status") != "idle" or lane in in_flight_windows:
@@ -262,12 +255,18 @@ def _verify_drive_lines(
         if branch is None:
             continue
         head = substrate.branch_head(actions_mod._lane_worktree(paths, lane), branch)
+        verified_tip = _verified_tip(paths, lane)
         if head is None:
             if lane in latest_outcome:
                 continue
-        elif head == _verified_tip(paths, lane):
+        elif verified_tip is None and lane in latest_outcome:
             continue
+        elif head == verified_tip:
+            continue
+        ready_lanes.add(lane)
         ready.append(f"- lane={lane} branch={branch} status=idle")
+
+    outcomes = [outcome for outcome in outcomes if str(outcome["window"]) not in ready_lanes]
 
     lines: list[str] = []
     if ready:
