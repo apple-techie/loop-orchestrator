@@ -184,7 +184,9 @@ def test_git_diff_returns_stdout(sub, monkeypatch):
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs["cwd"], kwargs["timeout"]))
-        return substrate_mod.subprocess.CompletedProcess(argv, 0, stdout="diff --git a b\n", stderr="")
+        return substrate_mod.subprocess.CompletedProcess(
+            argv, 0, stdout="diff --git a b\n", stderr=""
+        )
 
     monkeypatch.setattr(substrate_mod.subprocess, "run", fake_run)
 

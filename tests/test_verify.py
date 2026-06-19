@@ -79,8 +79,8 @@ def test_lens_fail_is_overall_fail(tmp_path, monkeypatch):
     _set_gate(monkeypatch, True)
     one = _stub(
         tmp_path / "one",
-        "prompt=\"${@: -1}\"\n"
-        f"if [[ \"$prompt\" == *\"adversarial\"* ]]; then reply='{_json_reply('fail')}'; "
+        'prompt="${@: -1}"\n'
+        f'if [[ "$prompt" == *"adversarial"* ]]; then reply=\'{_json_reply("fail")}\'; '
         f"else reply='{_json_reply('pass')}'; fi\n"
         "printf '%s\\n%s\\n%s\\n' '```verdict' \"$reply\" '```'\n",
     )
@@ -172,6 +172,31 @@ def test_verdict_fence_wins_before_json_example(tmp_path, monkeypatch):
     assert result.findings[0]["severity"] == "critical"
 
 
+def test_two_verdict_fences_are_concerns_not_false_pass(tmp_path, monkeypatch):
+    # The dangerous self-inflicted case found by adversarial review: an agent emits
+    # its REAL fail verdict, then echoes a "here's what a clean pass looks like"
+    # ```verdict example. Two verdict fences are AMBIGUOUS -> concerns; a trailing
+    # pass example must NEVER flip the real fail to a false pass.
+    worktree, base, tip = _repo(tmp_path)
+    _set_gate(monkeypatch, True)
+    reply = "\n".join(
+        [
+            "I found a critical issue.",
+            _verdict_reply("fail", "critical"),
+            "For reference, a clean pass would look like:",
+            _verdict_reply("pass"),
+        ]
+    )
+    one = _stub(tmp_path / "one", f"cat <<'EOF'\n{reply}\nEOF\n")
+    monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
+
+    result = verify.run_verify(worktree, base, tip, lenses=("adversarial",), timeout_s=5)
+
+    assert result.overall != "pass"
+    assert result.lenses[0].verdict == "concerns"
+    assert "exactly one" in result.lenses[0].error
+
+
 def test_empty_diff_is_concern_not_pass(tmp_path, monkeypatch):
     worktree, base, _tip = _repo(tmp_path)
     _set_gate(monkeypatch, True)
@@ -225,8 +250,7 @@ def test_parallel_lenses_use_distinct_transcript_locations(tmp_path, monkeypatch
     _set_gate(monkeypatch, True)
     one = _stub(
         tmp_path / "one",
-        "sleep 0.1\n"
-        f"cat <<'EOF'\n{_verdict_reply('pass')}\nEOF\n",
+        f"sleep 0.1\ncat <<'EOF'\n{_verdict_reply('pass')}\nEOF\n",
     )
     monkeypatch.setenv("LOOP_VERIFY_CMD", str(one))
 

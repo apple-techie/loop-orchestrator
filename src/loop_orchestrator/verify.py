@@ -31,7 +31,7 @@ _TAIL_LINES = 80
 _VERDICTS = {"pass", "concerns", "fail"}
 _FAIL_SEVERITIES = {"critical", "high"}
 _CONCERN_SEVERITIES = {"medium", "low"}
-_VERDICT_FENCE_RE = re.compile(r"```verdict[ \t]*\n(.*?)```", re.DOTALL)
+_VERDICT_FENCE_RE = re.compile(r"```verdict[ \t]*\r?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 _LENS_INSTRUCTIONS = {
     "code-review": (
@@ -132,16 +132,22 @@ def _argv_for_prompt(worktree: Path, prompt: str, harness: str | None) -> tuple[
 
 
 def _parse_lens_reply(lens: str, reply: str) -> LensResult:
-    doc = None
-    last_error: json.JSONDecodeError | None = None
-    for raw in reversed([match.group(1).strip() for match in _VERDICT_FENCE_RE.finditer(reply)]):
-        try:
-            doc = json.loads(raw)
-            break
-        except json.JSONDecodeError as exc:
-            last_error = exc
-    if doc is None:
-        return _parse_note(lens, f"parse error: no parseable verdict fence ({last_error})")
+    # Require EXACTLY ONE `verdict` fence. Zero (the agent didn't comply) OR more
+    # than one (an echoed example / alternate verdict alongside the real one) is
+    # AMBIGUOUS — degrade to concerns rather than positionally guessing. "Last
+    # fence wins" would let a trailing "here's a clean pass example" ```verdict
+    # block flip a real fail to a false pass; a broken/ambiguous reviewer must
+    # NEVER read as approval. (json-labeled/unlabeled blocks are already ignored
+    # by the verdict-only regex, so a schema example in a ```json fence is safe.)
+    fences = [match.group(1).strip() for match in _VERDICT_FENCE_RE.finditer(reply)]
+    if len(fences) != 1:
+        return _parse_note(
+            lens, f"parse error: expected exactly one `verdict` fence, found {len(fences)}"
+        )
+    try:
+        doc = json.loads(fences[0])
+    except json.JSONDecodeError as exc:
+        return _parse_note(lens, f"parse error: {exc}")
     if not isinstance(doc, dict):
         return _parse_note(lens, "parse error: JSON block is not an object")
     verdict = str(doc.get("verdict", "")).lower()
