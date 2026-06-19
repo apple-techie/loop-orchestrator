@@ -309,8 +309,14 @@ def _build_runner_alive(substrate: Substrate, pid_value: object, worktree: objec
         return True
     if command is None:
         return False
+    # Anchor on the `--cd <worktree> ` token (the brief always follows, so the
+    # trailing space is present), NOT a bare substring: lane `web`'s path is a
+    # substring of lane `web2`'s `--cd .../web2 <brief>`, which a recycled PID on
+    # the sibling could otherwise defeat.
     return (
-        isinstance(worktree, (str, Path)) and "codex exec" in command and str(worktree) in command
+        isinstance(worktree, (str, Path))
+        and "codex exec" in command
+        and f"--cd {worktree} " in command
     )
 
 
@@ -333,10 +339,12 @@ def _terminate_build_runner(
             events.append("build-kill-skip", pid=pid, reason="ps-failed", error=str(exc))
         return
     wt = str(worktree) if isinstance(worktree, (str, Path)) else ""
-    # Identity-guard on the worktree --cd path (per-window), not just "codex exec":
-    # a recycled PID landing on a DIFFERENT lane's codex-exec build is its own pgrp
-    # leader too, so the bare token would let us SIGKILL the wrong lane's build.
-    if command is None or "codex exec" not in command or not wt or wt not in command:
+    # Identity-guard on the `--cd <worktree> ` token (per-window), not just
+    # "codex exec" or a bare substring: a recycled PID landing on a DIFFERENT
+    # lane's codex-exec build is its own pgrp leader too, and a sibling-prefix
+    # lane (web vs web2) would defeat a bare substring — either lets us SIGKILL
+    # the wrong lane's build.
+    if command is None or "codex exec" not in command or not wt or f"--cd {wt} " not in command:
         if events is not None:
             events.append("build-kill-skip", pid=pid, reason="identity-mismatch")
         return

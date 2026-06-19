@@ -1299,6 +1299,39 @@ def test_surface_build_advance_with_live_runner_keeps_marker(project, monkeypatc
     assert not any(e["event"] == "build-done" for e in emitted)
 
 
+def test_surface_build_sibling_prefix_lane_not_treated_as_alive(project, monkeypatch):
+    # A recycled PID running sibling lane `web2`'s codex build must NOT register as
+    # lane `web`'s runner being alive (a bare-substring guard would: .../web is a
+    # substring of .../web2). With the `--cd <worktree> ` token boundary, web's
+    # runner reads as gone, so web's branch advance correctly completes.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    web2 = str(paths.project_root / ".loop" / "worktrees" / "demo" / "web2")
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"codex exec --cd {web2} <brief>",
+    )
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "build-done"]
+    assert emitted and emitted[-1]["window"] == "web"
+
+
 def test_surface_build_advance_without_pre_build_sha_no_done(project, monkeypatch):
     # HIGH-2: a marker with no pre_build_sha (unresolved baseline at spawn) must
     # never produce a build-done from a later non-None branch_head.
