@@ -161,6 +161,23 @@ def test_auto_mode_surfaces_escalate_but_still_executes_safe_actions(
     assert "escalate" not in [e["event"] for e in _events(paths)]
 
 
+def test_full_mode_still_surfaces_escalate(project, call_log, monkeypatch):
+    # `full` mode auto-executes BOTH safe and destructive classes, but an escalate
+    # is the loop's explicit request for human judgment and must STILL surface as a
+    # pending decision (never self-execute) in EVERY mode — including full.
+    monkeypatch.setenv("FAKE_BRAIN_MODE", "escalate")
+    assert run_once(project, "demo", EngineConfig(), approval_mode_override="full") == 0
+
+    paths = SessionPaths(project, "demo")
+    doc = decisions.get(paths)
+    assert doc is not None
+    assert paths.pending_decision_path.exists()
+    assert doc["status"] == "pending"
+    assert doc["decided_by"] != "engine"
+    assert doc["actions"][0]["kind"] == "escalate"
+    assert doc["actions"][0]["status"] == "awaiting-approval"
+
+
 def test_garbage_brain_files_needs_human(project, call_log, monkeypatch):
     monkeypatch.setenv("FAKE_BRAIN_MODE", "garbage")
 

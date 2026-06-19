@@ -676,6 +676,12 @@ def run_once(
         for action in doc["actions"]
         if action["status"] == "awaiting-approval"
         and action["classification"] in _AUTO_CLASSES.get(approval, frozenset())
+        # An escalate is the loop's explicit request for human judgment — it must
+        # reach an operator as a pending decision in EVERY mode, including `full`
+        # (where the destructive class otherwise self-executes). Never auto-promote
+        # it, regardless of classification. (gate.py also classes it DESTRUCTIVE so
+        # auto/manual gate it; this is the belt-and-suspenders for full mode.)
+        and action["kind"] != "escalate"
     ]
     if autos:
         for action in autos:
