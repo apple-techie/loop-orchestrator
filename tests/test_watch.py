@@ -104,6 +104,14 @@ def test_flag_triggers():
     assert evaluate_triggers(_state(reply_received=True), NOW) == ["reply-received"]
 
 
+def test_drive_pending_trigger():
+    # In-flight build/verify work advances the pipeline without an external
+    # trigger — but stays subject to the min_cycle_interval debounce.
+    assert evaluate_triggers(_state(drive_pending=True), NOW) == ["drive-pending"]
+    debounced = _state(last_cycle_start=NOW - 30, min_cycle_interval_s=120, drive_pending=True)
+    assert evaluate_triggers(debounced, NOW) == []
+
+
 def test_lane_transition_trigger():
     for status in ("idle", "errored", "awaiting-approval"):
         st = _state(lane_transitions=[("web", "working", status)])

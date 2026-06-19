@@ -219,6 +219,11 @@ class TriggerState:
     state_file_changed: bool = False
     cycle_now: bool = False
     reply_received: bool = False
+    # In-flight build/verify markers mean the auto-drive has work to advance, but a
+    # build/verify COMPLETION is not an external trigger — without this the daemon
+    # would stall between drive steps until the hourly interval. Subject to the
+    # min_cycle_interval debounce like every other reason.
+    drive_pending: bool = False
     # Interval baseline when no cycle has ever run: a fresh daemon must NOT
     # burn a brain call at boot — it waits a full checkpoint interval from
     # start (real triggers still fire immediately; debounce only applies
@@ -245,6 +250,8 @@ def evaluate_triggers(state: TriggerState, now: float) -> list[str]:
         reasons.append("cycle-now")
     if state.reply_received:
         reasons.append("reply-received")
+    if state.drive_pending:
+        reasons.append("drive-pending")
     if reasons and last is not None and now - last < state.min_cycle_interval_s:
         return []  # debounce: too soon since the last cycle-start
     return reasons
@@ -363,6 +370,8 @@ class Watch:
             state_file_changed=state_changed,
             cycle_now=self.paths.cycle_now_path.exists(),
             reply_received=reply_received,
+            drive_pending=bool(actions_mod.load_build_markers(self.paths))
+            or bool(actions_mod.load_verify_markers(self.paths)),
             watch_start=self._watch_started,
         )
         reasons = evaluate_triggers(trigger_state, now)
