@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .contract import check_contract
+from .paths import normalize_project_root
 
 # Canonical primitive name -> repo-relative fallback script.
 _REPO_RELATIVE = {
@@ -80,7 +81,7 @@ class Substrate:
     """Typed wrappers, 1:1 with the CONTRACT.md CLI surfaces."""
 
     def __init__(self, project_root: str | Path, session: str):
-        self.project_root = Path(project_root)
+        self.project_root = normalize_project_root(project_root)
         self.session = session
         self._registry_cache: dict[tuple[str, str], str] = {}
 
@@ -705,7 +706,9 @@ def _loop_summary(project_root: Path, session: str) -> LoopSummary:
             status = info.get("status") if isinstance(info, dict) else None
             if status:
                 lane_health[status] = lane_health.get(status, 0) + 1
-    return LoopSummary(str(project_root), session, engine, pid_out, pending, awaiting, lane_health)
+    return LoopSummary(
+        str(paths.project_root), session, engine, pid_out, pending, awaiting, lane_health
+    )
 
 
 def discover_loops(roots: list[Path]) -> list[LoopSummary]:

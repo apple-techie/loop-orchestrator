@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+
+def normalize_project_root(project_root: str | Path) -> Path:
+    return Path(os.path.abspath(project_root))
 
 
 @dataclass(frozen=True)
@@ -20,7 +25,7 @@ class SessionPaths:
     engine_dir: Path = field(init=False)
 
     def __post_init__(self):
-        root = Path(self.project_root).resolve()
+        root = normalize_project_root(self.project_root)
         object.__setattr__(self, "project_root", root)
         object.__setattr__(
             self,

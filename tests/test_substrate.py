@@ -9,7 +9,14 @@ import pytest
 
 from loop_orchestrator import substrate as substrate_mod
 from loop_orchestrator.contract import ContractMismatch
-from loop_orchestrator.substrate import LaneInfo, LaneStatus, Substrate, SubstrateError
+from loop_orchestrator.paths import normalize_project_root
+from loop_orchestrator.substrate import (
+    LaneInfo,
+    LaneStatus,
+    Substrate,
+    SubstrateError,
+    _loop_summary,
+)
 
 FAKES_BIN = Path(__file__).resolve().parent / "fakes" / "bin"
 
@@ -29,6 +36,25 @@ def test_resolution_prefers_loop_substrate_bin(sub, tmp_path, monkeypatch):
     assert sub._resolve("loop-tmux") == [str(FAKES_BIN / "loop-tmux")]
     monkeypatch.delenv("LOOP_SUBSTRATE_BIN")
     assert sub._resolve("loop-tmux") == [str(decoy_tmux)]
+
+
+def test_substrate_normalizes_project_root_like_session_paths(tmp_path):
+    project = tmp_path / "project"
+    (project / "nested").mkdir(parents=True)
+
+    sub = Substrate(project / "nested" / "..", "demo")
+
+    assert sub.project_root == normalize_project_root(project)
+
+
+def test_loop_summary_reports_normalized_project_root(tmp_path):
+    project = tmp_path / "project"
+    (project / "nested").mkdir(parents=True)
+    (project / ".loop" / "sessions" / "demo" / "engine").mkdir(parents=True)
+
+    summary = _loop_summary(project / "nested" / "..", "demo")
+
+    assert summary.project_root == str(normalize_project_root(project))
 
 
 def test_lanes_parses_canned_json(sub, call_log):
