@@ -201,6 +201,24 @@ class VerifyAction:
         _no_coord("lane", self.lane)
 
 
+@dataclass(frozen=True)
+class BuildAction:
+    window: str
+    brief: str
+    rationale: str
+    kind: ClassVar[str] = "build"
+
+    def __post_init__(self):
+        _need_str("window", self.window)
+        _need_str("brief", self.brief, limit=MAX_TEXT_CHARS)
+        _need_str("rationale", self.rationale)
+        if not _WINDOW_RE.match(self.window):
+            raise DecisionValidationError(
+                f"field 'window' {self.window!r} must match ^[A-Za-z][A-Za-z0-9_-]+$"
+            )
+        _no_coord("window", self.window)
+
+
 Action = (
     DispatchAction
     | AddLaneAction
@@ -209,6 +227,7 @@ Action = (
     | StopAction
     | EscalateAction
     | VerifyAction
+    | BuildAction
 )
 
 _ACTION_TYPES: dict[str, type] = {
@@ -219,6 +238,7 @@ _ACTION_TYPES: dict[str, type] = {
     "stop": StopAction,
     "escalate": EscalateAction,
     "verify": VerifyAction,
+    "build": BuildAction,
 }
 
 
@@ -310,6 +330,10 @@ def validate(raw: dict, live_lanes: set[str], raw_text: str = "") -> Decision:
         ):
             raise DecisionValidationError(
                 f"action {idx} ({action.kind}): unknown lane {action.lane!r}; live lanes: {live}"
+            )
+        if isinstance(action, BuildAction) and action.window not in live_lanes:
+            raise DecisionValidationError(
+                f"action {idx} (build): unknown window {action.window!r}; live lanes: {live}"
             )
         if isinstance(action, DropLaneAction) and action.window not in live_lanes:
             raise DecisionValidationError(

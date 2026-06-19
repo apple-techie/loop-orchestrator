@@ -114,6 +114,43 @@ def record_verify_marker(paths: SessionPaths, marker: dict) -> dict:
     return marker
 
 
+# ── build marker ledger ────────────────────────────────────────────────────
+
+
+def load_build_markers(paths: SessionPaths) -> list[dict]:
+    doc = read_json(paths.build_markers_path, {"builds": []})
+    builds = doc.get("builds") if isinstance(doc, dict) else None
+    if not isinstance(builds, list):
+        return []
+    return [marker for marker in builds if isinstance(marker, dict)]
+
+
+def save_build_markers(paths: SessionPaths, markers: list[dict]) -> None:
+    atomic_write_json(paths.build_markers_path, {"builds": markers})
+
+
+def record_build_marker(paths: SessionPaths, marker: dict) -> dict:
+    window = marker.get("window")
+    with file_lock(paths.lock_path):
+        markers = [m for m in load_build_markers(paths) if m.get("window") != window]
+        markers.append(marker)
+        save_build_markers(paths, markers)
+    return marker
+
+
+def _build_brief(brief: str) -> str:
+    return (
+        "You are running an engine BUILD for this lane.\n\n"
+        "Guardrails:\n"
+        "- Implement the task ON THE CURRENT BRANCH in this worktree.\n"
+        "- Run the repository's required gate/verification before committing.\n"
+        "- Commit the completed changes on this worktree branch when green.\n"
+        "- DO NOT merge, push, reinstall, switch branches, or edit main.\n\n"
+        "--- build brief ---\n\n"
+        f"{brief}"
+    )
+
+
 # ── action execution ────────────────────────────────────────────────────────
 
 
@@ -466,6 +503,49 @@ def execute(
             window=window,
             branch=branch,
             out_path=str(out_path),
+            pid=pid,
+        )
+    elif kind == "build":
+        if paths is None:
+            raise SubstrateError([kind], None, "build requires engine session paths")
+        window = action.get("window") or action.get("lane")
+        if not isinstance(window, str) or not window:
+            raise SubstrateError([kind], None, "build requires a target window")
+        branch = _predecessor_branch(paths, window)
+        if branch is None:
+            raise SubstrateError([kind, window], None, "target lane has no ledger branch")
+        started_at = utc_now()
+        worktree = _lane_worktree(paths, window)
+        with file_lock(paths.lock_path):
+            existing = next(
+                (m for m in load_build_markers(paths) if m.get("window") == window),
+                None,
+            )
+            if existing is not None:
+                events.append(
+                    "build-skip",
+                    window=window,
+                    reason="in-progress",
+                    pid=existing.get("pid"),
+                )
+                return
+            pre_build_sha = substrate.branch_head(worktree, branch)
+            pid = substrate.spawn_build(worktree, _build_brief(str(action.get("brief") or "")))
+            marker = {
+                "window": window,
+                "branch": branch,
+                "pre_build_sha": pre_build_sha,
+                "pid": pid,
+                "started_at": started_at,
+            }
+            markers = load_build_markers(paths)
+            markers.append(marker)
+            save_build_markers(paths, markers)
+        events.append(
+            "build-started",
+            window=window,
+            branch=branch,
+            pre_build_sha=pre_build_sha,
             pid=pid,
         )
     elif kind == "stop":

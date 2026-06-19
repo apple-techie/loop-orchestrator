@@ -122,6 +122,7 @@ class AddLaneSub:
         self.calls: list[dict] = []
         self.dispatched: list[tuple] = []
         self.verifies: list[dict] = []
+        self.builds: list[dict] = []
         self.branch_heads = list(branch_heads or [])
 
     def add_lane(self, window, **kwargs):
@@ -134,6 +135,10 @@ class AddLaneSub:
         self.verifies.append({"worktree": worktree, "base": base, "tip": tip, "out_path": out_path})
         return 4242
 
+    def spawn_build(self, worktree, brief):
+        self.builds.append({"worktree": worktree, "brief": brief})
+        return 4343
+
     def branch_head(self, worktree, branch):
         if self.branch_heads:
             return self.branch_heads.pop(0)
@@ -143,6 +148,11 @@ class AddLaneSub:
 class FailingVerifySub(AddLaneSub):
     def spawn_verify(self, worktree, base, tip, out_path):
         raise SubstrateError(["missing-loop-verify"], 127, "exec failed")
+
+
+class FailingBuildSub(AddLaneSub):
+    def spawn_build(self, worktree, brief):
+        raise SubstrateError(["codex"], 127, "exec failed")
 
 
 def _add(harness="claude", cmd=None, window="w", brief="b"):
@@ -705,4 +715,94 @@ def test_verify_spawn_failure_marks_action_failed_without_marker(tmp_path):
     failed = [e for e in events.tail(10) if e["event"] == "action-failed"]
     assert failed
     assert failed[-1]["kind"] == "verify"
+    assert failed[-1]["lane"] == "web"
+
+
+# ── T0050: async build action ───────────────────────────────────────────────
+
+
+def test_build_action_spawns_detached_runner_and_records_marker(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub(branch_heads=["sha-a"])
+    action = {"kind": "build", "window": "web", "brief": "implement T0050", "rationale": "ready"}
+
+    actions.execute(action, sub, events, EngineConfig(), paths=paths)
+
+    assert sub.builds == [
+        {
+            "worktree": paths.project_root / ".loop" / "worktrees" / "demo" / "web",
+            "brief": sub.builds[0]["brief"],
+        }
+    ]
+    brief = sub.builds[0]["brief"]
+    assert "implement T0050" in brief
+    assert "CURRENT BRANCH in this worktree" in brief
+    assert "DO NOT merge, push, reinstall" in brief
+    started = [e for e in events.tail(10) if e["event"] == "build-started"]
+    assert started
+    assert started[-1]["window"] == "web"
+    assert started[-1]["branch"] == "loop/demo/web"
+    assert started[-1]["pre_build_sha"] == "sha-a"
+    markers = actions.load_build_markers(paths)
+    assert len(markers) == 1
+    assert markers[0]["window"] == "web"
+    assert markers[0]["branch"] == "loop/demo/web"
+    assert markers[0]["pre_build_sha"] == "sha-a"
+    assert markers[0]["pid"] == 4343
+
+
+def test_build_action_skips_when_marker_exists(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    existing = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "pre_build_sha": "sha-a",
+        "pid": 123,
+        "started_at": "2026-06-18T00:00:00Z",
+    }
+    actions.record_build_marker(paths, existing)
+    sub = AddLaneSub()
+
+    actions.execute(
+        {"kind": "build", "window": "web", "brief": "again", "rationale": "again"},
+        sub,
+        events,
+        EngineConfig(),
+        paths=paths,
+    )
+
+    assert sub.builds == []
+    assert actions.load_build_markers(paths) == [existing]
+    skipped = [e for e in events.tail(10) if e["event"] == "build-skip"]
+    assert skipped
+    assert skipped[-1]["window"] == "web"
+    assert skipped[-1]["reason"] == "in-progress"
+
+
+def test_build_spawn_failure_marks_action_failed_without_marker(tmp_path):
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    doc = {
+        "id": "d-build",
+        "actions": [
+            {
+                "idx": 0,
+                "kind": "build",
+                "window": "web",
+                "brief": "implement",
+                "status": "approved",
+                "rationale": "ready",
+            }
+        ],
+    }
+
+    updated = actions.execute_batch(doc, FailingBuildSub(), events, EngineConfig(), paths=paths)
+
+    assert updated["actions"][0]["status"] == "failed"
+    assert actions.load_build_markers(paths) == []
+    failed = [e for e in events.tail(10) if e["event"] == "action-failed"]
+    assert failed
+    assert failed[-1]["kind"] == "build"
     assert failed[-1]["lane"] == "web"

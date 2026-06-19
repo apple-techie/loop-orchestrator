@@ -274,6 +274,10 @@ def classify(
         # loop-verify is a read-only review; any merge it justifies remains a
         # separate human-gated escalate action.
         return SAFE
+    if action.kind == "build":
+        # codex exec builds are isolated to the lane worktree branch; merge,
+        # push, and reinstall remain outside this action's authority.
+        return SAFE
     if action.kind == "drop_lane":
         # T0019: a declared 'standing' lane is never auto-dropped — the engine
         # never passes --force, and dropping coord/ops/docs or a long-lived

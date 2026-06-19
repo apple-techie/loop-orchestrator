@@ -15,10 +15,22 @@ import pytest
 
 from loop_orchestrator.engine import cli, decisions
 from loop_orchestrator.engine import loop as loop_mod
-from loop_orchestrator.engine.actions import execute, load_asks
+from loop_orchestrator.engine.actions import (
+    execute,
+    load_asks,
+    load_build_markers,
+    load_verify_markers,
+    record_build_marker,
+    record_verify_marker,
+)
 from loop_orchestrator.engine.config import EngineConfig
 from loop_orchestrator.engine.events import EventLog, utc_now
-from loop_orchestrator.engine.loop import action_line, run_once
+from loop_orchestrator.engine.loop import (
+    action_line,
+    run_once,
+    surface_build_results,
+    surface_verify_results,
+)
 from loop_orchestrator.engine.wiki import MARKER
 from loop_orchestrator.locking import atomic_write_json
 from loop_orchestrator.paths import SessionPaths
@@ -263,6 +275,35 @@ def test_paused_engine_still_surfaces_verify_timeout(project, call_log):
     assert load_verify_markers(paths) == []
     emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
     assert emitted
+
+
+def test_paused_engine_still_surfaces_build_timeout(project, call_log, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.paused_path.touch()
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": "2000-01-01T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(loop_mod.Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
+    monkeypatch.setattr(
+        loop_mod.Substrate, "process_command", lambda self, pid, timeout=2: "codex exec"
+    )
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: None)
+
+    assert run_once(project, "demo", EngineConfig()) == 5
+
+    assert _brain_calls(call_log) == []
+    assert load_build_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "build-timeout"]
+    assert emitted and emitted[-1]["window"] == "web"
 
 
 def test_observe_stale_proceeds_when_fanout_fails(project, call_log, monkeypatch):
@@ -847,9 +888,27 @@ def test_prompt_verify_drive_addendum_and_rubric(project):
             "started_at": "2026-06-19T00:00:00Z",
         },
     )
+    record_build_marker(
+        paths,
+        {
+            "window": "building",
+            "branch": "loop/demo/building",
+            "pre_build_sha": "sha-a",
+            "pid": 456,
+            "started_at": "2026-06-19T00:00:00Z",
+        },
+    )
     EventLog(paths.events_path).append("verify-passed", window="passed", overall="pass", findings=2)
+    EventLog(paths.events_path).append(
+        "build-done",
+        window="built",
+        branch="loop/demo/built",
+        pre_build_sha="sha-a",
+        branch_head="sha-b",
+    )
     snap = _prompt_snap(
         {
+            "building": {"status": "idle", "target": "", "kind": "claude"},
             "passed": {"status": "idle", "target": "", "kind": "claude"},
             "ready": {"status": "idle", "target": "", "kind": "claude"},
             "verifying": {"status": "idle", "target": "", "kind": "claude"},
@@ -862,7 +921,12 @@ def test_prompt_verify_drive_addendum_and_rubric(project):
     assert "--- verify drive ---" in prompt
     assert "ready-to-verify:\n- lane=ready branch=loop/demo/ready status=idle" in prompt
     assert "- lane=passed branch=loop/demo/passed status=idle" not in prompt
+    assert "build in flight:\n- window=building branch=loop/demo/building" in prompt
     assert "verify in flight:\n- window=verifying branch=loop/demo/verifying" in prompt
+    assert (
+        "recent build outcomes:\n- window=built event=build-done "
+        "branch=loop/demo/built pre_build_sha=sha-a branch_head=sha-b"
+    ) in prompt
     assert (
         "recent verify outcomes:\n- window=passed event=verify-passed "
         "overall=pass findings=2 branch=loop/demo/passed"
@@ -1160,10 +1224,6 @@ def test_ingest_timeout_default_is_below_brain_timeout():
 
 # ── T0048: completed async verify results surface in a later cycle ──────────
 
-from loop_orchestrator.engine.actions import load_verify_markers, record_verify_marker  # noqa: E402
-from loop_orchestrator.engine.loop import surface_verify_results  # noqa: E402
-
-
 def _write_verify_result(out_path: Path, overall: str, findings: int = 0) -> None:
     result = {
         "overall": overall,
@@ -1174,6 +1234,84 @@ def _write_verify_result(out_path: Path, overall: str, findings: int = 0) -> Non
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result), encoding="utf-8")
+
+
+def test_surface_build_done_on_branch_advance_clears_marker(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "build-done"]
+    assert emitted
+    assert emitted[-1]["window"] == "web"
+    assert emitted[-1]["branch"] == "loop/demo/web"
+    assert emitted[-1]["pre_build_sha"] == "sha-a"
+    assert emitted[-1]["branch_head"] == "sha-b"
+
+
+def test_surface_build_no_advance_keeps_marker_in_progress(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "pre_build_sha": "sha-a",
+        "pid": 123,
+        "started_at": utc_now(),
+    }
+    record_build_marker(paths, marker)
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    assert not any(e["event"].startswith("build-") for e in emitted)
+
+
+def test_surface_build_timeout_kills_runner_and_clears(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": "2000-01-01T00:00:00Z",
+        },
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: "codex exec")
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "build-timeout"]
+    assert emitted
+    assert emitted[-1]["window"] == "web"
+    assert emitted[-1]["pid"] == 123
+    assert [pid for pid, _sig in killed] == [123, 123]
 
 
 @pytest.mark.parametrize(

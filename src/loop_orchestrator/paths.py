@@ -97,6 +97,10 @@ class SessionPaths:
         return self.engine_dir / "verify-in-progress.json"
 
     @property
+    def build_markers_path(self) -> Path:
+        return self.engine_dir / "build-in-progress.json"
+
+    @property
     def pid_path(self) -> Path:
         return self.engine_dir / "engine.pid"
 

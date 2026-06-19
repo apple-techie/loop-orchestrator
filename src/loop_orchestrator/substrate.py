@@ -228,10 +228,12 @@ class Substrate:
         os.set_inheritable(write_fd, False)
         return read_fd, write_fd
 
-    def _read_exec_error(self, fd: int, argv: list[str], timeout: float = 5.0) -> bytes:
+    def _read_exec_error(
+        self, fd: int, argv: list[str], timeout: float = 5.0, label: str = "verify"
+    ) -> bytes:
         deadline = time.monotonic() + timeout
         chunks = bytearray()
-        timeout_message = f"verify exec handshake timed out after {timeout}s"
+        timeout_message = f"{label} exec handshake timed out after {timeout}s"
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -244,26 +246,10 @@ class Substrate:
                 return bytes(chunks)
             chunks.extend(chunk)
 
-    def spawn_verify(
-        self,
-        worktree: str | Path,
-        base: str,
-        tip: str,
-        out_path: str | Path,
+    def _spawn_detached(
+        self, argv: list[str], log_path: Path, cwd: str | Path, label: str
     ) -> int:
-        out = Path(out_path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        log_path = out.with_suffix(".log")
-        argv = self._verify_argv() + [
-            "--worktree",
-            str(worktree),
-            "--base",
-            base,
-            "--tip",
-            tip,
-            "--out",
-            str(out),
-        ]
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         pid_read_fd, pid_write_fd = self._cloexec_pipe()
         exec_read_fd, exec_write_fd = self._cloexec_pipe()
         try:
@@ -286,7 +272,7 @@ class Substrate:
                     os._exit(0)
                 os.close(pid_write_fd)
                 os.setpgid(0, 0)
-                os.chdir(self.project_root)
+                os.chdir(cwd)
                 log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
                 try:
                     os.dup2(log_fd, 1)
@@ -306,15 +292,55 @@ class Substrate:
         try:
             data = os.read(pid_read_fd, 64)
             _, status = os.waitpid(child_pid, 0)
-            exec_error = self._read_exec_error(exec_read_fd, argv)
+            exec_error = self._read_exec_error(exec_read_fd, argv, label=label)
         finally:
             os.close(pid_read_fd)
             os.close(exec_read_fd)
         if exec_error:
             raise SubstrateError(argv, 127, exec_error.decode("utf-8", errors="replace"))
         if not data or status != 0:
-            raise SubstrateError(argv, status, "verify child failed to detach")
+            raise SubstrateError(argv, status, "child failed to detach")
         return int(data.decode("ascii"))
+
+    def spawn_verify(
+        self,
+        worktree: str | Path,
+        base: str,
+        tip: str,
+        out_path: str | Path,
+    ) -> int:
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        log_path = out.with_suffix(".log")
+        argv = self._verify_argv() + [
+            "--worktree",
+            str(worktree),
+            "--base",
+            base,
+            "--tip",
+            tip,
+            "--out",
+            str(out),
+        ]
+        return self._spawn_detached(argv, log_path, self.project_root, "verify")
+
+    def _codex_argv(self) -> list[str]:
+        return ["codex"]
+
+    def _build_argv(self, worktree: str | Path, brief: str) -> list[str]:
+        return self._codex_argv() + [
+            "exec",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--cd",
+            str(worktree),
+            brief,
+        ]
+
+    def spawn_build(self, worktree: str | Path, brief: str) -> int:
+        log_dir = Path(worktree) / ".loop" / "build"
+        log_path = log_dir / f"codex-build-{int(time.time())}.log"
+        argv = self._build_argv(worktree, brief)
+        return self._spawn_detached(argv, log_path, worktree, "build")
 
     def read_verify_result(self, out_path: str | Path) -> dict | None:
         import json

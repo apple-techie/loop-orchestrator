@@ -44,6 +44,10 @@ _INGEST_HEADING = "### Ingest protocol"
 
 # Timed-out asks stay visible in the checkpoint addendum this long.
 _ASK_TIMEOUT_RECENCY_S = 3600
+_BUILD_DRIVE_OUTCOME_EVENTS = frozenset({"build-done", "build-timeout"})
+_BUILD_DRIVE_EVENT_TAIL = 100
+_BUILD_DRIVE_OUTCOME_LIMIT = 5
+_BUILD_TIMEOUT_S = 1500
 _VERIFY_DRIVE_OUTCOME_EVENTS = frozenset({"verify-passed", "verify-failed", "verify-timeout"})
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
@@ -144,6 +148,69 @@ def _save_verify_markers_best_effort(
     return True
 
 
+def surface_build_results(substrate: Substrate, paths: SessionPaths, events: EventLog) -> None:
+    with file_lock(paths.lock_path):
+        markers = actions_mod.load_build_markers(paths)
+        if not markers:
+            return
+        remaining: list[dict] = []
+        changed = False
+        for idx, marker in enumerate(markers):
+            window = marker.get("window")
+            branch = marker.get("branch")
+            pre_build_sha = marker.get("pre_build_sha")
+            branch_head = None
+            if isinstance(window, str) and window and isinstance(branch, str) and branch:
+                branch_head = substrate.branch_head(
+                    actions_mod._lane_worktree(paths, window), branch
+                )
+            try:
+                started_at = parse_ts(str(marker.get("started_at") or ""))
+                age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
+            except (TypeError, ValueError):
+                age_s = _BUILD_TIMEOUT_S + 1
+            if branch_head is not None and branch_head != pre_build_sha:
+                events.append(
+                    "build-done",
+                    window=window,
+                    branch=branch,
+                    pre_build_sha=pre_build_sha,
+                    branch_head=branch_head,
+                )
+                changed = True
+                _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
+                continue
+            if age_s > _BUILD_TIMEOUT_S:
+                _terminate_build_runner(substrate, marker.get("pid"), events)
+                events.append(
+                    "build-timeout",
+                    window=window,
+                    branch=branch,
+                    pid=marker.get("pid"),
+                    started_at=marker.get("started_at"),
+                    timeout_s=_BUILD_TIMEOUT_S,
+                    pre_build_sha=pre_build_sha,
+                    branch_head=branch_head,
+                )
+                changed = True
+                _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
+                continue
+            remaining.append(marker)
+        if changed:
+            _save_build_markers_best_effort(paths, remaining, events)
+
+
+def _save_build_markers_best_effort(
+    paths: SessionPaths, markers: list[dict], events: EventLog
+) -> bool:
+    try:
+        actions_mod.save_build_markers(paths, markers)
+    except OSError as exc:
+        events.append("build-marker-save-failed", error=str(exc))
+        return False
+    return True
+
+
 def _record_verified_tip(paths: SessionPaths, window: str, verified_tip: str) -> None:
     ledger = read_json(paths.state_file, {})
     if not isinstance(ledger, dict):
@@ -199,6 +266,34 @@ def _terminate_verify_runner(
         return
 
 
+def _terminate_build_runner(
+    substrate: Substrate, pid_value: object, events: EventLog | None = None
+) -> None:
+    try:
+        pid = int(pid_value)
+    except (TypeError, ValueError):
+        return
+    if pid <= 1:
+        return
+    try:
+        command = substrate.process_command(pid, timeout=2)
+    except SubstrateError as exc:
+        if events is not None:
+            events.append("build-kill-skip", pid=pid, reason="ps-failed", error=str(exc))
+        return
+    if command is None or "codex exec" not in command:
+        if events is not None:
+            events.append("build-kill-skip", pid=pid, reason="identity-mismatch")
+        return
+    try:
+        if os.getpgid(pid) != pid:
+            return
+        os.killpg(pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        return
+
+
 def _ask_lines(asks: list[dict], now: datetime) -> list[str]:
     """Checkpoint-addendum lines: outstanding asks + recently timed-out ones."""
     lines: list[str] = []
@@ -235,6 +330,19 @@ def _latest_verify_outcomes(paths: SessionPaths) -> list[dict]:
     return list(latest_by_window.values())
 
 
+def _latest_build_outcomes(paths: SessionPaths) -> list[dict]:
+    latest_by_window: dict[str, dict] = {}
+    for event in EventLog(paths.events_path).tail(_BUILD_DRIVE_EVENT_TAIL):
+        if event.get("event") not in _BUILD_DRIVE_OUTCOME_EVENTS:
+            continue
+        window = event.get("window")
+        if not isinstance(window, str) or not window:
+            continue
+        latest_by_window.pop(window, None)
+        latest_by_window[window] = event
+    return list(latest_by_window.values())
+
+
 def _verified_tip(paths: SessionPaths, lane: str) -> str | None:
     ledger = read_json(paths.state_file, {})
     loops = ledger.get("loops") if isinstance(ledger, dict) else None
@@ -248,6 +356,13 @@ def _verified_tip(paths: SessionPaths, lane: str) -> str | None:
 def _verify_drive_lines(
     substrate: Substrate, snap: EngineSnapshot, paths: SessionPaths
 ) -> list[str]:
+    build_markers = actions_mod.load_build_markers(paths)
+    build_in_flight_windows = {
+        window
+        for marker in build_markers
+        if isinstance((window := marker.get("window")), str) and window
+    }
+    build_outcomes = _latest_build_outcomes(paths)[-_BUILD_DRIVE_OUTCOME_LIMIT:]
     markers = actions_mod.load_verify_markers(paths)
     in_flight_windows = {
         window for marker in markers if isinstance((window := marker.get("window")), str) and window
@@ -264,7 +379,11 @@ def _verify_drive_lines(
     ready_lanes: set[str] = set()
     for lane in sorted(snap.lanes):
         info = snap.lanes[lane]
-        if info.get("status") != "idle" or lane in in_flight_windows:
+        if (
+            info.get("status") != "idle"
+            or lane in in_flight_windows
+            or lane in build_in_flight_windows
+        ):
             continue
         branch = actions_mod._predecessor_branch(paths, lane)
         if branch is None:
@@ -287,6 +406,18 @@ def _verify_drive_lines(
     if ready:
         lines.append("ready-to-verify:")
         lines.extend(ready)
+    if build_markers:
+        lines.append("build in flight:")
+        for marker in build_markers:
+            window = marker.get("window")
+            if not isinstance(window, str) or not window:
+                continue
+            branch = marker.get("branch") or actions_mod._predecessor_branch(paths, window)
+            lines.append(
+                f"- window={window} branch={branch or '(unknown)'} "
+                f"started_at={marker.get('started_at')} pid={marker.get('pid')} "
+                f"pre_build_sha={marker.get('pre_build_sha') or '(unknown)'}"
+            )
     if markers:
         lines.append("verify in flight:")
         for marker in markers:
@@ -297,6 +428,17 @@ def _verify_drive_lines(
             lines.append(
                 f"- window={window} branch={branch or '(unknown)'} "
                 f"started_at={marker.get('started_at')} pid={marker.get('pid')}"
+            )
+    if build_outcomes:
+        lines.append("recent build outcomes:")
+        for outcome in build_outcomes:
+            window = str(outcome["window"])
+            branch = outcome.get("branch") or actions_mod._predecessor_branch(paths, window)
+            lines.append(
+                f"- window={window} event={outcome.get('event')} "
+                f"branch={branch or '(unknown)'} "
+                f"pre_build_sha={outcome.get('pre_build_sha') or '(unknown)'} "
+                f"branch_head={outcome.get('branch_head') or '(unknown)'}"
             )
     if outcomes:
         lines.append("recent verify outcomes:")
@@ -342,6 +484,10 @@ unattended + high-risk role -> the gate forces human approval."""
 _DRIVE_RUBRIC = """\
 --- verify drive rubric ---
 Act on each window's latest listed outcome only.
+assigned/unbuilt task on an idle lane -> propose `build` with a concise implementation brief.
+build in flight -> wait; do not propose another `build` for that window.
+latest build-done -> lane is ready-to-verify.
+latest build-timeout -> propose `dispatch`/`steer` fix or a narrower `build`.
 latest verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
 latest verify-failed/verify-timeout -> propose `dispatch`/`steer` fix to that lane.
 ready-to-verify lane -> propose `verify` for that lane.
@@ -721,6 +867,7 @@ def run_once(
 
     substrate = Substrate(root, session)
     surface_verify_results(substrate, paths, events)
+    surface_build_results(substrate, paths, events)
 
     pending = decisions.get(paths)
     if pending is not None:

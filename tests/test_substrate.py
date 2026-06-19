@@ -270,6 +270,32 @@ def test_spawn_verify_exec_failure_raises_immediately(sub, tmp_path, monkeypatch
     assert str(missing) in exc.value.stderr
 
 
+def test_spawn_build_exec_failure_raises_immediately(sub, tmp_path, monkeypatch):
+    missing = tmp_path / "missing-codex"
+    monkeypatch.setattr(sub, "_codex_argv", lambda: [str(missing)])
+
+    with pytest.raises(SubstrateError) as exc:
+        sub.spawn_build(tmp_path, "implement and commit")
+
+    assert exc.value.returncode == 127
+    assert str(missing) in exc.value.stderr
+
+
+def test_build_argv_uses_codex_exec_with_worktree_cd(sub, tmp_path, monkeypatch):
+    monkeypatch.setattr(sub, "_codex_argv", lambda: ["/bin/codex"])
+
+    argv = sub._build_argv(tmp_path, "implement and commit")
+
+    assert argv == [
+        "/bin/codex",
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--cd",
+        str(tmp_path),
+        "implement and commit",
+    ]
+
+
 def test_verify_exec_handshake_timeout_raises(sub):
     read_fd, write_fd = os.pipe()
     try:

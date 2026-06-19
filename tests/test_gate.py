@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from loop_orchestrator.engine.decision import (
     AddLaneAction,
+    BuildAction,
     DispatchAction,
     DropLaneAction,
     EscalateAction,
@@ -57,6 +58,11 @@ def test_stop_always_safe():
 
 def test_verify_is_safe_read_only_review():
     assert classify(VerifyAction(lane="web", rationale="review committed work"), 99, CFG) == "safe"
+
+
+def test_build_is_safe_isolated_worktree_commit():
+    action = BuildAction(window="web", brief="implement and commit on this branch", rationale="r")
+    assert classify(action, 99, CFG) == "safe"
 
 
 def test_escalate_requires_operator():

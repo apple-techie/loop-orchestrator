@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from loop_orchestrator.engine.decision import (
+    BuildAction,
     DecisionValidationError,
     VerifyAction,
     parse_and_validate,
@@ -169,6 +170,44 @@ actions:
   - kind: verify
     lane: web;touch /tmp/pwn
     rationale: ready for loop-verify
+```""",
+            {"web;touch /tmp/pwn"},
+        )
+
+
+def test_build_action_contract_is_window_brief_and_rationale():
+    decision = parse_and_validate(
+        """```decision
+version: 1
+critique: assigned work needs implementation
+actions:
+  - kind: build
+    window: web
+    brief: implement tasks/T0050-build-via-exec-dispatch.md and commit when green
+    rationale: web lane is idle with unbuilt assigned work
+```""",
+        {"web"},
+    )
+    assert decision.actions == [
+        BuildAction(
+            window="web",
+            brief="implement tasks/T0050-build-via-exec-dispatch.md and commit when green",
+            rationale="web lane is idle with unbuilt assigned work",
+        )
+    ]
+
+
+def test_build_action_rejects_unsafe_window_name():
+    with pytest.raises(DecisionValidationError):
+        parse_and_validate(
+            """```decision
+version: 1
+critique: assigned work needs implementation
+actions:
+  - kind: build
+    window: web;touch /tmp/pwn
+    brief: implement the task
+    rationale: ready to build
 ```""",
             {"web;touch /tmp/pwn"},
         )
