@@ -42,17 +42,19 @@ class _Result:
     engine_marker: Path
 
 
-def _engine_stub(marker: Path, ready_file: Path) -> str:
+def _engine_stub(marker: Path, ready_file: Path, pid: str = "$$") -> str:
     # `restart` records the call, marks the daemon ready, then BLOCKS in a
     # heartbeat loop forever (the real Watch.run() never returns). `status`
-    # reports alive with a fresh heartbeat once the ready file exists.
+    # reports alive with a fresh heartbeat once the ready file exists, under the
+    # given pid ($$ = a NEW pid each run, i.e. a clean swap; a fixed pid equal to
+    # a pre-written engine.pid models the OLD daemon surviving — no swap).
     return (
         'cmd="${@: -1}"\n'
         'case "$cmd" in\n'
         f'  restart) echo restart >> "{marker}"; : > "{ready_file}";\n'
         f'    while true; do : > "{ready_file}"; sleep 0.2; done ;;\n'
         f'  status) if [ -f "{ready_file}" ]; then\n'
-        '      echo "watch: alive (pid $$, heartbeat 0s ago)";\n'
+        f'      echo "watch: alive (pid {pid}, heartbeat 0s ago)";\n'
         '    else echo "watch: not running"; fi ;;\n'
         "esac\n"
         "exit 0\n"
@@ -66,11 +68,18 @@ def _run(
     env_present: bool,
     pm_listing: str = "",
     session: str = "govern",
+    stale_pid: str | None = None,
 ) -> _Result:
     root = tmp_path / "proj"
     root.mkdir()
     if lane_config is not None:
         (root / "lane-config.yaml").write_text(lane_config, encoding="utf-8")
+    if stale_pid is not None:
+        # Pre-existing engine.pid; the stub's status reports THIS same pid, so the
+        # wrapper sees no swap (old daemon survived) and must refuse to claim OK.
+        engine_dir = root / ".loop" / "sessions" / session / "engine"
+        engine_dir.mkdir(parents=True)
+        (engine_dir / "engine.pid").write_text(stale_pid + "\n", encoding="utf-8")
 
     secrets = tmp_path / "secrets"
     secrets.mkdir()
@@ -82,7 +91,10 @@ def _run(
     stub_bin = tmp_path / "bin"
     stub_bin.mkdir()
     engine_marker = tmp_path / "engine-called"
-    _stub(stub_bin / "loop-engine", _engine_stub(engine_marker, tmp_path / "daemon-ready"))
+    _stub(
+        stub_bin / "loop-engine",
+        _engine_stub(engine_marker, tmp_path / "daemon-ready", pid=stale_pid or "$$"),
+    )
     # the wrapper only invokes `loop-pm list-adapters`; echo the canned listing.
     _stub(
         stub_bin / "loop-pm",
@@ -142,8 +154,25 @@ def test_restart_is_nonblocking_reaches_pm_assert(tmp_path):
     )
     assert not proc.timed_out, "wrapper foreground-blocked on the never-returning daemon"
     assert proc.returncode == 0, proc.stderr
-    assert "daemon alive" in proc.stderr
+    assert "daemon swapped" in proc.stderr
     assert proc.engine_marker.exists()  # the (backgrounded) restart actually ran
+
+
+def test_restart_rejects_stale_non_swap(tmp_path):
+    """Clean-swap guard (T0044): when the daemon does NOT swap — the pre-restart
+    pid in engine.pid is still what `status` reports — the wrapper must NOT claim
+    success on a fresh heartbeat (the old daemon runs stale code). It fails after
+    the timeout instead."""
+    proc = _run(
+        tmp_path,
+        lane_config=LANE_CONFIG_NO_PM,
+        env_present=False,
+        stale_pid="99999",
+    )
+    assert not proc.timed_out, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "did not cleanly swap" in proc.stderr
+    assert proc.engine_marker.exists()  # the restart was attempted
 
 
 def test_pm_loop_env_present_adapter_available_exits_0(tmp_path):

@@ -105,12 +105,35 @@ else
 fi
 
 # ── step 2: reinstall so a running daemon picks up code changes ───────────────
+# Reinstall from the LOOP-ORCHESTRATOR repo (where the package + Makefile live),
+# NOT the session --project-root — that root may be a DIFFERENT repo the loop
+# builds (e.g. an app with no `install-python` target), which made the reinstall
+# fail for non-orchestrator sessions (F18). Resolve the orchestrator root from
+# this script's own location (bin/loop-restart), symlink-aware; LOOP_ORCH_ROOT
+# overrides.
+_loop_restart_self_dir() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [[ -h "$src" ]]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"; [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+orch_root="${LOOP_ORCH_ROOT:-$(cd "$(_loop_restart_self_dir)/.." >/dev/null 2>&1 && pwd)}"
 install_cmd="${LOOP_RESTART_INSTALL_CMD:-make install-python}"
-echo "loop-restart: reinstalling ($install_cmd) in $project_root" >&2
-( cd "$project_root" && eval "$install_cmd" ) || {
-  echo "loop-restart: FATAL: reinstall failed ($install_cmd)" >&2
+echo "loop-restart: reinstalling ($install_cmd) in $orch_root" >&2
+( cd "$orch_root" && eval "$install_cmd" ) || {
+  echo "loop-restart: FATAL: reinstall failed ($install_cmd) in $orch_root" >&2
   exit 1
 }
+
+# Pre-restart daemon pid — the post-restart poll requires a DIFFERENT live pid (a
+# genuine swap), not merely any fresh heartbeat: the OLD daemon can survive the
+# restart's stop window and heartbeat through it, falsely passing readiness while
+# still running stale code (observed: loop-restart printed OK, then `status`
+# warned "running stale code").
+pid_file="$project_root/.loop/sessions/$session/engine/engine.pid"
+pre_pid="$(cat "$pid_file" 2>/dev/null || true)"
 
 # ── step 3: restart the engine, then POLL for readiness (NON-BLOCKING) ────────
 # `loop-engine restart` ends in Watch.run()'s blocking `while self._running`
@@ -148,10 +171,19 @@ while ((SECONDS < deadline)); do
     fi
     restart_pid=""  # reaped; stop checking liveness, keep polling status
   fi
-  status="$(loop-engine --project-root "$project_root" --session "$session" status 2>/dev/null || true)"
+  # Capture stderr too (2>&1) so the engine's "running stale code" warning is
+  # visible to the freshness check below.
+  status="$(loop-engine --project-root "$project_root" --session "$session" status 2>&1 || true)"
   if grep -Eq 'watch: alive \(pid [0-9]+, heartbeat [0-9]+s ago\)' <<<"$status"; then
+    cur_pid="$(sed -E -n 's/.*watch: alive \(pid ([0-9]+),.*/\1/p' <<<"$status" | head -1)"
     age="$(sed -E -n 's/.*heartbeat ([0-9]+)s ago.*/\1/p' <<<"$status" | head -1)"
-    if [[ -n "$age" ]] && ((age <= max_heartbeat)); then
+    # A CLEAN swap = alive + fresh heartbeat + a live pid that differs from the
+    # pre-restart daemon + no stale-code warning. The pid-changed check is what
+    # catches the racy case where the old daemon survives stop and heartbeats
+    # through the window (its code is stale, so an OK there would be a lie).
+    if [[ -n "$age" ]] && ((age <= max_heartbeat)) \
+       && [[ -n "$cur_pid" && "$cur_pid" != "$pre_pid" ]] \
+       && ! grep -q 'stale' <<<"$status"; then
       ready=1
       break
     fi
@@ -159,11 +191,13 @@ while ((SECONDS < deadline)); do
   sleep 0.5
 done
 if [[ -z "$ready" ]]; then
-  echo "loop-restart: FATAL: daemon not alive with a fresh heartbeat within ${restart_timeout}s" >&2
+  echo "loop-restart: FATAL: daemon did not cleanly swap (new pid + fresh heartbeat," \
+    "no stale-code warning) within ${restart_timeout}s — pre_pid=${pre_pid:-none}," \
+    "last seen pid=${cur_pid:-none}" >&2
   _dump_restart_log
   exit 1
 fi
-echo "loop-restart: daemon alive (heartbeat ${age}s ago)" >&2
+echo "loop-restart: daemon swapped (pid ${pre_pid:-none} -> ${cur_pid}, heartbeat ${age}s ago)" >&2
 
 # ── step 4: assert PM readiness ──────────────────────────────────────────────
 # list-adapters reports each installed adapter's env-based availability; it takes
