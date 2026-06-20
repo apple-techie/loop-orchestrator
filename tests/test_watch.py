@@ -13,7 +13,7 @@ from loop_orchestrator.engine import actions, cli
 from loop_orchestrator.engine import loop as loop_mod
 from loop_orchestrator.engine import watch as watch_mod
 from loop_orchestrator.engine.config import EngineConfig, IngestConfig, LintConfig, MetricsConfig
-from loop_orchestrator.engine.events import EventLog
+from loop_orchestrator.engine.events import EventLog, utc_now
 from loop_orchestrator.engine.loop import run_once
 from loop_orchestrator.engine.watch import TriggerState, Watch, evaluate_triggers
 from loop_orchestrator.engine.wiki import MARKER
@@ -80,6 +80,10 @@ def _settled(w: Watch) -> Watch:
     w._prev_snapshot = w.observer.snapshot().to_dict()
     w._last_cycle_start = time.time()
     return w
+
+
+def _cycle_triggers(project: Path) -> list[dict]:
+    return [e for e in _events(project) if e["event"] == "cycle-trigger"]
 
 
 # ── evaluate_triggers (pure, injected clock) ────────────────────────────────
@@ -227,6 +231,136 @@ def test_state_file_mtime_change_triggers(project, cycle_recorder):
 
     w.tick(time.time())  # mtime unchanged -> no retrigger
     assert len(cycle_recorder) == 1
+
+
+def test_drive_pending_build_live_runner_with_advanced_branch_does_not_trigger(
+    project, cycle_recorder, monkeypatch
+):
+    w = _settled(_watch(project))
+    worktree = actions._lane_worktree(w.paths, "web")
+    actions.record_build_marker(
+        w.paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-b")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"codex exec --cd {worktree} <brief>",
+    )
+
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    assert _cycle_triggers(project) == []
+
+
+def test_drive_pending_build_gone_runner_with_pre_build_sha_triggers(
+    project, cycle_recorder, monkeypatch
+):
+    w = _settled(_watch(project))
+    actions.record_build_marker(
+        w.paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)
+
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1
+    assert _cycle_triggers(project)[-1]["reasons"] == ["drive-pending"]
+
+
+def test_drive_pending_build_gone_runner_without_pre_build_sha_young_does_not_trigger(
+    project, cycle_recorder, monkeypatch
+):
+    w = _settled(_watch(project))
+    actions.record_build_marker(
+        w.paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)
+
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    assert _cycle_triggers(project) == []
+
+
+def test_drive_pending_build_aged_past_timeout_triggers_without_baseline(project, cycle_recorder):
+    w = _settled(_watch(project))
+    actions.record_build_marker(
+        w.paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pid": 123,
+            "started_at": "2000-01-01T00:00:00Z",
+        },
+    )
+
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1
+    assert _cycle_triggers(project)[-1]["reasons"] == ["drive-pending"]
+
+
+def test_drive_pending_verify_result_with_concerns_triggers(project, cycle_recorder):
+    w = _settled(_watch(project))
+    out_path = w.paths.verify_dir / "web-result.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps({"overall": "concerns"}), encoding="utf-8")
+    actions.record_verify_marker(
+        w.paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+
+    w.tick(time.time())
+
+    assert len(cycle_recorder) == 1
+    assert _cycle_triggers(project)[-1]["reasons"] == ["drive-pending"]
+
+
+def test_drive_pending_verify_young_without_result_does_not_trigger(project, cycle_recorder):
+    w = _settled(_watch(project))
+    actions.record_verify_marker(
+        w.paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(w.paths.verify_dir / "missing.json"),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+
+    w.tick(time.time())
+
+    assert cycle_recorder == []
+    assert _cycle_triggers(project) == []
 
 
 def test_paused_skip_once_per_pause(project, cycle_recorder):

@@ -257,6 +257,49 @@ def evaluate_triggers(state: TriggerState, now: float) -> list[str]:
     return reasons
 
 
+def _marker_age_s(marker: dict, now: float) -> float:
+    try:
+        started_at = parse_ts(str(marker.get("started_at") or ""))
+    except (TypeError, ValueError):
+        return float("inf")
+    return (datetime.fromtimestamp(now, timezone.utc) - started_at).total_seconds()
+
+
+def _build_marker_drive_pending(
+    substrate: Substrate, paths: SessionPaths, marker: dict, now: float
+) -> bool:
+    if _marker_age_s(marker, now) > loop_mod._BUILD_TIMEOUT_S:
+        return True
+    if marker.get("pre_build_sha") is None:
+        return False
+    window = marker.get("window")
+    worktree = (
+        actions_mod._lane_worktree(paths, window) if isinstance(window, str) and window else None
+    )
+    return not loop_mod._build_runner_alive(substrate, marker.get("pid"), worktree)
+
+
+def _verify_marker_drive_pending(substrate: Substrate, marker: dict, now: float) -> bool:
+    if _marker_age_s(marker, now) > loop_mod._VERIFY_TIMEOUT_S:
+        return True
+    out_path = marker.get("out_path")
+    if not isinstance(out_path, str) or not out_path:
+        return False
+    result = substrate.read_verify_result(out_path)
+    overall = result.get("overall") if result is not None else None
+    return overall in ("pass", "concerns", "fail")
+
+
+def _drive_pending(substrate: Substrate, paths: SessionPaths, now: float) -> bool:
+    return any(
+        _build_marker_drive_pending(substrate, paths, marker, now)
+        for marker in actions_mod.load_build_markers(paths)
+    ) or any(
+        _verify_marker_drive_pending(substrate, marker, now)
+        for marker in actions_mod.load_verify_markers(paths)
+    )
+
+
 class Watch:
     """Singleton engine daemon for one (project_root, session)."""
 
@@ -370,8 +413,7 @@ class Watch:
             state_file_changed=state_changed,
             cycle_now=self.paths.cycle_now_path.exists(),
             reply_received=reply_received,
-            drive_pending=bool(actions_mod.load_build_markers(self.paths))
-            or bool(actions_mod.load_verify_markers(self.paths)),
+            drive_pending=_drive_pending(self.substrate, self.paths, now),
             watch_start=self._watch_started,
         )
         reasons = evaluate_triggers(trigger_state, now)
