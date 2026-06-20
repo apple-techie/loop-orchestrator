@@ -569,7 +569,11 @@ def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
 
 
 def _verify_drive_lines(
-    substrate: Substrate, snap: EngineSnapshot, paths: SessionPaths
+    substrate: Substrate,
+    snap: EngineSnapshot,
+    paths: SessionPaths,
+    events: EventLog | None = None,
+    emitted_base_unresolved: set[str] | None = None,
 ) -> list[str]:
     build_markers = actions_mod.load_build_markers(paths)
     build_in_flight_windows = {
@@ -590,13 +594,6 @@ def _verify_drive_lines(
         if isinstance(outcome.get("window"), str)
     }
 
-    # Shared base (main HEAD): a lane whose branch is AT base has nothing built
-    # yet (awaiting-build), and a lane ahead of base has a non-empty diff to
-    # review (ready-to-verify). Resolving main from the project root is
-    # worktree-independent (linked worktrees share .git).
-    base_head = substrate.branch_head(paths.project_root, "main")
-    open_backlog = _open_backlog_by_loop(paths)
-
     # Candidate lanes = the worktree lanes (ledger loops with a branch, T0025) UNION
     # the live tmux lanes. build/verify are HEADLESS (codex exec / loop-verify run
     # detached, never touching the lane's pane), so a worktree lane is drivable even
@@ -616,6 +613,18 @@ def _verify_drive_lines(
         if isinstance(loops_doc, dict)
         else set()
     )
+    # Shared base (main HEAD): a lane whose branch is AT base has nothing built
+    # yet (awaiting-build), and a lane ahead of base has a non-empty diff to
+    # review (ready-to-verify). Resolving main from the project root is
+    # worktree-independent (linked worktrees share .git).
+    base_head = substrate.branch_head(paths.project_root, "main")
+    if base_head is None and branch_lanes and events is not None:
+        base = "main"
+        if emitted_base_unresolved is None or base not in emitted_base_unresolved:
+            events.append("drive-base-unresolved", base=base)
+            if emitted_base_unresolved is not None:
+                emitted_base_unresolved.add(base)
+    open_backlog = _open_backlog_by_loop(paths)
 
     ready: list[str] = []
     ready_lanes: set[str] = set()
@@ -855,6 +864,8 @@ def _assemble_prompt(
     config: EngineConfig | None = None,
     roster: dict[str, dict] | None = None,
     checkpoint_body: str | None = None,
+    events: EventLog | None = None,
+    emitted_base_unresolved: set[str] | None = None,
 ) -> str:
     """checkpoint_prompt(packaged header) + lane status + restarts tail + asks
     (+ governance roster and selection rubric when a roster was resolved).
@@ -891,7 +902,13 @@ def _assemble_prompt(
         lines.append("(none)")
     lines.append("--- outstanding asks ---")
     lines.extend(_ask_lines(actions_mod.load_asks(paths), datetime.now(timezone.utc)))
-    verify_drive = _verify_drive_lines(substrate, snap, paths)
+    verify_drive = _verify_drive_lines(
+        substrate,
+        snap,
+        paths,
+        events=events,
+        emitted_base_unresolved=emitted_base_unresolved,
+    )
     if verify_drive:
         lines.extend(verify_drive)
         lines.append(_DRIVE_RUBRIC)
@@ -1190,6 +1207,7 @@ def run_once(
     paths.ensure()
     events = EventLog(paths.events_path)
     events.append("cycle-start", session=session)
+    emitted_base_unresolved: set[str] = set()
     approval = approval_mode_override or config.approval_mode
 
     substrate = Substrate(root, session)
@@ -1326,7 +1344,15 @@ def run_once(
     # emit checkpoint-overflow and fall back to a header-only prompt so the brain
     # STILL runs and can self-trim ops-wiki/checkpoint.md + index.md this cycle.
     try:
-        prompt = _assemble_prompt(substrate, snap, paths, config=config, roster=roster)
+        prompt = _assemble_prompt(
+            substrate,
+            snap,
+            paths,
+            config=config,
+            roster=roster,
+            events=events,
+            emitted_base_unresolved=emitted_base_unresolved,
+        )
     except SubstrateError as exc:
         events.append("checkpoint-overflow", error=str(exc))
         prompt = _assemble_prompt(
@@ -1336,6 +1362,8 @@ def run_once(
             config=config,
             roster=roster,
             checkpoint_body=_degraded_checkpoint_body(),
+            events=events,
+            emitted_base_unresolved=emitted_base_unresolved,
         )
 
     if dry_run:

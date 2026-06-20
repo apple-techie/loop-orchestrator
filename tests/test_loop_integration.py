@@ -1033,6 +1033,67 @@ def test_prompt_verify_drive_awaiting_build_headless_lane_not_in_snapshot(projec
     assert _DRIVE_RUBRIC in prompt
 
 
+def test_prompt_verify_drive_emits_base_unresolved_for_worktree_lane(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"code": {"branch": "loop/demo/code"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: None if branch == "main" else "lane-sha",
+    )
+    events = EventLog(paths.events_path)
+    emitted_base_unresolved: set[str] = set()
+    snap = _prompt_snap({}, loops=loops)
+
+    _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        checkpoint_body="# Base\n",
+        events=events,
+        emitted_base_unresolved=emitted_base_unresolved,
+    )
+    _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        checkpoint_body="# Base\n",
+        events=events,
+        emitted_base_unresolved=emitted_base_unresolved,
+    )
+
+    emitted = [e for e in events.tail(20) if e["event"] == "drive-base-unresolved"]
+    assert len(emitted) == 1
+    assert emitted[0]["base"] == "main"
+
+
+def test_prompt_verify_drive_does_not_emit_base_unresolved_when_base_resolves(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"code": {"branch": "loop/demo/code"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "base-sha" if branch == "main" else "lane-sha",
+    )
+    events = EventLog(paths.events_path)
+    snap = _prompt_snap({}, loops=loops)
+
+    _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        checkpoint_body="# Base\n",
+        events=events,
+        emitted_base_unresolved=set(),
+    )
+
+    assert [e for e in events.tail(20) if e["event"] == "drive-base-unresolved"] == []
+
+
 def test_prompt_verify_drive_excludes_busy_worktree_lane(project, monkeypatch):
     # A worktree lane an interactive agent is actively occupying (working) must be
     # excluded — never spawn a headless build/verify over in-pane edits.
