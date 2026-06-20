@@ -44,7 +44,7 @@ _INGEST_HEADING = "### Ingest protocol"
 
 # Timed-out asks stay visible in the checkpoint addendum this long.
 _ASK_TIMEOUT_RECENCY_S = 3600
-_BUILD_DRIVE_OUTCOME_EVENTS = frozenset({"build-done", "build-timeout"})
+_BUILD_DRIVE_OUTCOME_EVENTS = frozenset({"build-done", "build-failed", "build-timeout"})
 _BUILD_DRIVE_EVENT_TAIL = 100
 _BUILD_DRIVE_OUTCOME_LIMIT = 5
 _BUILD_TIMEOUT_S = 1500
@@ -261,13 +261,28 @@ def surface_build_results(substrate: Substrate, paths: SessionPaths, events: Eve
                     and branch_head is not None
                     and branch_head != pre_build_sha
                 )
-                if advanced and not _build_runner_alive(substrate, marker.get("pid"), worktree):
+                runner_alive = _build_runner_alive(substrate, marker.get("pid"), worktree)
+                if advanced and not runner_alive:
                     events.append(
                         "build-done",
                         window=window,
                         branch=branch,
                         pre_build_sha=pre_build_sha,
                         branch_head=branch_head,
+                    )
+                    changed = True
+                    _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
+                    continue
+                if (
+                    pre_build_sha is not None
+                    and branch_head == pre_build_sha
+                    and not runner_alive
+                ):
+                    events.append(
+                        "build-failed",
+                        window=window,
+                        branch=branch,
+                        pre_build_sha=pre_build_sha,
                     )
                     changed = True
                     _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
@@ -718,6 +733,7 @@ Act on each window's latest listed outcome only.
 awaiting-build lane -> propose a `build` for that lane with a brief drawn from a named open task.
 build in flight -> wait; do not propose another `build` for that window.
 latest build-done -> lane is ready-to-verify.
+latest build-failed -> propose a `build` fix for that lane.
 latest build-timeout -> propose a narrower `build` for that lane.
 latest verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
 verify-passed = gate passed + NO high/critical finding (low/medium may remain) = mergeable.
