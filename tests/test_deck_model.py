@@ -306,6 +306,31 @@ def test_headless_stale_when_over_timeout(paths):
     assert rows[0].liveness == "stale"
 
 
+def test_headless_malformed_started_at_gone_runner_is_stale(paths):
+    # An unparseable started_at must bias toward "stale" (mirrors the engine), not
+    # silently downgrade a gone runner to a reassuring "done".
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at="garbage"
+    )
+    rows = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=9_999_999)
+    assert rows[0].age_s is None
+    assert rows[0].liveness == "stale"
+
+
+def test_headless_verify_timeout_matches_engine_composition(paths):
+    # loop._VERIFY_TIMEOUT_S = gate(900) + diff(60) + lens(300) + buffer(1140) = 2400.
+    assert model._VERIFY_TIMEOUT_S == 2400
+    out = "/tmp/o.json"
+    _write_verify_marker(
+        paths, window="code", branch="loop/demo/code", pid=7, out_path=out, started_at=_iso(1000)
+    )
+    # gone runner, aged within the verify timeout -> done; past it -> stale.
+    within = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=1000 + 2000)
+    assert within[0].liveness == "done"
+    past = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=1000 + 2500)
+    assert past[0].liveness == "stale"
+
+
 def test_headless_ps_failure_is_unknown(paths):
     _write_build_marker(
         paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)

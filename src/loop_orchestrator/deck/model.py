@@ -20,16 +20,20 @@ from ..engine.events import EventLog
 from ..locking import read_json
 from ..paths import SessionPaths
 from ..pm import taskfiles
+from ..verify import DEFAULT_GATE_TIMEOUT_S, DEFAULT_LENS_TIMEOUT_S
 
 UNRESOLVED = ("pending", "needs-human")
 
 _TASK_ID_RE = re.compile(r"^(T\d{4})")
 
-# Mirror loop._BUILD_TIMEOUT_S WITHOUT importing the in-flight engine/loop.py
-# (T0055): a build/verify whose runner is gone but whose marker outlives this
-# many seconds reads as "stale" rather than "done".
+# Build/verify timeouts MIRROR the engine so the deck's stale-vs-done label agrees
+# with loop.py. The build timeout and the verify diff/buffer terms live in the
+# in-flight engine/loop.py (T0055) so are mirrored as literals; the two large
+# verify terms import from verify.py (not in-flight) to limit drift. loop's value
+# is _VERIFY_TIMEOUT_S = gate(900) + diff(60) + lens(300) + buffer(1140) = 2400;
+# fold the diff/buffer literals back into an import once T0055 lands on main.
 _BUILD_TIMEOUT_S = 1500
-_VERIFY_TIMEOUT_S = 1800
+_VERIFY_TIMEOUT_S = DEFAULT_GATE_TIMEOUT_S + 60 + DEFAULT_LENS_TIMEOUT_S + 1140
 _HEADLESS_EVENTS_TAIL = 40
 
 _BUILD_OUTCOME_GATE = {
@@ -322,7 +326,10 @@ def _runner_liveness(substrate, pid_value, anchor, age_s: int | None, timeout_s:
         return "unknown"
     if command is not None and anchor(command):
         return "live"
-    if age_s is not None and age_s > timeout_s:
+    # Runner gone. Mirror the engine's bias: an unparseable/missing started_at
+    # (age_s None) leans toward timeout, so an unknown-age gone runner reads
+    # "stale" (needs a look), not a reassuring "done".
+    if age_s is None or age_s > timeout_s:
         return "stale"
     return "done"
 
