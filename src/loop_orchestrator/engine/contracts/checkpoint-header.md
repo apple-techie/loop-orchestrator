@@ -71,8 +71,10 @@ Action kinds and fields (optional fields shown with their defaults):
   `interrupt: true` cancels the lane's in-flight generation first.
 - build — implement an awaiting-build lane's open task HEADLESSLY (the engine
   spawns codex exec in the lane's worktree; it commits ONLY on the lane branch,
-  never merges/pushes). Use this — NOT `dispatch` — for an `awaiting-build` lane
-  in the verify drive; the lane needs no live agent:
+  never merges/pushes). Use this — NOT `dispatch`, NOT `add_lane` — for an
+  `awaiting-build` lane in the verify drive; the lane needs no live agent. A lane
+  shown in the roster as `headless-worktree` is ALREADY provisioned — `build` it
+  directly; NEVER `add_lane` to "make it live" (it has no pane by design):
   `{kind: build, window: <awaiting-build lane>, brief: <concise implementation
   brief drawn from the named open task>, rationale: <why>}`
 - verify — run the headless multi-agent verify on a ready-to-verify lane's
