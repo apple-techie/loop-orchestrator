@@ -357,7 +357,11 @@ if events_path and events_path.is_file():
             elif kind == "action":
                 lane = rec.get("lane")
                 if isinstance(lane, str):
-                    lane = lane.strip()
+                    # Collapse ALL whitespace (incl. internal) to "_": a space in a
+                    # lane name would otherwise produce a spaced JSON value that the
+                    # shell `read` word-splits across DISPATCHES/DISTINCT, silently
+                    # corrupting both fields (steer/drop lanes aren't charset-validated).
+                    lane = "_".join(lane.split())
                     if lane:
                         dispatches_by_lane[lane] = dispatches_by_lane.get(lane, 0) + 1
                 if rec.get("kind") == "stop":

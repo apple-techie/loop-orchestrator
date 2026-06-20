@@ -86,6 +86,7 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
             {"event": "action", "kind": "dispatch", "lane": "web"},
             {"event": "action", "kind": "verify", "lane": "validate"},
             {"event": "action", "kind": "dispatch", "lane": ""},
+            {"event": "action", "kind": "dispatch", "lane": "my lane"},  # internal space -> sanitized
             {"event": "action", "kind": "dispatch", "lane": "old", "ts": _ts(timedelta(days=-9))},
             {"event": "ingest-timeout"},
             {"event": "brain-call"},
@@ -124,14 +125,14 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
     assert "lane_restarts_7d:                2" in result.stdout
     assert "unsolicited_steers_7d:           2" in result.stdout
     assert "brain_calls_7d:                  1" in result.stdout
-    assert 'dispatches_per_lane_7d:          {"validate":1,"web":2}' in result.stdout
-    assert "distinct_lanes_used_7d:          2" in result.stdout
+    assert 'dispatches_per_lane_7d:          {"my_lane":1,"validate":1,"web":2}' in result.stdout
+    assert "distinct_lanes_used_7d:          3" in result.stdout
     log = (metrics_project / "ops-wiki" / "log.md").read_text(encoding="utf-8")
     assert "autonomy=0.50(2/4)" in log
     assert "interventions_per_shipped=2.00(4/2)" in log
     assert "escalations7d=1" in log
-    assert 'dispatches_per_lane7d={"validate":1,"web":2}' in log
-    assert "distinct_lanes_used7d=2" in log
+    assert 'dispatches_per_lane7d={"my_lane":1,"validate":1,"web":2}' in log
+    assert "distinct_lanes_used7d=3" in log
 
 
 def test_loop_metrics_missing_events_jsonl_degrades_to_zero(metrics_project: Path):
