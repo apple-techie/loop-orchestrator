@@ -13,6 +13,8 @@
 #   escalations_7d / rejects_7d / stops_7d / ingest_timeouts_7d /
 #   lane_restarts_7d / unsolicited_steers_7d / brain_calls_7d
 #                       7-day attention/autonomy frontier signals
+#   dispatches_per_lane_7d / distinct_lanes_used_7d
+#                       7-day action-event lane attribution
 #   ingests_7d / lints_7d / checkpoints_7d / experiments
 #                       counted from ops-wiki/log.md `## [date] <type> |`
 #   dispatches          n/a — not derivable from substrate surfaces
@@ -52,7 +54,8 @@ Usage:
 Prints the coordinator-efficiency summary block: checkpoint_tokens,
 pending_messages, restarts_24h, giveups_24h, autonomy_ratio,
 interventions_per_shipped_unit, event-derived 7d attention/autonomy counts,
-ingests_7d, lints_7d, checkpoints_7d, experiments (dispatch counts are n/a).
+dispatches_per_lane_7d, distinct_lanes_used_7d, ingests_7d, lints_7d,
+checkpoints_7d, experiments (legacy dispatch counts are n/a).
 Missing inputs degrade to 0/n-a with a note instead of failing.
 
 Options:
@@ -260,6 +263,8 @@ STOPS_7D=0
 INGEST_TIMEOUTS_7D=0
 UNSOLICITED_STEERS_7D=0
 BRAIN_CALLS_7D=0
+DISPATCHES_PER_LANE_7D="{}"
+DISTINCT_LANES_USED_7D=0
 EVENTS_FILE=""
 [[ -n "$SESSION_NAME" ]] && EVENTS_FILE="$SESSIONS_DIR/$SESSION_NAME/engine/events.jsonl"
 if [[ -z "$SESSION_NAME" ]]; then
@@ -279,7 +284,9 @@ read -r \
   STOPS_7D \
   INGEST_TIMEOUTS_7D \
   UNSOLICITED_STEERS_7D \
-  BRAIN_CALLS_7D <<EOF
+  BRAIN_CALLS_7D \
+  DISPATCHES_PER_LANE_7D \
+  DISTINCT_LANES_USED_7D <<EOF
 $(python3 - "$EVENTS_FILE" "$PROJECT_ROOT/.loop/messages" "$TASKS_DONE_7D" <<'PYEOF'
 import datetime
 import json
@@ -299,6 +306,7 @@ shipped = int(sys.argv[3])
 
 escalations = rejects = stops = ingest_timeouts = brain_calls = 0
 engine_approvals = total_decisions = 0
+dispatches_by_lane = {}
 
 
 def parse_event_ts(value):
@@ -346,8 +354,18 @@ if events_path and events_path.is_file():
                 total_decisions += 1
             elif kind == "escalate":
                 escalations += 1
-            elif kind == "action" and rec.get("kind") == "stop":
-                stops += 1
+            elif kind == "action":
+                lane = rec.get("lane")
+                if isinstance(lane, str):
+                    # Collapse ALL whitespace (incl. internal) to "_": a space in a
+                    # lane name would otherwise produce a spaced JSON value that the
+                    # shell `read` word-splits across DISPATCHES/DISTINCT, silently
+                    # corrupting both fields (steer/drop lanes aren't charset-validated).
+                    lane = "_".join(lane.split())
+                    if lane:
+                        dispatches_by_lane[lane] = dispatches_by_lane.get(lane, 0) + 1
+                if rec.get("kind") == "stop":
+                    stops += 1
             elif kind == "ingest-timeout":
                 ingest_timeouts += 1
             elif kind == "brain-call":
@@ -383,6 +401,7 @@ for directory in (mailbox_dir, mailbox_dir / "processed"):
 interventions = escalations + unsolicited_steers + rejects
 autonomy = f"{engine_approvals / total_decisions:.2f}" if total_decisions else "n/a"
 per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
+dispatches_json = json.dumps(dispatches_by_lane, sort_keys=True, separators=(",", ":"))
 print(
     autonomy,
     engine_approvals,
@@ -396,6 +415,8 @@ print(
     ingest_timeouts,
     unsolicited_steers,
     brain_calls,
+    dispatches_json,
+    len(dispatches_by_lane),
 )
 PYEOF
 )
@@ -418,6 +439,8 @@ echo "  ingest_timeouts_7d:              $INGEST_TIMEOUTS_7D"
 echo "  lane_restarts_7d:                $LANE_RESTARTS_7D"
 echo "  unsolicited_steers_7d:           $UNSOLICITED_STEERS_7D"
 echo "  brain_calls_7d:                  $BRAIN_CALLS_7D"
+echo "  dispatches_per_lane_7d:          $DISPATCHES_PER_LANE_7D"
+echo "  distinct_lanes_used_7d:          $DISTINCT_LANES_USED_7D"
 echo "  ingests_7d:        $INGESTS_7D"
 echo "  lints_7d:          $LINTS_7D"
 echo "  checkpoints_7d:    $CHECKPOINTS_7D"
@@ -434,7 +457,7 @@ if [[ "$DO_LOG" -eq 1 ]]; then
     echo "error: --log needs $LOG_FILE" >&2
     exit 1
   fi
-  SUMMARY="tokens=$CHECKPOINT_TOKENS pending=$PENDING restarts24h=$RESTARTS_24H giveups24h=$GIVEUPS_24H autonomy=$AUTONOMY_RATIO($AUTONOMY_ENGINE/$AUTONOMY_TOTAL) interventions_per_shipped=$INTERVENTIONS_PER_SHIPPED_UNIT($INTERVENTIONS_TOTAL/$TASKS_DONE_7D) escalations7d=$ESCALATIONS_7D rejects7d=$REJECTS_7D stops7d=$STOPS_7D ingest_timeouts7d=$INGEST_TIMEOUTS_7D lane_restarts7d=$LANE_RESTARTS_7D unsolicited_steers7d=$UNSOLICITED_STEERS_7D brain_calls7d=$BRAIN_CALLS_7D ingests7d=$INGESTS_7D lints7d=$LINTS_7D checkpoints7d=$CHECKPOINTS_7D experiments=$EXPERIMENTS"
+  SUMMARY="tokens=$CHECKPOINT_TOKENS pending=$PENDING restarts24h=$RESTARTS_24H giveups24h=$GIVEUPS_24H autonomy=$AUTONOMY_RATIO($AUTONOMY_ENGINE/$AUTONOMY_TOTAL) interventions_per_shipped=$INTERVENTIONS_PER_SHIPPED_UNIT($INTERVENTIONS_TOTAL/$TASKS_DONE_7D) escalations7d=$ESCALATIONS_7D rejects7d=$REJECTS_7D stops7d=$STOPS_7D ingest_timeouts7d=$INGEST_TIMEOUTS_7D lane_restarts7d=$LANE_RESTARTS_7D unsolicited_steers7d=$UNSOLICITED_STEERS_7D brain_calls7d=$BRAIN_CALLS_7D dispatches_per_lane7d=$DISPATCHES_PER_LANE_7D distinct_lanes_used7d=$DISTINCT_LANES_USED_7D ingests7d=$INGESTS_7D lints7d=$LINTS_7D checkpoints7d=$CHECKPOINTS_7D experiments=$EXPERIMENTS"
   printf '\n## [%s] metrics | %s\n' "$TODAY" "$SUMMARY" >> "$LOG_FILE"
   echo "logged: ## [$TODAY] metrics | $SUMMARY" >&2
 fi
