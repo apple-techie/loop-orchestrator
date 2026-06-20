@@ -748,6 +748,7 @@ def test_action_line_truncates_long_payload():
 from loop_orchestrator.engine.config import HarnessPolicy  # noqa: E402
 from loop_orchestrator.engine.loop import (  # noqa: E402
     _DRIVE_RUBRIC,
+    _UTILIZATION_RUBRIC,
     _assemble_prompt,
     validate_boot_config,
 )
@@ -1225,6 +1226,69 @@ def test_prompt_without_verify_drive_state_is_byte_identical(project):
         "--- outstanding asks ---\n"
         "(none)\n"
     )
+
+
+def _seed_loop_task(paths, task_id, loop):
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    fm = (
+        f"---\nid: {task_id}\ntitle: x\nstatus: open\n"
+        f"loop: {loop}\ndepends_on: []\nscope: src\n---\n"
+    )
+    (paths.tasks_dir / f"{task_id}-x.md").write_text(fm, encoding="utf-8")
+
+
+def test_prompt_lane_utilization_surfaces_idle_lanes_with_backlog(project):
+    # Lever 4: with target_lane_utilization>0, idle lanes that have open backlog are
+    # surfaced + a rubric tells the brain to route work there before stop.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    _seed_loop_task(paths, "T7001", "web")
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}})
+    cfg = EngineConfig(target_lane_utilization=0.5)
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, config=cfg, checkpoint_body="# Base\n")
+
+    assert "--- idle lanes (route work here before stop) ---" in prompt
+    assert "lane=web status=idle" in prompt and "open-backlog=T7001" in prompt
+    assert _UTILIZATION_RUBRIC in prompt
+
+
+def test_prompt_lane_utilization_off_by_default(project):
+    # Default target_lane_utilization=0.0 -> no addendum even with idle+backlog.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    _seed_loop_task(paths, "T7001", "web")
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}})
+
+    prompt = _assemble_prompt(
+        _sub(project), snap, paths, config=EngineConfig(), checkpoint_body="# Base\n"
+    )
+
+    assert "--- idle lanes" not in prompt
+
+
+def test_prompt_lane_utilization_excludes_busy_coord_and_backlogless(project):
+    # Only idle, non-coord lanes WITH open backlog are surfaced.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    for tid, loop in (("T7001", "web"), ("T7002", "coord"), ("T7003", "infra")):
+        _seed_loop_task(paths, tid, loop)
+    snap = _prompt_snap(
+        {
+            "web": {"status": "idle", "target": "", "kind": "claude"},  # surfaced
+            "coord": {"status": "idle", "target": "", "kind": "fixed"},  # coord excluded
+            "infra": {"status": "working", "target": "", "kind": "claude"},  # busy excluded
+            "ops": {"status": "idle", "target": "", "kind": "shell"},  # no backlog -> excluded
+        }
+    )
+    cfg = EngineConfig(target_lane_utilization=1.0)
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, config=cfg, checkpoint_body="# Base\n")
+
+    assert "lane=web" in prompt
+    assert "lane=coord" not in prompt
+    assert "lane=infra" not in prompt
+    assert "lane=ops" not in prompt
 
 
 # ── F16 (T0041): checkpoint overflow degrades, never aborts the cycle ────────

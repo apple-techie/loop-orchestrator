@@ -732,6 +732,46 @@ Never merge directly; the escalate action is the single human gate.
 Never escalate-merge a failed or timed-out build."""
 
 
+_UTILIZATION_RUBRIC = """\
+--- lane utilization rubric ---
+Route work to the idle lanes above before proposing `stop`: dispatch/steer for a
+live agent lane, `build` for a worktree lane — highest open-backlog first.
+Fill AT MOST max_dispatches_per_cycle idle lanes per cycle (the fan-out cap); the
+rest next cycle. Never leave a lane idle while it has open backlog.
+`stop` is valid only when no idle lane has routable backlog. Never target coord."""
+
+
+def _lane_utilization_lines(
+    snap: EngineSnapshot, paths: SessionPaths, config: EngineConfig | None
+) -> list[str]:
+    """Idle-lane inventory, config-gated by target_lane_utilization > 0: every
+    non-coord lane that is NOT busy AND has open backlog, so the brain routes work
+    there instead of sitting idle. Returns [] (byte-identical prompt) when the knob
+    is off or no idle lane has routable backlog — mirrors _verify_drive_lines."""
+    if config is None or getattr(config, "target_lane_utilization", 0.0) <= 0:
+        return []
+    open_backlog = _open_backlog_by_loop(paths)
+    if not open_backlog:
+        return []
+    lines: list[str] = []
+    for name in sorted(snap.lanes):
+        if name == "coord":
+            continue
+        info = snap.lanes.get(name) or {}
+        if info.get("status") in _BUSY_LANE_STATES:
+            continue
+        tasks = open_backlog.get(name)
+        if not tasks:
+            continue
+        lines.append(
+            f"- lane={name} status={info.get('status') or 'unknown'} "
+            f"kind={info.get('kind') or '?'} open-backlog={','.join(tasks)}"
+        )
+    if not lines:
+        return []
+    return ["--- idle lanes (route work here before stop) ---", *lines]
+
+
 def _roster_lines(roster: dict[str, dict], config: EngineConfig) -> list[str]:
     """Brain-prompt roster block: allowed + present + healthy harnesses only,
     so the brain physically cannot propose a bad one (the gate stays the
@@ -808,6 +848,10 @@ def _assemble_prompt(
     if verify_drive:
         lines.extend(verify_drive)
         lines.append(_DRIVE_RUBRIC)
+    utilization = _lane_utilization_lines(snap, paths, config)
+    if utilization:
+        lines.extend(utilization)
+        lines.append(_UTILIZATION_RUBRIC)
     if roster is not None and config is not None:
         lines.extend(_roster_lines(roster, config))
     return "\n".join(lines) + "\n"

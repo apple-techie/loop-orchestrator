@@ -123,6 +123,11 @@ class EngineConfig:
     checkpoint_interval_s: int = 900
     poll_interval_s: int = 10
     min_cycle_interval_s: int = 120
+    # >0 turns on the lane-utilization drive: the brain prompt surfaces idle lanes
+    # with open backlog + a rubric to route work there before `stop`. 0.0 = off
+    # (byte-identical prompt). Raise destructive.max_dispatches_per_cycle in lockstep
+    # when enabling, else fanning to many idle lanes trips the fan-out gate.
+    target_lane_utilization: float = 0.0
     ingest: IngestConfig = field(default_factory=IngestConfig)
     destructive: DestructiveConfig = field(default_factory=DestructiveConfig)
     pm: PmConfig = field(default_factory=PmConfig)

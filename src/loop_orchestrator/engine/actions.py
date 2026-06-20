@@ -627,5 +627,11 @@ def execute_batch(
             )
         else:
             mark_action(doc, idx, "executed")
-            events.append("action", decision=doc.get("id"), idx=idx, kind=action.get("kind"))
+            events.append(
+                "action",
+                decision=doc.get("id"),
+                idx=idx,
+                kind=action.get("kind"),
+                lane=action.get("lane") or action.get("window"),
+            )
     return doc
