@@ -71,6 +71,7 @@ _VERIFY_TIMEOUT_S = (
     + DEFAULT_LENS_TIMEOUT_S
     + _VERIFY_TIMEOUT_BUFFER_S
 )
+_VERIFY_HARD_TIMEOUT_S = _VERIFY_TIMEOUT_S * 2
 
 # approval mode -> classifications that execute without a human (blocked never runs).
 _AUTO_CLASSES: dict[str, frozenset[str]] = {
@@ -122,18 +123,50 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 continue
             try:
                 result_path = Path(out_path)
-                result_exists = result_path.exists()
                 result = substrate.read_verify_result(out_path)
                 overall = result.get("overall") if result is not None else None
                 if overall not in ("pass", "concerns", "fail"):
                     age_s = _verify_marker_age_s(marker)
                     if age_s > _VERIFY_TIMEOUT_S:
-                        if not result_exists:
-                            if not _verify_runner_gone(substrate, marker.get("pid")):
-                                remaining.append(marker)
-                                continue
-                        else:
-                            _terminate_verify_runner(substrate, marker.get("pid"), events)
+                        result_exists = result_path.exists()
+                        runner_status = _verify_runner_status(
+                            substrate, marker.get("pid"), out_path
+                        )
+                        should_hold = (
+                            runner_status.status in ("alive", "unknown")
+                            and age_s <= _VERIFY_HARD_TIMEOUT_S
+                        )
+                        if should_hold:
+                            events.append(
+                                "verify-timeout-held",
+                                window=marker.get("window"),
+                                pid=runner_status.pid,
+                                out_path=out_path,
+                                started_at=marker.get("started_at"),
+                                timeout_s=_VERIFY_TIMEOUT_S,
+                                hard_timeout_s=_VERIFY_HARD_TIMEOUT_S,
+                                age_s=int(age_s),
+                                reason=runner_status.reason,
+                                result_present=result_exists,
+                                error=runner_status.error,
+                            )
+                            remaining.append(marker)
+                            continue
+                        if runner_status.status == "alive":
+                            _terminate_verify_runner(substrate, marker.get("pid"), out_path, events)
+                        elif runner_status.status == "identity-mismatch":
+                            events.append(
+                                "verify-kill-skip",
+                                pid=runner_status.pid,
+                                reason="identity-mismatch",
+                            )
+                        elif runner_status.status == "unknown":
+                            events.append(
+                                "verify-kill-skip",
+                                pid=runner_status.pid,
+                                reason="ps-failed",
+                                error=runner_status.error,
+                            )
                         # Record verified_tip on timeout too (as pass/fail do) so the
                         # ready-to-verify gate re-arms when the branch ADVANCES past the
                         # timed-out SHA; otherwise verified_tip stays None and the
@@ -147,6 +180,9 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                             out_path=out_path,
                             started_at=marker.get("started_at"),
                             timeout_s=_VERIFY_TIMEOUT_S,
+                            hard_timeout_s=_VERIFY_HARD_TIMEOUT_S,
+                            reason=runner_status.reason,
+                            result_present=result_exists,
                         )
                         changed = True
                         _save_verify_markers_best_effort(
@@ -383,22 +419,48 @@ def _verify_marker_age_s(marker: dict) -> float:
     return (datetime.now(timezone.utc) - started_at).total_seconds()
 
 
-def _verify_runner_gone(substrate: Substrate, pid_value: object) -> bool:
+@dataclasses.dataclass(frozen=True)
+class _VerifyRunnerStatus:
+    status: str
+    reason: str
+    pid: int | None = None
+    error: str | None = None
+
+
+def _verify_command_matches(command: str, out_path: object) -> bool:
+    return (
+        isinstance(out_path, str)
+        and bool(out_path)
+        and "loop-verify" in command
+        and f"--out {out_path}" in command
+    )
+
+
+def _verify_runner_status(
+    substrate: Substrate, pid_value: object, out_path: object
+) -> _VerifyRunnerStatus:
     try:
         pid = int(pid_value)
     except (TypeError, ValueError):
-        return True
+        return _VerifyRunnerStatus("gone", "invalid-pid")
     if pid <= 1:
-        return True
+        return _VerifyRunnerStatus("gone", "invalid-pid", pid=pid)
     try:
         command = substrate.process_command(pid, timeout=2)
-    except SubstrateError:
-        return False
-    return command is None
+    except SubstrateError as exc:
+        return _VerifyRunnerStatus("unknown", "ps-failed", pid=pid, error=str(exc))
+    if command is None:
+        return _VerifyRunnerStatus("gone", "runner-gone", pid=pid)
+    if _verify_command_matches(command, out_path):
+        return _VerifyRunnerStatus("alive", "runner-alive", pid=pid)
+    return _VerifyRunnerStatus("identity-mismatch", "identity-mismatch", pid=pid)
 
 
 def _terminate_verify_runner(
-    substrate: Substrate, pid_value: object, events: EventLog | None = None
+    substrate: Substrate,
+    pid_value: object,
+    out_path: object = None,
+    events: EventLog | None = None,
 ) -> None:
     try:
         pid = int(pid_value)
@@ -412,7 +474,7 @@ def _terminate_verify_runner(
         if events is not None:
             events.append("verify-kill-skip", pid=pid, reason="ps-failed", error=str(exc))
         return
-    if command is None or "loop-verify" not in command:
+    if command is None or not _verify_command_matches(command, out_path):
         if events is not None:
             events.append("verify-kill-skip", pid=pid, reason="identity-mismatch")
         return

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,10 @@ def project(tmp_path: Path, fakes_env: Path, monkeypatch: pytest.MonkeyPatch) ->
 def _events(paths: SessionPaths) -> list[dict]:
     lines = paths.events_path.read_text(encoding="utf-8").splitlines()
     return [json.loads(line) for line in lines if line.strip()]
+
+
+def _utc_seconds_ago(seconds: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _brain_calls(call_log) -> list[str]:
@@ -2064,10 +2069,99 @@ def test_surface_verify_missing_result_leaves_marker_in_progress(project):
     assert not any(e["event"].startswith("verify-") for e in emitted)
 
 
-@pytest.mark.parametrize("command", ["loop-verify --out x", "python server.py"])
-def test_surface_verify_missing_result_with_live_or_recycled_pid_keeps_marker(
-    project, monkeypatch, command
+def test_surface_verify_missing_result_with_live_runner_past_soft_timeout_holds_marker(
+    project, monkeypatch
 ):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-missing.json"
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(out_path),
+        "pid": 123,
+        "started_at": _utc_seconds_ago(loop_mod._VERIFY_TIMEOUT_S + 1),
+    }
+    record_verify_marker(paths, marker)
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"uv run loop-verify --out {out_path}",
+    )
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == [marker]
+    emitted = _events(paths) if paths.events_path.exists() else []
+    held = [e for e in emitted if e["event"] == "verify-timeout-held"]
+    assert held
+    assert held[-1]["reason"] == "runner-alive"
+    assert held[-1]["result_present"] is False
+    assert not any(e["event"] == "verify-timeout" for e in emitted)
+
+
+def test_surface_verify_missing_result_with_live_runner_past_hard_timeout_kills_and_clears(
+    project, monkeypatch
+):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-missing.json"
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(out_path),
+        "pid": 123,
+        "started_at": "2000-01-01T00:00:00Z",
+    }
+    record_verify_marker(paths, marker)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"uv run loop-verify --out {out_path}",
+    )
+    monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "verify-timeout"]
+    assert emitted and emitted[-1]["reason"] == "runner-alive"
+    assert emitted[-1]["result_present"] is False
+    assert [pid for pid, _sig in killed] == [123, 123]
+
+
+def test_surface_verify_missing_result_process_probe_failure_is_observable(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(paths.verify_dir / "web-missing.json"),
+        "pid": 123,
+        "started_at": _utc_seconds_ago(loop_mod._VERIFY_TIMEOUT_S + 1),
+    }
+    record_verify_marker(paths, marker)
+
+    def fail_ps(self, pid, timeout=2):
+        raise SubstrateError(["ps", str(pid)], 1, "permission denied")
+
+    monkeypatch.setattr(Substrate, "process_command", fail_ps)
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == [marker]
+    held = [e for e in _events(paths) if e["event"] == "verify-timeout-held"]
+    assert held
+    assert held[-1]["reason"] == "ps-failed"
+    assert "permission denied" in held[-1]["error"]
+
+
+def test_surface_verify_missing_result_with_recycled_pid_times_out_and_clears(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     events = EventLog(paths.events_path)
@@ -2079,13 +2173,18 @@ def test_surface_verify_missing_result_with_live_or_recycled_pid_keeps_marker(
         "started_at": "2000-01-01T00:00:00Z",
     }
     record_verify_marker(paths, marker)
-    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: command)
+    monkeypatch.setattr(
+        Substrate, "process_command", lambda self, pid, timeout=2: "python server.py"
+    )
 
     surface_verify_results(Substrate(project, "demo"), paths, events)
 
-    assert load_verify_markers(paths) == [marker]
-    emitted = _events(paths) if paths.events_path.exists() else []
-    assert not any(e["event"] == "verify-timeout" for e in emitted)
+    assert load_verify_markers(paths) == []
+    emitted = _events(paths)
+    skipped = [e for e in emitted if e["event"] == "verify-kill-skip"]
+    timed_out = [e for e in emitted if e["event"] == "verify-timeout"]
+    assert skipped and skipped[-1]["reason"] == "identity-mismatch"
+    assert timed_out and timed_out[-1]["reason"] == "identity-mismatch"
 
 
 def test_surface_verify_corrupt_result_leaves_marker_in_progress(project):
@@ -2111,6 +2210,38 @@ def test_surface_verify_corrupt_result_leaves_marker_in_progress(project):
     assert not any(e["event"].startswith("verify-") for e in emitted)
 
 
+def test_surface_verify_corrupt_result_past_soft_timeout_with_live_runner_holds_marker(
+    project, monkeypatch
+):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-corrupt.json"
+    marker = {
+        "window": "web",
+        "branch": "loop/demo/web",
+        "out_path": str(out_path),
+        "pid": 123,
+        "started_at": _utc_seconds_ago(loop_mod._VERIFY_TIMEOUT_S + 1),
+    }
+    record_verify_marker(paths, marker)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"uv run loop-verify --out {out_path}",
+    )
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    assert load_verify_markers(paths) == [marker]
+    held = [e for e in _events(paths) if e["event"] == "verify-timeout-held"]
+    assert held
+    assert held[-1]["reason"] == "runner-alive"
+    assert held[-1]["result_present"] is True
+
+
 def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -2128,7 +2259,9 @@ def test_surface_verify_invalid_stale_result_times_out_and_clears(project, monke
     out_path.write_text(json.dumps({"overall": "nonsense"}), encoding="utf-8")
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        Substrate, "process_command", lambda self, pid, timeout=2: "uv run loop-verify"
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"uv run loop-verify --out {out_path}",
     )
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(loop_mod.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
@@ -2187,7 +2320,11 @@ def test_surface_verify_timeout_permission_error_does_not_crash_and_clears(proje
     out_path = Path(marker["out_path"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps({"overall": "nonsense"}), encoding="utf-8")
-    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: "loop-verify")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"loop-verify --out {out_path}",
+    )
     monkeypatch.setattr(loop_mod.os, "getpgid", lambda pid: pid)
 
     def deny(_pgid, _sig):
