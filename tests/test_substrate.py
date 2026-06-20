@@ -448,3 +448,28 @@ def test_timeout_param_plumbed(sub, monkeypatch):
     assert seen["timeout"] == 7
     sub.lane_status("web")
     assert seen["timeout"] == 15
+
+
+def test_build_log_tail_newest_file(sub, tmp_path):
+    log_dir = tmp_path / "wt" / ".loop" / "build"
+    log_dir.mkdir(parents=True)
+    old = log_dir / "codex-build-100.log"
+    old.write_text("old line\n", encoding="utf-8")
+    new = log_dir / "codex-build-200.log"
+    new.write_text("first\n\nsecond\nthird\n", encoding="utf-8")
+    os.utime(old, (100, 100))
+    os.utime(new, (200, 200))
+    assert sub.build_log_tail(tmp_path / "wt", lines=2) == "second\nthird"
+
+
+def test_build_log_tail_strips_ansi(sub, tmp_path):
+    log_dir = tmp_path / "wt" / ".loop" / "build"
+    log_dir.mkdir(parents=True)
+    (log_dir / "codex-build-1.log").write_text(
+        "\x1b[32mAll checks passed!\x1b[0m\n", encoding="utf-8"
+    )
+    assert sub.build_log_tail(tmp_path / "wt") == "All checks passed!"
+
+
+def test_build_log_tail_missing_returns_empty(sub, tmp_path):
+    assert sub.build_log_tail(tmp_path / "absent") == ""
