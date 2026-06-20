@@ -86,7 +86,7 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
             {"event": "action", "kind": "dispatch", "lane": "web"},
             {"event": "action", "kind": "verify", "lane": "validate"},
             {"event": "action", "kind": "dispatch", "lane": ""},
-            {"event": "action", "kind": "dispatch", "lane": "my lane"},  # internal space -> sanitized
+            {"event": "action", "kind": "dispatch", "lane": "my lane"},  # space -> sanitized
             {"event": "action", "kind": "dispatch", "lane": "old", "ts": _ts(timedelta(days=-9))},
             {"event": "ingest-timeout"},
             {"event": "brain-call"},

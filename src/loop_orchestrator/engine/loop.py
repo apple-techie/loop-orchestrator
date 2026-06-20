@@ -1349,6 +1349,19 @@ def run_once(
 
     brain = Brain(config, substrate, paths, events)
     live_lanes = set(snap.lanes)
+    # Headless ledger worktree lanes (a branch, no tmux pane): build/verify may
+    # target these even though they are not live lanes (the eligibility-decouple).
+    _ledger = read_json(paths.state_file, {})
+    _loops = _ledger.get("loops") if isinstance(_ledger, dict) else None
+    worktree_lanes = (
+        {
+            w
+            for w, e in _loops.items()
+            if isinstance(e, dict) and isinstance(e.get("branch"), str) and e.get("branch")
+        }
+        if isinstance(_loops, dict)
+        else set()
+    )
     try:
         reply = brain.invoke(prompt)
     except BrainError as exc:
@@ -1357,7 +1370,7 @@ def run_once(
         return 1
 
     try:
-        parsed = decision_mod.parse_and_validate(reply, live_lanes)
+        parsed = decision_mod.parse_and_validate(reply, live_lanes, worktree_lanes)
     except DecisionError as first_error:
         try:
             reply = brain.invoke(prompt + _CORRECTIVE_SUFFIX.format(error=first_error))
@@ -1366,7 +1379,7 @@ def run_once(
             events.append("cycle-end", outcome="brain-failed")
             return 1
         try:
-            parsed = decision_mod.parse_and_validate(reply, live_lanes)
+            parsed = decision_mod.parse_and_validate(reply, live_lanes, worktree_lanes)
         except DecisionError as second_error:
             return _file_needs_human(
                 paths, events, approval, second_error, reply, keep=config.checkpoint.keep_decisions

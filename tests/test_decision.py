@@ -157,6 +157,48 @@ def test_unknown_lane_rejected(action_yaml):
         validate(raw, LIVE)
 
 
+@pytest.mark.parametrize(
+    "action_yaml",
+    [
+        "{kind: build, window: code, brief: b, rationale: r}",
+        "{kind: verify, lane: code, rationale: r}",
+    ],
+)
+def test_build_verify_accept_headless_worktree_lane(action_yaml):
+    # build/verify run headless -> a worktree lane (no live pane) is valid even
+    # though it is NOT in live_lanes. (Regression: the gate used to reject it as
+    # "unknown window", so the brain could only escalate.)
+    raw = parse(fence(f"version: 1\ncritique: x\nactions:\n  - {action_yaml}"))
+    decision = validate(raw, LIVE, worktree_lanes={"code"})
+    assert decision.actions[0].kind in ("build", "verify")
+
+
+@pytest.mark.parametrize(
+    "action_yaml",
+    [
+        "{kind: build, window: ghost, brief: b, rationale: r}",
+        "{kind: verify, lane: ghost, rationale: r}",
+    ],
+)
+def test_build_verify_reject_unknown_lane(action_yaml):
+    # Not live AND not a worktree lane -> still rejected.
+    raw = parse(fence(f"version: 1\ncritique: x\nactions:\n  - {action_yaml}"))
+    with pytest.raises(DecisionValidationError, match="ghost"):
+        validate(raw, LIVE, worktree_lanes={"code"})
+
+
+def test_dispatch_to_worktree_lane_still_rejected():
+    # dispatch needs a live pane; a headless worktree lane is NOT dispatchable.
+    raw = parse(
+        fence(
+            "version: 1\ncritique: x\nactions:\n"
+            "  - {kind: dispatch, lane: code, payload: p, rationale: r}"
+        )
+    )
+    with pytest.raises(DecisionValidationError, match="code"):
+        validate(raw, LIVE, worktree_lanes={"code"})
+
+
 def test_add_lane_to_existing_window_rejected():
     raw = parse(
         fence(

@@ -303,8 +303,19 @@ def _build_action(idx: int, raw: object) -> Action:
         raise DecisionValidationError(f"action {idx} ({kind}): {exc}") from exc
 
 
-def validate(raw: dict, live_lanes: set[str], raw_text: str = "") -> Decision:
-    """Validate a parsed decision mapping against contract v1 and live lanes."""
+def validate(
+    raw: dict,
+    live_lanes: set[str],
+    worktree_lanes: set[str] | frozenset[str] = frozenset(),
+    raw_text: str = "",
+) -> Decision:
+    """Validate a parsed decision mapping against contract v1 and live lanes.
+
+    `live_lanes` are live tmux lanes (a pane an agent occupies) — dispatch/steer/
+    drop_lane require one. `worktree_lanes` are headless ledger worktree lanes (a
+    branch, no pane); build/verify run HEADLESSLY so they may target either. This
+    is what lets the brain `build`/`verify` a code-fleet lane that has no tmux
+    window (the eligibility-decouple) instead of the gate rejecting it."""
     version = raw.get("version")
     if version != 1:
         raise DecisionValidationError(
@@ -321,28 +332,35 @@ def validate(raw: dict, live_lanes: set[str], raw_text: str = "") -> Decision:
             f"{len(raw_actions)} actions given; the limit is {MAX_ACTIONS} per decision"
         )
 
+    # build/verify may target a headless worktree lane (no live pane).
+    drivable = set(live_lanes) | set(worktree_lanes)
     actions: list[Action] = []
     for idx, raw_action in enumerate(raw_actions):
         action = _build_action(idx, raw_action)
         live = ", ".join(sorted(live_lanes)) or "(none)"
-        if isinstance(action, DispatchAction | SteerAction | VerifyAction) and (
-            action.lane not in live_lanes
-        ):
+        drive = ", ".join(sorted(drivable)) or "(none)"
+        # dispatch/steer need a LIVE pane an agent occupies.
+        if isinstance(action, DispatchAction | SteerAction) and action.lane not in live_lanes:
             raise DecisionValidationError(
                 f"action {idx} ({action.kind}): unknown lane {action.lane!r}; live lanes: {live}"
             )
-        if isinstance(action, BuildAction) and action.window not in live_lanes:
+        # verify/build run HEADLESS — a worktree lane (no pane) is valid.
+        if isinstance(action, VerifyAction) and action.lane not in drivable:
             raise DecisionValidationError(
-                f"action {idx} (build): unknown window {action.window!r}; live lanes: {live}"
+                f"action {idx} (verify): unknown lane {action.lane!r}; drivable lanes: {drive}"
+            )
+        if isinstance(action, BuildAction) and action.window not in drivable:
+            raise DecisionValidationError(
+                f"action {idx} (build): unknown window {action.window!r}; drivable lanes: {drive}"
             )
         if isinstance(action, DropLaneAction) and action.window not in live_lanes:
             raise DecisionValidationError(
                 f"action {idx} (drop_lane): unknown window {action.window!r}; live lanes: {live}"
             )
-        if isinstance(action, AddLaneAction) and action.window in live_lanes:
+        if isinstance(action, AddLaneAction) and action.window in drivable:
             raise DecisionValidationError(
                 f"action {idx} (add_lane): window {action.window!r} is already a live "
-                "lane — pick an unused window name"
+                "or worktree lane — pick an unused window name"
             )
         actions.append(action)
 
@@ -350,8 +368,12 @@ def validate(raw: dict, live_lanes: set[str], raw_text: str = "") -> Decision:
     return Decision(id=decision_id, critique=critique, actions=actions, raw_text=raw_text)
 
 
-def parse_and_validate(text: str, live_lanes: set[str]) -> Decision:
-    return validate(parse(text), live_lanes, raw_text=text)
+def parse_and_validate(
+    text: str,
+    live_lanes: set[str],
+    worktree_lanes: set[str] | frozenset[str] = frozenset(),
+) -> Decision:
+    return validate(parse(text), live_lanes, worktree_lanes, raw_text=text)
 
 
 # ── selftest fixtures (python -m loop_orchestrator.engine.decision selftest) ──
