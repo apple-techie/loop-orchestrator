@@ -121,16 +121,19 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 remaining.append(marker)
                 continue
             try:
+                result_path = Path(out_path)
+                result_exists = result_path.exists()
                 result = substrate.read_verify_result(out_path)
                 overall = result.get("overall") if result is not None else None
                 if overall not in ("pass", "concerns", "fail"):
-                    try:
-                        started_at = parse_ts(str(marker.get("started_at") or ""))
-                        age_s = (datetime.now(timezone.utc) - started_at).total_seconds()
-                    except (TypeError, ValueError):
-                        age_s = _VERIFY_TIMEOUT_S + 1
+                    age_s = _verify_marker_age_s(marker)
                     if age_s > _VERIFY_TIMEOUT_S:
-                        _terminate_verify_runner(substrate, marker.get("pid"), events)
+                        if not result_exists:
+                            if not _verify_runner_gone(substrate, marker.get("pid")):
+                                remaining.append(marker)
+                                continue
+                        else:
+                            _terminate_verify_runner(substrate, marker.get("pid"), events)
                         # Record verified_tip on timeout too (as pass/fail do) so the
                         # ready-to-verify gate re-arms when the branch ADVANCES past the
                         # timed-out SHA; otherwise verified_tip stays None and the
@@ -370,6 +373,28 @@ def _maybe_record_verified_tip(paths: SessionPaths, marker: dict) -> None:
     tip_sha = marker.get("tip_sha")
     if isinstance(window, str) and window and isinstance(tip_sha, str) and tip_sha:
         _record_verified_tip(paths, window, tip_sha)
+
+
+def _verify_marker_age_s(marker: dict) -> float:
+    try:
+        started_at = parse_ts(str(marker.get("started_at") or ""))
+    except (TypeError, ValueError):
+        return _VERIFY_TIMEOUT_S + 1
+    return (datetime.now(timezone.utc) - started_at).total_seconds()
+
+
+def _verify_runner_gone(substrate: Substrate, pid_value: object) -> bool:
+    try:
+        pid = int(pid_value)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 1:
+        return True
+    try:
+        command = substrate.process_command(pid, timeout=2)
+    except SubstrateError:
+        return False
+    return command is None
 
 
 def _terminate_verify_runner(
