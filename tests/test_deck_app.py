@@ -15,7 +15,7 @@ import pytest
 
 from loop_orchestrator.deck.app import LoopDeckApp
 from loop_orchestrator.deck.modals import AddLaneModal, ConfirmModal, ReasonModal, SteerModal
-from loop_orchestrator.deck.widgets import DecisionQueue, FleetTable, StatusBar
+from loop_orchestrator.deck.widgets import DecisionQueue, FleetTable, HeadlessPanel, StatusBar
 from loop_orchestrator.paths import SessionPaths
 from loop_orchestrator.substrate import LaneInfo, LaneStatus, SubstrateError
 
@@ -48,6 +48,9 @@ class StubSubstrate:
 
     def __init__(self):
         self.calls: list[tuple] = []
+        self.ps_command: str | None = None  # process_command return (None = runner gone)
+        self.log_tail = ""
+        self._loops = {"loop-a": {"status": "implement", "branch": "loop/a"}}
 
     # reads
     def lanes(self):
@@ -67,7 +70,7 @@ class StubSubstrate:
     def digest(self):
         return {
             "contract_version": 1,
-            "state": {"loops": {"loop-a": {"status": "implement", "branch": "loop/a"}}},
+            "state": {"loops": dict(self._loops)},
             "mailbox": {"pending": [], "processed_count": 0},
             "unpushed": [],
             "adrs": [],
@@ -75,6 +78,12 @@ class StubSubstrate:
 
     def capture_pane(self, lane, lines=40):
         return f"pane tail for {lane}"
+
+    def process_command(self, pid, timeout=2):
+        return self.ps_command
+
+    def build_log_tail(self, worktree, lines=3):
+        return self.log_tail
 
     # mutations (recorded)
     def engine_cmd(self, *args, **kwargs):
@@ -131,6 +140,55 @@ def test_boot_renders_fleet_decision_and_observe_banner(paths):
             bar = app.query_one(StatusBar).status_line
             assert "OBSERVE MODE" in bar  # no pid, no paused file -> engine off
             assert "demo" in bar
+
+    asyncio.run(main())
+
+
+def test_headless_panel_renders_live_build(paths):
+    worktree = paths.project_root / ".loop" / "worktrees" / "demo" / "loop-a"
+    paths.build_markers_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.build_markers_path.write_text(
+        json.dumps(
+            {
+                "builds": [
+                    {
+                        "window": "loop-a",
+                        "branch": "loop/a",
+                        "pid": 4242,
+                        "started_at": "2026-06-10T12:00:00Z",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    stub = StubSubstrate()
+    stub.ps_command = f"codex exec --cd {worktree} implement"
+    stub.log_tail = "All checks passed!"
+    app = make_app(paths, stub)
+
+    async def main():
+        async with app.run_test() as pilot:
+            await settle(app, pilot)
+            panel = app.query_one(HeadlessPanel)
+            assert panel._rows and panel._rows[0].window == "loop-a"
+            assert panel._rows[0].activity == "build" and panel._rows[0].liveness == "live"
+            assert "loop-a" in panel.rendered and "live" in panel.rendered
+
+    asyncio.run(main())
+
+
+def test_headless_panel_empty_when_no_activity(paths):
+    stub = StubSubstrate()
+    stub._loops = {}  # no branched worktree lanes + no markers -> empty panel
+    app = make_app(paths, stub)
+
+    async def main():
+        async with app.run_test() as pilot:
+            await settle(app, pilot)
+            panel = app.query_one(HeadlessPanel)
+            assert panel._rows == []
+            assert "no headless activity" in panel.rendered
 
     asyncio.run(main())
 

@@ -6,7 +6,7 @@ from rich.text import Text
 from textual.binding import Binding
 from textual.widgets import DataTable, Static
 
-from .model import DeckState, LaneRow, LoopRow, ReviewRow, event_line
+from .model import DeckState, HeadlessRow, LaneRow, LoopRow, ReviewRow, event_line
 
 STATUS_STYLES = {
     "working": "yellow",
@@ -14,6 +14,17 @@ STATUS_STYLES = {
     "idle": "green",
     "errored": "bold red",
     "unknown": "dim",
+}
+
+ACTIVITY_STYLES = {"build": "yellow", "verify": "cyan", "idle": "dim"}
+LIVENESS_STYLES = {"live": "bold green", "done": "blue", "stale": "bold red", "unknown": "dim"}
+GATE_STYLES = {
+    "pass": "green",
+    "done": "blue",
+    "fail": "bold red",
+    "timeout": "bold red",
+    "stale": "yellow",
+    "skip": "dim",
 }
 
 ACTION_STATUS_STYLES = {
@@ -186,6 +197,64 @@ class ReviewQueue(Static):
                 text.append(f" · {item.jira}", style="cyan")
             text.append("\n")
         text.append(f"\nawaiting review: {len(items)}", style="dim")
+        self.update(text)
+
+
+def _liveness_text(row: HeadlessRow) -> Text:
+    """`●live <age>s` (green) / done / stale / unknown; empty for an idle lane."""
+    style = LIVENESS_STYLES.get(row.liveness, "")
+    if row.liveness == "live":
+        age = f" {row.age_s}s" if row.age_s is not None else ""
+        return Text(f"●live{age}", style=style)
+    if row.liveness == "-":
+        return Text("")
+    return Text(row.liveness, style=style)
+
+
+class HeadlessPanel(Static):
+    """Detached build/verify activity for headless worktree lanes (no tmux pane).
+
+    The fleet table shows only live tmux windows, so the codex-exec builds and
+    loop-verify runs the engine drives OFF-pane are invisible there — this panel
+    surfaces them (activity, runner liveness, last gate, a build-log tail) plus a
+    footer with the last engine decision, so an operator can see the loop working
+    even when the tmux session looks empty. Read-only — the deck never writes."""
+
+    rendered = ""  # plain-text mirror of the rendered panel (for tests/inspection)
+
+    def on_mount(self) -> None:
+        self.border_title = "headless activity"
+        self.update_headless([], "")
+
+    def update_headless(self, rows: list[HeadlessRow], last_decision: str) -> None:
+        self._rows = rows
+        text = Text()
+        if not rows:
+            text.append("(no headless activity)", style="dim")
+            if last_decision:
+                text.append(f"\n\nlast: {last_decision}", style="dim")
+            self.rendered = text.plain
+            self.update(text)
+            return
+        for row in rows:
+            text.append(row.window, style="bold")
+            text.append(f" {row.activity}", style=ACTIVITY_STYLES.get(row.activity, ""))
+            live = _liveness_text(row)
+            if live.plain:
+                text.append(" ")
+                text.append(live)
+            if row.task_id != "-":
+                text.append(f" {row.task_id}", style="cyan")
+            if row.gate != "-":
+                text.append(" ")
+                text.append(row.gate, style=GATE_STYLES.get(row.gate, ""))
+            text.append("\n")
+            if row.log_tail:
+                tail = row.log_tail.splitlines()[-1]
+                text.append(f"  {_truncate(tail, 120)}\n", style="dim")
+        if last_decision:
+            text.append(f"\nlast: {last_decision}", style="dim")
+        self.rendered = text.plain
         self.update(text)
 
 

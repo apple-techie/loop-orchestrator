@@ -50,8 +50,11 @@ PENDING = {
 
 
 class StubSubstrate:
-    def __init__(self):
+    def __init__(self, command=None, log_tail="", raise_on_ps=False):
         self.calls: list[str] = []
+        self._command = command  # ps `command=` string for process_command (None = gone)
+        self._log_tail = log_tail
+        self._raise_on_ps = raise_on_ps
 
     def lanes(self):
         self.calls.append("lanes")
@@ -64,6 +67,18 @@ class StubSubstrate:
     def digest(self):
         self.calls.append("digest")
         return json.loads(json.dumps(DIGEST))
+
+    def process_command(self, pid, timeout=2):
+        self.calls.append("process_command")
+        if self._raise_on_ps:
+            from loop_orchestrator.substrate import SubstrateError
+
+            raise SubstrateError(["ps"], None, "boom")
+        return self._command
+
+    def build_log_tail(self, worktree, lines=3):
+        self.calls.append("build_log_tail")
+        return self._log_tail
 
 
 @pytest.fixture
@@ -217,6 +232,178 @@ def test_review_items_in_load_state(paths):
     )
     state = model.load_state(StubSubstrate(), paths)
     assert [r.id for r in state.review_items] == ["T0052"]
+
+
+# ── headless activity panel ───────────────────────────────────────────────
+
+NO_LOOPS = {"state": {"loops": {}}}
+
+
+def _worktree(paths, window):
+    return paths.project_root / ".loop" / "worktrees" / paths.session / window
+
+
+def _iso(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def _write_build_marker(paths, **marker):
+    paths.build_markers_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.build_markers_path.write_text(json.dumps({"builds": [marker]}), encoding="utf-8")
+
+
+def _write_verify_marker(paths, **marker):
+    paths.verify_markers_path.parent.mkdir(parents=True, exist_ok=True)
+    paths.verify_markers_path.write_text(json.dumps({"verifies": [marker]}), encoding="utf-8")
+
+
+def test_headless_no_markers_no_loops(paths):
+    rows = model.headless_rows(StubSubstrate(), paths, NO_LOOPS, [])
+    assert rows == []
+
+
+def test_headless_build_live_runner(paths):
+    wt = _worktree(paths, "code")
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)
+    )
+    stub = StubSubstrate(
+        command=f"node codex exec --cd {wt} implement T0055", log_tail="All checks passed!"
+    )
+    rows = model.headless_rows(stub, paths, NO_LOOPS, [], now=1030)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.window, row.activity, row.liveness, row.age_s) == ("code", "build", "live", 30)
+    assert row.branch == "loop/demo/code"
+    assert row.log_tail == "All checks passed!"
+    assert "build_log_tail" in stub.calls
+
+
+def test_headless_build_dead_runner_is_done(paths):
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)
+    )
+    rows = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=1030)
+    assert rows[0].liveness == "done"
+
+
+def test_headless_sibling_worktree_command_not_live(paths):
+    # web2's `--cd .../web2 ` must not read as web's runner (the trailing-space anchor).
+    wt2 = _worktree(paths, "web2")
+    _write_build_marker(paths, window="web", branch="loop/demo/web", pid=99, started_at=_iso(1000))
+    stub = StubSubstrate(command=f"codex exec --cd {wt2} other")
+    rows = model.headless_rows(stub, paths, NO_LOOPS, [], now=1010)
+    assert rows[0].liveness == "done"  # gone, not live — sibling path doesn't match
+
+
+def test_headless_stale_when_over_timeout(paths):
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)
+    )
+    # runner gone (command=None) AND age > _BUILD_TIMEOUT_S -> stale
+    now = 1000 + model._BUILD_TIMEOUT_S + 5
+    rows = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=now)
+    assert rows[0].liveness == "stale"
+
+
+def test_headless_malformed_started_at_gone_runner_is_stale(paths):
+    # An unparseable started_at must bias toward "stale" (mirrors the engine), not
+    # silently downgrade a gone runner to a reassuring "done".
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at="garbage"
+    )
+    rows = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=9_999_999)
+    assert rows[0].age_s is None
+    assert rows[0].liveness == "stale"
+
+
+def test_headless_verify_timeout_matches_engine_composition(paths):
+    # loop._VERIFY_TIMEOUT_S = gate(900) + diff(60) + lens(300) + buffer(1140) = 2400.
+    assert model._VERIFY_TIMEOUT_S == 2400
+    out = "/tmp/o.json"
+    _write_verify_marker(
+        paths, window="code", branch="loop/demo/code", pid=7, out_path=out, started_at=_iso(1000)
+    )
+    # gone runner, aged within the verify timeout -> done; past it -> stale.
+    within = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=1000 + 2000)
+    assert within[0].liveness == "done"
+    past = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, [], now=1000 + 2500)
+    assert past[0].liveness == "stale"
+
+
+def test_headless_ps_failure_is_unknown(paths):
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)
+    )
+    rows = model.headless_rows(StubSubstrate(raise_on_ps=True), paths, NO_LOOPS, [], now=1030)
+    assert rows[0].liveness == "unknown"
+
+
+def test_headless_no_log_tail_does_not_crash(paths):
+    wt = _worktree(paths, "code")
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)
+    )
+    stub = StubSubstrate(command=f"codex exec --cd {wt} x", log_tail="")
+    rows = model.headless_rows(stub, paths, NO_LOOPS, [], now=1010)
+    assert rows[0].log_tail == ""
+
+
+def test_headless_verify_verdict_from_events(paths):
+    _write_verify_marker(
+        paths,
+        window="code",
+        branch="loop/demo/code",
+        pid=7,
+        out_path="/tmp/o.json",
+        started_at=_iso(1000),
+    )
+    events = [{"ts": "t", "seq": 1, "event": "verify-failed", "window": "code"}]
+    rows = model.headless_rows(StubSubstrate(command=None), paths, NO_LOOPS, events, now=1010)
+    assert rows[0].activity == "verify"
+    assert rows[0].gate == "fail"
+
+
+def test_headless_idle_lane_from_ledger(paths):
+    digest = {"state": {"loops": {"code": {"status": "in-progress", "branch": "loop/demo/code"}}}}
+    events = [{"ts": "t", "seq": 1, "event": "build-done", "window": "code"}]
+    rows = model.headless_rows(StubSubstrate(), paths, digest, events)
+    assert (rows[0].window, rows[0].activity, rows[0].gate) == ("code", "idle", "done")
+    assert rows[0].liveness == "-" and rows[0].pid is None
+
+
+def test_headless_task_id_from_open_backlog(paths):
+    wt = _worktree(paths, "code")
+    _write_task(paths, "T0055-x.md", id="T0055", title="x", status="open", loop="code")
+    _write_build_marker(
+        paths, window="code", branch="loop/demo/code", pid=4242, started_at=_iso(1000)
+    )
+    stub = StubSubstrate(command=f"codex exec --cd {wt} x")
+    rows = model.headless_rows(stub, paths, NO_LOOPS, [], now=1010)
+    assert rows[0].task_id == "T0055"
+
+
+def test_last_engine_decision_picks_newest(paths):
+    events = [
+        {"ts": "t1", "seq": 1, "event": "observe"},
+        {"ts": "t2", "seq": 2, "event": "decision-approved", "id": "d-1"},
+        {"ts": "t3", "seq": 3, "event": "metrics"},
+    ]
+    line = model.last_engine_decision(events)
+    assert "decision-approved" in line and "#2" in line
+
+
+def test_last_engine_decision_empty_when_none(paths):
+    assert model.last_engine_decision([{"ts": "t", "seq": 1, "event": "observe"}]) == ""
+
+
+def test_headless_in_load_state(paths):
+    wt = _worktree(paths, "loop-a")  # DIGEST's loop-a has branch "loop/a"
+    _write_build_marker(paths, window="loop-a", branch="loop/a", pid=4242, started_at=_iso(1000))
+    stub = StubSubstrate(command=f"codex exec --cd {wt} x", log_tail="running tests")
+    state = model.load_state(stub, paths)
+    by_window = {r.window: r for r in state.headless}
+    assert by_window["loop-a"].activity == "build"
 
 
 def test_digest_join_and_events_tail(paths):

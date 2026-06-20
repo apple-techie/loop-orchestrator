@@ -44,16 +44,17 @@ class LoopDeckApp(App):
     FleetTable { height: 2fr; }
     LoopsTable { height: 1fr; }
     DecisionQueue { height: 2fr; }
+    HeadlessPanel { height: 2fr; }
     ReviewQueue { height: 1fr; }
     MailboxPanel { height: 1fr; }
     EventTicker { height: 1fr; }
-    FleetTable, LoopsTable, DecisionQueue, ReviewQueue, MailboxPanel, EventTicker,
+    FleetTable, LoopsTable, DecisionQueue, HeadlessPanel, ReviewQueue, MailboxPanel, EventTicker,
     #lane-pane-scroll, #events-scroll, #adr-table, #adr-content-scroll,
     #brain-pane-scroll {
         border: round $primary;
         border-title-color: $text;
     }
-    DecisionQueue, ReviewQueue, MailboxPanel, EventTicker { padding: 0 1; }
+    DecisionQueue, HeadlessPanel, ReviewQueue, MailboxPanel, EventTicker { padding: 0 1; }
     FleetTable:focus, LoopsTable:focus, #adr-table:focus,
     #lane-pane-scroll:focus, #events-scroll:focus, #adr-content-scroll:focus,
     #brain-pane-scroll:focus {
@@ -150,6 +151,8 @@ class LoopDeckApp(App):
             p.checkpoint_page,
             p.paused_path,
             p.pid_path,
+            p.build_markers_path,
+            p.verify_markers_path,
         )
 
     @staticmethod

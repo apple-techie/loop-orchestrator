@@ -17,6 +17,7 @@ Repo rule (enforced in CI): ``subprocess`` is imported only here and in
 from __future__ import annotations
 
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -26,6 +27,10 @@ from pathlib import Path
 
 from .contract import check_contract
 from .paths import normalize_project_root
+
+# Strips ANSI/CSI escape sequences from headless build-log lines (codex exec
+# output carries color codes) so the deck renders a clean tail.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 # Canonical primitive name -> repo-relative fallback script.
 _REPO_RELATIVE = {
@@ -397,6 +402,27 @@ class Substrate:
         except json.JSONDecodeError:
             return None
         return result if isinstance(result, dict) else None
+
+    def build_log_tail(self, worktree: str | Path, lines: int = 3) -> str:
+        """Last <lines> non-blank lines of the NEWEST codex-build-*.log under
+        <worktree>/.loop/build/ — the headless build's live output, for the deck's
+        headless-activity panel. Pure file read (glob + read_text), NO subprocess,
+        ANSI-stripped; '' when no log exists. Read-only — deck non-writer safe."""
+        log_dir = Path(worktree) / ".loop" / "build"
+        try:
+            logs = [p for p in log_dir.glob("codex-build-*.log") if p.is_file()]
+        except OSError:
+            return ""
+        if not logs:
+            return ""
+        try:
+            newest = max(logs, key=lambda p: p.stat().st_mtime)
+            text = newest.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        clean = (_ANSI_RE.sub("", line).strip() for line in text.splitlines())
+        non_blank = [line for line in clean if line]
+        return "\n".join(non_blank[-lines:])
 
     # ── lanes ─────────────────────────────────────────────────────────────
 

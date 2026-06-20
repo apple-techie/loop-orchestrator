@@ -23,6 +23,7 @@ from .widgets import (
     DeckTable,
     EventTicker,
     FleetTable,
+    HeadlessPanel,
     LoopsTable,
     MailboxPanel,
     ReviewQueue,
@@ -56,6 +57,7 @@ class MainScreen(DeckScreen):
                 yield LoopsTable(id="loops")
             with Vertical(id="right-col"):
                 yield DecisionQueue(id="decisions")
+                yield HeadlessPanel(id="headless")
                 yield ReviewQueue(id="reviews")
                 yield MailboxPanel(id="mailbox")
                 yield EventTicker(id="ticker")
@@ -65,6 +67,7 @@ class MainScreen(DeckScreen):
         self.query_one(FleetTable).update_lanes(state.lanes)
         self.query_one(LoopsTable).update_loops(state.loops)
         self.query_one(DecisionQueue).update_decision(state.pending)
+        self.query_one(HeadlessPanel).update_headless(state.headless, state.last_decision)
         self.query_one(ReviewQueue).update_reviews(state.review_items)
         self.query_one(MailboxPanel).update_mailbox(state.mailbox_pending, state.processed_count)
         self.query_one(EventTicker).update_events(state.events_tail)
