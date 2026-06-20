@@ -1493,6 +1493,64 @@ def test_surface_build_done_on_branch_advance_clears_marker(project, monkeypatch
     assert emitted[-1]["branch_head"] == "sha-b"
 
 
+def test_surface_build_failed_when_runner_exits_without_branch_advance(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == []
+    emitted = [e for e in _events(paths) if e["event"] == "build-failed"]
+    assert emitted
+    assert emitted[-1]["window"] == "web"
+    assert emitted[-1]["branch"] == "loop/demo/web"
+    assert emitted[-1]["pre_build_sha"] == "sha-a"
+
+
+def test_surface_build_failed_toctou_reread_yields_build_done(project, monkeypatch):
+    # TOCTOU guard: the early branch_head read is stale (==pre_build_sha) but the
+    # build actually committed-then-exited; the re-read (after the runner is confirmed
+    # gone) sees the advance -> build-done, NOT a false terminal build-failed.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    heads = ["sha-a", "sha-b"]  # 1st (early) stale==pre_build_sha; 2nd (re-read) advanced
+    monkeypatch.setattr(
+        Substrate, "branch_head", lambda self, _w, _b: heads.pop(0) if heads else "sha-b"
+    )
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)  # gone
+
+    surface_build_results(Substrate(project, "demo"), paths, events)
+
+    assert load_build_markers(paths) == []
+    ev = [e for e in _events(paths) if e["event"].startswith("build-")]
+    assert ev and ev[-1]["event"] == "build-done"
+    assert ev[-1]["branch_head"] == "sha-b"
+
+
 def test_surface_build_advance_with_live_runner_keeps_marker(project, monkeypatch):
     # HIGH-1: a branch advance while the codex runner is STILL ALIVE is a mid-build
     # WIP commit, not a completed build — build-done must NOT fire and the marker
@@ -1591,7 +1649,13 @@ def test_surface_build_no_advance_keeps_marker_in_progress(project, monkeypatch)
         "started_at": utc_now(),
     }
     record_build_marker(paths, marker)
+    worktree = str(paths.project_root / ".loop" / "worktrees" / "demo" / "web")
     monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "sha-a")
+    monkeypatch.setattr(
+        Substrate,
+        "process_command",
+        lambda self, pid, timeout=2: f"codex exec --cd {worktree} <brief>",
+    )
 
     surface_build_results(Substrate(project, "demo"), paths, events)
 
