@@ -273,17 +273,34 @@ def surface_build_results(substrate: Substrate, paths: SessionPaths, events: Eve
                     changed = True
                     _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
                     continue
-                if (
-                    pre_build_sha is not None
-                    and branch_head == pre_build_sha
-                    and not runner_alive
-                ):
-                    events.append(
-                        "build-failed",
-                        window=window,
-                        branch=branch,
-                        pre_build_sha=pre_build_sha,
+                if pre_build_sha is not None and branch_head == pre_build_sha and not runner_alive:
+                    # TOCTOU guard: branch_head was read BEFORE the runner-alive check,
+                    # so a build that committed THEN exited in that window looks
+                    # unchanged here. Re-read now that the runner is confirmed gone —
+                    # an actual advance is a build-done, not a failure (pre-change this
+                    # state fell through to timeout and self-corrected next cycle; the
+                    # build-failed terminal would otherwise mislabel it permanently).
+                    fresh_head = (
+                        substrate.branch_head(worktree, branch)
+                        if isinstance(branch, str) and branch
+                        else None
                     )
+                    if fresh_head is not None and fresh_head != pre_build_sha:
+                        events.append(
+                            "build-done",
+                            window=window,
+                            branch=branch,
+                            pre_build_sha=pre_build_sha,
+                            branch_head=fresh_head,
+                        )
+                    else:
+                        events.append(
+                            "build-failed",
+                            window=window,
+                            branch=branch,
+                            pre_build_sha=pre_build_sha,
+                            branch_head=fresh_head or branch_head,
+                        )
                     changed = True
                     _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
                     continue
