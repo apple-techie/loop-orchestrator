@@ -1695,6 +1695,60 @@ def test_surface_verify_current_branch_escalates(project, monkeypatch):
     assert emitted and emitted[-1]["event"] == "verify-passed"
 
 
+def test_surface_verify_stale_branch_with_fail_verdict_is_stale_not_failed(project, monkeypatch):
+    # The complete mergeability fix: a stale branch's verdict is unreliable in BOTH
+    # directions. A FAIL/high verdict on a behind-main branch (whose main..branch diff
+    # looks like a revert) must route to verify-stale (rebase), NOT verify-failed —
+    # otherwise the loop churns a futile build-fix on a revert-shaped diff forever.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-stalefail.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, "fail", gate_passed=True, severities=["high"])
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: False)  # stale
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    emitted = [e for e in _events(paths) if e["event"].startswith("verify-")]
+    assert emitted and emitted[-1]["event"] == "verify-stale"
+
+
+def test_surface_verify_gate_failed_is_failed_even_if_stale(project, monkeypatch):
+    # A broken gate (tests fail) is a real, currency-independent failure — it must
+    # route to verify-failed (fix) even on a stale branch, never verify-stale.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out_path = paths.verify_dir / "web-gatefail.json"
+    record_verify_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "out_path": str(out_path),
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    _write_verify_result(out_path, "fail", gate_passed=False, severities=["low"])
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: False)  # stale too
+
+    surface_verify_results(Substrate(project, "demo"), paths, events)
+
+    emitted = [e for e in _events(paths) if e["event"].startswith("verify-")]
+    assert emitted and emitted[-1]["event"] == "verify-failed"
+
+
 def test_surface_verify_result_records_verified_tip_from_marker(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()

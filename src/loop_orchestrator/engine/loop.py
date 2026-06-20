@@ -159,19 +159,13 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 gate_passed = (
                     bool(gate.get("passed")) if isinstance(gate, dict) else (overall == "pass")
                 )
-                # Escalate-eligible (verify-passed) when the gate passed, no lens
-                # hard-failed, and no finding is high/critical — EVEN on concerns.
-                # A hard `fail` or a high/critical finding still routes to a fix.
-                escalate_eligible = (
-                    gate_passed and overall != "fail" and max_severity not in _BLOCKING_SEVERITIES
-                )
                 window = marker.get("window")
                 branch = marker.get("branch")
-                # A quality-clean build must also be CURRENT to merge: main must be
-                # an ancestor of the lane branch (a clean fast-forward). A branch
-                # forked from a stale main reviews+passes on its own diff base but a
-                # 3-way merge would conflict — it must NOT escalate as "merge,
-                # verified". It routes to verify-stale (a rebase signal) instead.
+                # The lane branch must be CURRENT to act on its verdict: main must be
+                # an ancestor of the branch (a clean fast-forward). When main has
+                # advanced past the branch's fork point, the `main..branch` diff the
+                # lenses reviewed is polluted by main's newer work showing up as
+                # reversions, so the verdict — pass OR fail — is UNRELIABLE.
                 mergeable = (
                     isinstance(window, str)
                     and bool(window)
@@ -181,9 +175,20 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                         actions_mod._lane_worktree(paths, window), "main", branch
                     )
                 )
-                if escalate_eligible and not mergeable:
+                has_blocking = max_severity in _BLOCKING_SEVERITIES
+                if not gate_passed:
+                    # A broken gate (tests fail) is real and currency-independent.
+                    event = "verify-failed"
+                elif not mergeable:
+                    # Gate ok but the branch forked from a stale main: route to
+                    # verify-stale (a rebase signal) regardless of the unreliable lens
+                    # verdict — never escalate-merge an unmergeable branch (the false
+                    # PASS) and never churn a futile build-fix on a revert-shaped diff
+                    # (the false FAIL). Rebase onto main, then re-verify.
                     event = "verify-stale"
-                elif escalate_eligible:
+                elif overall != "fail" and not has_blocking:
+                    # Current branch, gate ok, no hard fail, no high/critical finding
+                    # -> escalate-eligible (low/medium ride along as caveats).
                     event = "verify-passed"
                 else:
                     event = "verify-failed"
