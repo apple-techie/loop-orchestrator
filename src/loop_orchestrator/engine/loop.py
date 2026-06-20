@@ -837,6 +837,20 @@ def _assemble_prompt(
     for name in sorted(snap.lanes):
         info = snap.lanes[name]
         lines.append(f"{name} {info['status']} {info['kind']}")
+    # Also list ledger worktree lanes that have no live tmux pane, so the verify /
+    # awaiting-build drive never references a lane absent from this roster — that
+    # mismatch made the brain propose add_lane ("make the window live") instead of
+    # a headless `build`. These are driven HEADLESSLY (build/verify), no pane needed.
+    _ledger = read_json(paths.state_file, {})
+    _loops = _ledger.get("loops") if isinstance(_ledger, dict) else None
+    if isinstance(_loops, dict):
+        for name in sorted(_loops):
+            if name in snap.lanes or name == "coord":
+                continue
+            entry = _loops[name]
+            branch = entry.get("branch") if isinstance(entry, dict) else None
+            if isinstance(branch, str) and branch:
+                lines.append(f"{name} headless-worktree branch={branch} (build/verify only)")
     lines.append("--- lane restarts (tail) ---")
     if snap.restarts_tail:
         lines.extend(json.dumps(entry, sort_keys=True) for entry in snap.restarts_tail)

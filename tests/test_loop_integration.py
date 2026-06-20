@@ -1253,6 +1253,26 @@ def test_prompt_lane_utilization_surfaces_idle_lanes_with_backlog(project):
     assert _UTILIZATION_RUBRIC in prompt
 
 
+def test_prompt_live_roster_lists_headless_worktree_lanes(project):
+    # A ledger worktree lane with no tmux pane (code-fleet lane) must appear in the
+    # live-lane roster as headless-worktree, so the awaiting-build drive never
+    # references a lane absent from the roster (which made the brain add_lane instead
+    # of build). coord is excluded; snap lanes keep their normal line.
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    atomic_write_json(
+        paths.state_file,
+        {"loops": {"code2": {"branch": "loop/demo/code2"}, "coord": {"branch": "x"}}},
+    )
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}})
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "code2 headless-worktree branch=loop/demo/code2 (build/verify only)" in prompt
+    assert "web idle claude" in prompt  # live pane lane unchanged
+    assert "coord headless-worktree" not in prompt  # coord never listed
+
+
 def test_prompt_lane_utilization_off_by_default(project):
     # Default target_lane_utilization=0.0 -> no addendum even with idle+backlog.
     paths = SessionPaths(project, "demo")
