@@ -665,6 +665,47 @@ def test_verify_action_omits_tip_sha_when_branch_head_is_unresolved(tmp_path):
     assert "tip_sha" not in marker
 
 
+def test_verify_action_skips_when_lane_is_at_base(tmp_path):
+    # Over-eager-verify guard: a lane sitting exactly at base (tip == main) has an
+    # empty diff and nothing to merge, so verify must skip (never spawn) — else the
+    # brain's spurious verify escalates an empty merge.
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub(branch_heads=["same-sha", "same-sha"])  # tip == base
+
+    actions.execute(
+        {"kind": "verify", "lane": "web", "rationale": "ready"},
+        sub,
+        events,
+        EngineConfig(),
+        paths=paths,
+    )
+
+    assert sub.verifies == []
+    assert actions.load_verify_markers(paths) == []
+    skipped = [e for e in events.tail(10) if e["event"] == "verify-skip"]
+    assert skipped and skipped[-1]["reason"] == "at-base"
+
+
+def test_verify_action_spawns_when_branch_is_ahead_of_base(tmp_path):
+    # The complement: a branch ahead of base (tip != main) has real work -> spawn.
+    paths, events = _env(tmp_path)
+    _seed_branch(paths, "web", branch="loop/demo/web")
+    sub = AddLaneSub(branch_heads=["tip-sha", "base-sha"])  # tip != base
+
+    actions.execute(
+        {"kind": "verify", "lane": "web", "rationale": "ready"},
+        sub,
+        events,
+        EngineConfig(),
+        paths=paths,
+    )
+
+    assert len(sub.verifies) == 1
+    assert sub.verifies[0]["tip"] == "tip-sha"
+    assert actions.load_verify_markers(paths)[0]["tip_sha"] == "tip-sha"
+
+
 def test_verify_action_skips_when_marker_exists(tmp_path):
     paths, events = _env(tmp_path)
     _seed_branch(paths, "web", branch="loop/demo/web")

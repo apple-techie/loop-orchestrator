@@ -482,6 +482,16 @@ def execute(
                 )
                 return
             tip_sha = substrate.branch_head(worktree, branch)
+            # Skip a lane sitting exactly at base: nothing to verify (empty base..tip
+            # diff) and nothing to merge. The drive context never surfaces an at-base
+            # lane as ready-to-verify, but the brain can still over-propose a verify,
+            # so guard at the spawn boundary — else it spuriously escalates an empty
+            # merge. (A behind-main branch has a different SHA, so it still flows to
+            # the verify -> verify-stale rebase path.)
+            base_sha = substrate.branch_head(worktree, base)
+            if tip_sha is not None and base_sha is not None and tip_sha == base_sha:
+                events.append("verify-skip", window=window, reason="at-base")
+                return
             verify_tip = tip_sha or branch
             pid = substrate.spawn_verify(worktree, base, verify_tip, out_path)
             marker = {
