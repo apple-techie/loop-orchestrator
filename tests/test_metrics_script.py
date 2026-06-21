@@ -109,6 +109,7 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
     coord = f"{stamp}-coord-to-web.md"
     (metrics_project / "ops-wiki" / "log.md").write_text(
         f"## [{today}] ingest | mail\n"
+        f"## [{today}] checkpoint | cycle\n"
         f"## [{today}] task | T0001 done\n"
         f"## [{today}] task | T0002 done\n"
         f"## [{old}] task | T0000 done\n",
@@ -177,6 +178,7 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
     assert "ingests_7d:        1" in result.stdout
     assert "lints_7d:          1" in result.stdout
     assert "checkpoints_7d:    1" in result.stdout
+    assert "events.jsonl for session 'demo' skipped 1 corrupt line(s)" in result.stdout
     log = (metrics_project / "ops-wiki" / "log.md").read_text(encoding="utf-8")
     assert "autonomy=0.50(2/4)" in log
     assert "interventions_per_shipped=2.00(4/2)" in log
@@ -235,13 +237,13 @@ def test_loop_metrics_empty_events_do_not_bleed_repo_level_counts(metrics_projec
 
 def test_loop_metrics_checkpoint_falls_back_to_engine_checkpoint(metrics_project: Path):
     checkpoint = metrics_project / ".loop" / "sessions" / "demo" / "engine" / "checkpoint.md"
-    checkpoint.write_text("x" * 400, encoding="utf-8")
+    checkpoint.write_text("é" * 400, encoding="utf-8")
     _write_events(metrics_project, [])
 
     result = _run_metrics(metrics_project)
 
     assert result.returncode == 0, result.stderr
-    assert "checkpoint_tokens: 100 (400 bytes / 4)" in result.stdout
+    assert "checkpoint_tokens: 100 (400 chars / 4)" in result.stdout
 
 
 def test_loop_metrics_checkpoint_falls_back_to_latest_brain_prompt(metrics_project: Path):
@@ -256,7 +258,7 @@ def test_loop_metrics_checkpoint_falls_back_to_latest_brain_prompt(metrics_proje
     result = _run_metrics(metrics_project)
 
     assert result.returncode == 0, result.stderr
-    assert "checkpoint_tokens: 200 (800 bytes / 4)" in result.stdout
+    assert "checkpoint_tokens: 200 (800 chars / 4)" in result.stdout
 
 
 def test_loop_metrics_corrupt_snapshot_is_reported(metrics_project: Path):
@@ -271,15 +273,41 @@ def test_loop_metrics_corrupt_snapshot_is_reported(metrics_project: Path):
     assert "snapshot.json for session 'demo' unparseable" in result.stdout
 
 
+def test_loop_metrics_invalid_snapshot_tokens_are_rejected(metrics_project: Path):
+    snapshot = metrics_project / ".loop" / "sessions" / "demo" / "engine" / "snapshot.json"
+    snapshot.write_text(json.dumps({"checkpoint_tokens": True}), encoding="utf-8")
+    _write_events(metrics_project, [])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkpoint_tokens: 0" in result.stdout
+    assert "invalid checkpoint_tokens" in result.stdout
+
+
+def test_loop_metrics_cycle_trigger_does_not_change_checkpoint_count(metrics_project: Path):
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(metrics_project, [{"event": "cycle-trigger"}])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkpoints_7d:    0" in result.stdout
+
+
 def test_loop_metrics_missing_mailbox_file_does_not_count_as_steer(metrics_project: Path):
     missing = f"{_mailbox_stamp()}-andrew-to-coord.md"
-    _write_events(metrics_project, [{"event": "mailbox-new", "file": missing}])
+    _write_events(
+        metrics_project,
+        [{"event": "mailbox-new", "file": missing}, {"event": "mailbox-new", "file": missing}],
+    )
 
     result = _run_metrics(metrics_project)
 
     assert result.returncode == 0, result.stderr
     assert "unsolicited_steers_7d:           0" in result.stdout
     assert f"mailbox-new file '{missing}' not found" in result.stdout
+    assert result.stdout.count(f"mailbox-new file '{missing}' not found") == 1
 
 
 def test_loop_metrics_lint_dispatch_requires_boolean_ok(metrics_project: Path):
@@ -368,3 +396,10 @@ def test_loop_metrics_all_log_is_rejected(metrics_project: Path):
     assert result.returncode == 2
     assert "--all and --log cannot be combined" in result.stderr
     assert log_file.read_text(encoding="utf-8") == before
+
+
+def test_loop_metrics_all_session_is_rejected(metrics_project: Path):
+    result = _run_metrics_all(metrics_project, "--session", "demo")
+
+    assert result.returncode == 2
+    assert "--all and --session cannot be combined" in result.stderr

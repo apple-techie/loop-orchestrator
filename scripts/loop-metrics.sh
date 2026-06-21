@@ -80,12 +80,19 @@ if [[ "$ALL" -eq 1 && "$DO_LOG" -eq 1 ]]; then
   exit 2
 fi
 
+if [[ "$ALL" -eq 1 && -n "$SESSION_NAME" ]]; then
+  echo "error: --all and --session cannot be combined; --all scans every session" >&2
+  exit 2
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "error: python3 is required (substrate dependency, used for date math)" >&2
   exit 1
 fi
 
 python3 - "$SCRIPT_DIR" "$DO_LOG" "$ALL" "$SESSION_NAME" "${PROJECT_ROOTS[@]}" <<'PYEOF'
+from __future__ import annotations
+
 import datetime as dt
 import json
 import os
@@ -247,29 +254,57 @@ def checkpoint_tokens(
     engine_dir = root / ".loop" / "sessions" / session / "engine"
     if snapshot is not None:
         value = snapshot.get("checkpoint_tokens")
-        if isinstance(value, int):
+        if type(value) is int and value >= 0:
             return value, ""
+        if value is not None:
+            notes.append(
+                f"snapshot.json for session '{session}' has invalid checkpoint_tokens; using fallback/0"
+            )
     direct = engine_dir / "checkpoint.md"
     if direct.is_file():
-        size = direct.stat().st_size
-        return size // 4, f" ({size} bytes / 4)"
-    prompts = sorted((engine_dir / "brain").glob("*.prompt.md"))
-    if prompts:
-        latest = max(prompts, key=lambda path: path.stat().st_mtime)
-        size = latest.stat().st_size
-        return size // 4, f" ({size} bytes / 4)"
+        try:
+            chars = len(direct.read_text(encoding="utf-8"))
+        except OSError as exc:
+            notes.append(f"checkpoint.md for session '{session}' unreadable: {exc}; trying brain prompts")
+        else:
+            return chars // 4, f" ({chars} chars / 4)"
+    try:
+        prompts = sorted((engine_dir / "brain").glob("*.prompt.md"))
+    except OSError as exc:
+        notes.append(f"brain prompts for session '{session}' unreadable: {exc}; checkpoint_tokens read 0")
+        prompts = []
+    candidates: list[tuple[float, Path]] = []
+    for path in prompts:
+        try:
+            candidates.append((path.stat().st_mtime, path))
+        except OSError as exc:
+            notes.append(f"brain prompt {path.name} for session '{session}' unreadable: {exc}; skipped")
+    if candidates:
+        latest = max(candidates, key=lambda item: item[0])[1]
+        try:
+            chars = len(latest.read_text(encoding="utf-8"))
+        except OSError as exc:
+            notes.append(f"brain prompt {latest.name} for session '{session}' unreadable: {exc}; checkpoint_tokens read 0")
+        else:
+            return chars // 4, f" ({chars} chars / 4)"
     notes.append(f"no session checkpoint surface for session '{session}' — checkpoint_tokens read 0")
     return 0, ""
 
 
-def repo_log_counts(root: Path) -> tuple[int, int]:
+def repo_log_counts(root: Path, notes: list[str]) -> tuple[int, int, int]:
     experiments = 0
     tasks_done = 0
+    checkpoints = 0
     log_file = root / "ops-wiki" / "log.md"
     try:
         lines = log_file.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0, 0
+    except FileNotFoundError:
+        notes.append("no ops-wiki/log.md — checkpoints_7d/experiments/tasks_done_7d read 0")
+        return 0, 0, 0
+    except OSError as exc:
+        notes.append(f"ops-wiki/log.md unreadable: {exc}; checkpoints_7d/experiments/tasks_done_7d read 0")
+        return 0, 0, 0
+    skipped = 0
     for line in lines:
         match = log_pat.match(line)
         if not match:
@@ -277,14 +312,19 @@ def repo_log_counts(root: Path) -> tuple[int, int]:
         try:
             day = dt.date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
         except ValueError:
+            skipped += 1
             continue
         kind = match.group(4)
         detail = match.group(5)
         if kind == "experiment":
             experiments += 1
+        elif kind == "checkpoint" and day >= cutoff_day:
+            checkpoints += 1
         elif kind == "task" and day >= cutoff_day and re.match(r"T\d+\s+done\b", detail):
             tasks_done += 1
-    return experiments, tasks_done
+    if skipped:
+        notes.append(f"ops-wiki/log.md skipped {skipped} malformed dated line(s)")
+    return experiments, tasks_done, checkpoints
 
 
 def restart_counts(root: Path, session: str, notes: list[str]) -> tuple[int, int, int]:
@@ -296,12 +336,23 @@ def restart_counts(root: Path, session: str, notes: list[str]) -> tuple[int, int
             f"no lane-restarts.jsonl for session '{session}' — restarts_24h/giveups_24h/lane_restarts_7d read 0"
         )
         return 0, 0, 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        notes.append(
+            f"lane-restarts.jsonl for session '{session}' unreadable; restarts_24h/giveups_24h/lane_restarts_7d read 0"
+        )
+        return 0, 0, 0
     restarts_24h = giveups_24h = lane_restarts_7d = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    skipped = 0
+    for line in lines:
+        if not line.strip():
+            continue
         try:
             rec = json.loads(line)
             when = parse_event_ts(rec.get("timestamp", ""))
         except (TypeError, ValueError, json.JSONDecodeError):
+            skipped += 1
             continue
         if when >= cutoff_7d and "event" not in rec:
             lane_restarts_7d += 1
@@ -311,6 +362,8 @@ def restart_counts(root: Path, session: str, notes: list[str]) -> tuple[int, int
             restarts_24h += 1
         elif rec.get("event") == "giving-up":
             giveups_24h += 1
+    if skipped:
+        notes.append(f"lane-restarts.jsonl for session '{session}' skipped {skipped} corrupt line(s)")
     return restarts_24h, giveups_24h, lane_restarts_7d
 
 
@@ -376,26 +429,34 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
             "distinct_lanes_used_7d": 0,
             "ingests_7d": 0,
             "lints_7d": 0,
-            "checkpoints_7d": 0,
         }
     path = root / ".loop" / "sessions" / session / "engine" / "events.jsonl"
     if not path.is_file():
         notes.append(f"no events.jsonl for session '{session}' — event counts/autonomy read 0/n/a")
         lines: list[str] = []
     else:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            notes.append(f"events.jsonl for session '{session}' unreadable: {exc}; event counts/autonomy read 0/n/a")
+            lines = []
 
     escalations = rejects = stops = ingest_timeouts = brain_calls = 0
-    ingests = lints = checkpoints = 0
+    ingests = lints = 0
     engine_approvals = total_decisions = 0
     dispatches_by_lane: dict[str, int] = {}
     unsolicited_files: set[str] = set()
+    seen_mailbox_files: set[str] = set()
+    skipped = 0
 
     for line in lines:
+        if not line.strip():
+            continue
         try:
             rec = json.loads(line)
             when = parse_event_ts(rec.get("ts", ""))
         except (TypeError, ValueError, json.JSONDecodeError):
+            skipped += 1
             continue
         if when < cutoff_7d:
             continue
@@ -429,12 +490,15 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
                 lints += 1
             elif ok is not False:
                 notes.append("lint-dispatch with non-boolean ok skipped")
-        elif kind == "cycle-trigger":
-            checkpoints += 1
         elif kind == "mailbox-new":
             name = rec.get("file")
-            if isinstance(name, str) and mailbox_file_is_unsolicited_steer(root, name, notes):
+            if not isinstance(name, str) or name in seen_mailbox_files:
+                continue
+            seen_mailbox_files.add(name)
+            if mailbox_file_is_unsolicited_steer(root, name, notes):
                 unsolicited_files.add(name)
+    if skipped:
+        notes.append(f"events.jsonl for session '{session}' skipped {skipped} corrupt line(s)")
 
     unsolicited_steers = len(unsolicited_files)
     interventions = escalations + unsolicited_steers + rejects
@@ -457,14 +521,14 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         "distinct_lanes_used_7d": len(dispatches_by_lane),
         "ingests_7d": ingests,
         "lints_7d": lints,
-        "checkpoints_7d": checkpoints,
     }
 
 
-def parse_task_frontmatter(path: Path) -> dict[str, str]:
+def parse_task_frontmatter(path: Path, notes: list[str]) -> dict[str, str]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except OSError as exc:
+        notes.append(f"task file {path.name} unreadable: {exc}; skipped backlog signal")
         return {}
     if not lines or lines[0].strip() != "---":
         return {}
@@ -479,15 +543,23 @@ def parse_task_frontmatter(path: Path) -> dict[str, str]:
     return out
 
 
-def open_tasks_by_loop(root: Path) -> dict[str, list[str]]:
+def open_tasks_by_loop(root: Path, notes: list[str]) -> dict[str, list[str]]:
     tasks_dir = root / "tasks"
     out: dict[str, list[str]] = {}
-    if not tasks_dir.is_dir():
+    try:
+        if not tasks_dir.exists():
+            return out
+        if not tasks_dir.is_dir():
+            notes.append("tasks/ is not a directory — idle_lanes_with_backlog read 0")
+            return out
+        task_files = sorted(tasks_dir.glob("*.md"))
+    except OSError as exc:
+        notes.append(f"tasks/ unreadable: {exc}; idle_lanes_with_backlog read 0")
         return out
-    for path in sorted(tasks_dir.glob("*.md")):
+    for path in task_files:
         if path.name == "README.md":
             continue
-        fm = parse_task_frontmatter(path)
+        fm = parse_task_frontmatter(path, notes)
         if fm.get("status") not in {"open", "in-progress", "review"}:
             continue
         loop = fm.get("loop")
@@ -498,8 +570,8 @@ def open_tasks_by_loop(root: Path) -> dict[str, list[str]]:
     return out
 
 
-def idle_lanes_with_backlog(root: Path, session: str, snapshot: dict | None) -> int:
-    backlog = open_tasks_by_loop(root)
+def idle_lanes_with_backlog(root: Path, session: str, snapshot: dict | None, notes: list[str]) -> int:
+    backlog = open_tasks_by_loop(root, notes)
     if not session:
         return 0
     snapshot_data = snapshot or {}
@@ -523,13 +595,13 @@ def compute(root: Path, session: str) -> Metrics:
     metrics.checkpoint_tokens, metrics.checkpoint_detail = checkpoint_tokens(
         root, session, snapshot, notes
     )
-    metrics.experiments, metrics.tasks_done_7d = repo_log_counts(root)
+    metrics.experiments, metrics.tasks_done_7d, metrics.checkpoints_7d = repo_log_counts(root, notes)
     metrics.restarts_24h, metrics.giveups_24h, metrics.lane_restarts_7d = restart_counts(
         root, session, notes
     )
     for key, value in event_metrics(root, session, metrics.tasks_done_7d, notes).items():
         setattr(metrics, key, value)
-    metrics.lanes_idle_with_backlog = idle_lanes_with_backlog(root, session, snapshot)
+    metrics.lanes_idle_with_backlog = idle_lanes_with_backlog(root, session, snapshot, notes)
     metrics.notes = notes
     return metrics
 
