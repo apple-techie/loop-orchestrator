@@ -143,7 +143,8 @@ class Observer:
         self.paths = paths
 
     def snapshot(self) -> EngineSnapshot:
-        statuses = self.substrate.lane_status_all()
+        expected_lanes = self.substrate.lanes()
+        statuses = self.substrate.lane_status_all(timeout=adaptive_timeout(len(expected_lanes)))
         digest = self.substrate.digest()
         state = digest.get("state")
         loops = state.get("loops") if isinstance(state, dict) else None

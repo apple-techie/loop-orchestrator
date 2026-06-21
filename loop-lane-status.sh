@@ -51,6 +51,55 @@ if [[ -f "$_HR_PATH" ]]; then
   source "$_HR_PATH" && HARNESS_REGISTRY_AVAILABLE=1
 fi
 
+TMUX_CALL_TIMEOUT_S="${LOOP_LANE_STATUS_TMUX_TIMEOUT_S:-2}"
+
+with_timeout() {
+  local seconds="$1"
+  shift
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" "$@"
+    return $?
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    perl -e '
+      my $seconds = shift @ARGV;
+      my $pid = fork();
+      exit 127 unless defined $pid;
+      if ($pid == 0) {
+        setpgrp(0, 0);
+        exec @ARGV;
+        exit 127;
+      }
+      local $SIG{ALRM} = sub {
+        kill "TERM", -$pid;
+        select(undef, undef, undef, 0.1);
+        kill "KILL", -$pid;
+        exit 124;
+      };
+      alarm $seconds;
+      waitpid($pid, 0);
+      exit($? >> 8);
+    ' "$seconds" "$@"
+    return $?
+  fi
+  "$@" &
+  local cmd_pid=$!
+  (
+    sleep "$seconds"
+    kill "$cmd_pid" 2>/dev/null || true
+  ) &
+  local timer_pid=$!
+  wait "$cmd_pid"
+  local status=$?
+  kill "$timer_pid" 2>/dev/null || true
+  wait "$timer_pid" 2>/dev/null || true
+  return "$status"
+}
+
+tmux_guard() {
+  with_timeout "$TMUX_CALL_TIMEOUT_S" tmux "$@"
+}
+
 usage() {
   cat <<'EOF' >&2
 Usage:
@@ -116,13 +165,13 @@ fi
 # order is 0,1,2,…,10 rather than the lexical .10-before-.2 of a plain sort.
 first_pane_target() {
   local window="$1"
-  tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_index} #{session_name}:#{window_name}.#{pane_index}' 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2-
+  tmux_guard list-panes -t "$SESSION_NAME:$window" -F '#{pane_index} #{session_name}:#{window_name}.#{pane_index}' 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2-
 }
 
 nth_pane_target() {
   local window="$1"
   local n="$2"
-  tmux list-panes -t "$SESSION_NAME:$window" -F '#{pane_index} #{session_name}:#{window_name}.#{pane_index}' 2>/dev/null | sort -n | sed -n "${n}p" | cut -d' ' -f2-
+  tmux_guard list-panes -t "$SESSION_NAME:$window" -F '#{pane_index} #{session_name}:#{window_name}.#{pane_index}' 2>/dev/null | sort -n | sed -n "${n}p" | cut -d' ' -f2-
 }
 
 # Resolve a window NAME to its stable id (@N) via an exact match. Print id, or 1.
@@ -130,7 +179,7 @@ window_id_for() {
   local name="$1" id wname
   while IFS=' ' read -r id wname; do
     [[ "$wname" == "$name" ]] && { printf '%s' "$id"; return 0; }
-  done < <(tmux list-windows -t "$SESSION_NAME" -F '#{window_id} #{window_name}' 2>/dev/null)
+  done < <(tmux_guard list-windows -t "$SESSION_NAME" -F '#{window_id} #{window_name}' 2>/dev/null)
   return 1
 }
 
@@ -148,7 +197,7 @@ resolve_lane() {
       # Not a fixed lane — resolve as an add-lane (dynamic) window by name.
       local _wid
       if _wid="$(window_id_for "$1")"; then
-        tmux list-panes -t "$_wid" -F '#{pane_index} #{pane_id}' 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2-
+        tmux_guard list-panes -t "$_wid" -F '#{pane_index} #{pane_id}' 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2-
       else
         echo "Unknown lane: $1" >&2
         exit 2
@@ -162,7 +211,7 @@ resolve_lane() {
 # options, so this works for both fixed (session:win.pane) and dynamic
 # (%paneid) targets.
 harness_for_target() {
-  tmux show-options -wqv -t "$1" @loop_lane_harness 2>/dev/null || true
+  tmux_guard show-options -wqv -t "$1" @loop_lane_harness 2>/dev/null || true
 }
 
 # classify_target <target> — capture the pane + its declared harness and print
@@ -178,7 +227,7 @@ classify_target() {
   # "unknown" instead of aborting the caller under pipefail (matters for the
   # --all sweep, where one dead pane must not kill the whole fleet report).
   local TAIL
-  TAIL="$(tmux capture-pane -t "$target" -p 2>/dev/null | tail -40 || true)"
+  TAIL="$(tmux_guard capture-pane -t "$target" -p 2>/dev/null | tail -40 || true)"
   classify_text "$TAIL" "$(harness_for_target "$target")"
 }
 
@@ -374,7 +423,7 @@ if [[ "$CLASSIFY_STDIN" -eq 1 ]]; then
 fi
 
 if [[ "$ALL" -eq 1 ]]; then
-  if ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  if ! tmux_guard has-session -t "$SESSION_NAME" 2>/dev/null; then
     echo "tmux session '$SESSION_NAME' does not exist" >&2
     exit 3
   fi
@@ -395,12 +444,12 @@ if [[ "$ALL" -eq 1 ]]; then
     while IFS=' ' read -r wid wname; do
       [[ -z "$wid" ]] && continue
       [[ "$seen" == *" $wname "* ]] && continue
-      dyn="$(tmux show-options -wqv -t "$wid" @loop_lane 2>/dev/null || true)"
+      dyn="$(tmux_guard show-options -wqv -t "$wid" @loop_lane 2>/dev/null || true)"
       [[ "$dyn" == "1" ]] || continue
-      target="$(tmux list-panes -t "$wid" -F '#{pane_index} #{pane_id}' 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2- || true)"
+      target="$(tmux_guard list-panes -t "$wid" -F '#{pane_index} #{pane_id}' 2>/dev/null | sort -n | head -n1 | cut -d' ' -f2- || true)"
       [[ -z "$target" ]] && continue
       printf '%s%s%s%s%s%s%s\n' "$wname" "$US" "dynamic" "$US" "$target" "$US" "$(classify_target "$target")"
-    done < <(tmux list-windows -t "$SESSION_NAME" -F '#{window_id} #{window_name}' 2>/dev/null)
+    done < <(tmux_guard list-windows -t "$SESSION_NAME" -F '#{window_id} #{window_name}' 2>/dev/null)
   } | emit_json
   exit 0
 fi

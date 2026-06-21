@@ -441,8 +441,11 @@ class Substrate:
             for lane in doc.get("lanes", [])
         ]
 
-    def lane_status_all(self) -> dict[str, LaneStatus]:
-        doc = self._run_json("loop-lane-status", "--json", "--all", self.session)
+    def lane_status_all(self, timeout: float | None = None) -> dict[str, LaneStatus]:
+        run_timeout = 30 if timeout is None else timeout
+        doc = self._run_json(
+            "loop-lane-status", "--json", "--all", self.session, timeout=run_timeout
+        )
         return {
             lane: LaneStatus(
                 lane=lane,

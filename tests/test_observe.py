@@ -14,7 +14,7 @@ from loop_orchestrator.engine.observe import (
     load_last_snapshot,
 )
 from loop_orchestrator.paths import SessionPaths
-from loop_orchestrator.substrate import LaneStatus, SubstrateError
+from loop_orchestrator.substrate import LaneInfo, LaneStatus, SubstrateError
 
 
 class StubSubstrate:
@@ -28,8 +28,24 @@ class StubSubstrate:
         self.pending = [{"file": "20260610-120000-web-to-coord.md", "from": "web", "to": "coord"}]
         self.prompt: str | None = "x" * 400
         self.fanout_fails = False  # F7: simulate a slow/failed all-lanes fan-out
+        self.lane_status_timeout: float | None = None
 
-    def lane_status_all(self):
+    def lanes(self):
+        return [
+            LaneInfo(
+                window=name,
+                harness="claude",
+                model=None,
+                role=None,
+                cmd=None,
+                base=True,
+                kind="standing",
+            )
+            for name in self.statuses
+        ]
+
+    def lane_status_all(self, timeout=None):
+        self.lane_status_timeout = timeout
         if self.fanout_fails:
             raise SubstrateError(
                 ["loop-lane-status", "--json", "--all"], None, "timed out after 30s"
@@ -116,6 +132,15 @@ def test_adaptive_timeout_scales_with_lane_count_and_caps():
     assert adaptive_timeout(-3) == FANOUT_BASE_TIMEOUT_S  # never below base
     assert adaptive_timeout(6) == FANOUT_BASE_TIMEOUT_S + 5.0 * 6  # scales up
     assert adaptive_timeout(10_000) == FANOUT_TIMEOUT_CAP_S  # bounded
+
+
+def test_snapshot_passes_adaptive_timeout_to_lane_status_all(tmp_path):
+    paths = SessionPaths(tmp_path, "demo")
+    paths.ensure()
+    stub = StubSubstrate()
+    Observer(stub, paths).snapshot()
+
+    assert stub.lane_status_timeout == adaptive_timeout(2)
 
 
 def test_from_dict_roundtrips_via_to_dict(tmp_path):

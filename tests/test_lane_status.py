@@ -8,7 +8,10 @@ regresses any known case.
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import time
 from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "loop-lane-status.sh"
@@ -83,3 +86,71 @@ def test_unknown_harness_falls_back_to_heuristic():
 def test_empty_pane_is_unknown():
     assert classify("", "claude") == "unknown"
     assert classify("", "") == "unknown"
+
+
+def test_all_sweep_degrades_stalled_capture_to_unknown(tmp_path):
+    tmux = tmp_path / "tmux"
+    tmux.write_text(
+        """#!/bin/sh
+cmd="$1"
+shift
+target=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -t) target="$2"; shift 2 ;;
+    -F) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$cmd" in
+  has-session)
+    exit 0
+    ;;
+  list-panes)
+    case "$target" in
+      demo:coord) printf '0 demo:coord.0\\n' ;;
+      demo:web) printf '0 demo:web.0\\n' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list-windows)
+    printf '@1 coord\\n@2 web\\n'
+    ;;
+  show-options)
+    exit 0
+    ;;
+  capture-pane)
+    case "$target" in
+      demo:web.0) sleep 5; printf 'Working...\\n' ;;
+      *) printf '$ \\n' ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    tmux.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{tmp_path}:{os.environ['PATH']}",
+        "LOOP_LANE_STATUS_TMUX_TIMEOUT_S": "1",
+    }
+
+    start = time.monotonic()
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), "--json", "--all", "demo"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=4,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert time.monotonic() - start < 3
+    doc = json.loads(proc.stdout)
+    assert doc["lanes"]["coord"]["status"] == "idle"
+    assert doc["lanes"]["web"]["status"] == "unknown"
