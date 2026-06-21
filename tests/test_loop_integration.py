@@ -757,6 +757,8 @@ from loop_orchestrator.engine.loop import (  # noqa: E402
     _DRIVE_RUBRIC,
     _UTILIZATION_RUBRIC,
     _assemble_prompt,
+    _lane_utilization_lines,
+    _routable_idle_lanes,
     validate_boot_config,
 )
 from loop_orchestrator.engine.observe import EngineSnapshot, Observer  # noqa: E402
@@ -1319,6 +1321,82 @@ def test_prompt_lane_utilization_surfaces_idle_lanes_with_backlog(project):
     assert "--- idle lanes (route work here before stop) ---" in prompt
     assert "lane=web status=idle" in prompt and "open-backlog=T7001" in prompt
     assert _UTILIZATION_RUBRIC in prompt
+
+
+def test_routable_idle_lanes_truth_table(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    for task_id, loop in (
+        ("T7001", "web"),
+        ("T7002", "busy"),
+        ("T7003", "approval"),
+        ("T7004", "building"),
+        ("T7005", "verifying"),
+        ("T7006", "coord"),
+    ):
+        _seed_loop_task(paths, task_id, loop)
+    record_build_marker(
+        paths,
+        {
+            "window": "building",
+            "branch": "loop/demo/building",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": "2026-06-19T00:00:00Z",
+        },
+    )
+    record_verify_marker(
+        paths,
+        {
+            "window": "verifying",
+            "branch": "loop/demo/verifying",
+            "out_path": str(paths.verify_dir / "verifying.json"),
+            "pid": 456,
+            "started_at": "2026-06-19T00:00:00Z",
+        },
+    )
+    snap = _prompt_snap(
+        {
+            "web": {"status": "idle", "target": "", "kind": "claude"},
+            "busy": {"status": "working", "target": "", "kind": "claude"},
+            "approval": {"status": "awaiting-approval", "target": "", "kind": "claude"},
+            "empty": {"status": "idle", "target": "", "kind": "claude"},
+            "building": {"status": "idle", "target": "", "kind": "claude"},
+            "verifying": {"status": "idle", "target": "", "kind": "claude"},
+            "coord": {"status": "idle", "target": "", "kind": "fixed"},
+        }
+    )
+
+    assert _routable_idle_lanes(snap, paths, EngineConfig(target_lane_utilization=1.0)) == ["web"]
+    assert _routable_idle_lanes(snap, paths, EngineConfig()) == []
+
+
+def test_lane_utilization_lines_agree_with_routable_helper(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}})
+    cfg = EngineConfig(target_lane_utilization=1.0)
+
+    assert _routable_idle_lanes(snap, paths, cfg) == []
+    assert _lane_utilization_lines(snap, paths, cfg) == []
+
+    _seed_loop_task(paths, "T7001", "web")
+    assert _routable_idle_lanes(snap, paths, cfg) == ["web"]
+    lines = _lane_utilization_lines(snap, paths, cfg)
+    assert lines and "lane=web" in "\n".join(lines)
+
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": "2026-06-19T00:00:00Z",
+        },
+    )
+    assert _routable_idle_lanes(snap, paths, cfg) == []
+    assert _lane_utilization_lines(snap, paths, cfg) == []
 
 
 def test_prompt_live_roster_lists_headless_worktree_lanes(project):

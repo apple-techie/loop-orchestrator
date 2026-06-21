@@ -71,7 +71,9 @@ def _events(project: Path) -> list[dict]:
 
 
 def _watch(project: Path, **overrides) -> Watch:
-    config = EngineConfig(poll_interval_s=0, min_cycle_interval_s=0, **overrides)
+    values = {"poll_interval_s": 0, "min_cycle_interval_s": 0}
+    values.update(overrides)
+    config = EngineConfig(**values)
     return Watch(project, "demo", config)
 
 
@@ -84,6 +86,15 @@ def _settled(w: Watch) -> Watch:
 
 def _cycle_triggers(project: Path) -> list[dict]:
     return [e for e in _events(project) if e["event"] == "cycle-trigger"]
+
+
+def _seed_loop_task(paths: SessionPaths, task_id: str, loop: str) -> None:
+    paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    (paths.tasks_dir / f"{task_id}-x.md").write_text(
+        f"---\nid: {task_id}\ntitle: x\nstatus: open\n"
+        f"loop: {loop}\ndepends_on: []\nscope: src\n---\n",
+        encoding="utf-8",
+    )
 
 
 # ── evaluate_triggers (pure, injected clock) ────────────────────────────────
@@ -114,6 +125,28 @@ def test_drive_pending_trigger():
     assert evaluate_triggers(_state(drive_pending=True), NOW) == ["drive-pending"]
     debounced = _state(last_cycle_start=NOW - 30, min_cycle_interval_s=120, drive_pending=True)
     assert evaluate_triggers(debounced, NOW) == []
+
+
+def test_lane_utilization_pending_trigger_and_debounce():
+    assert evaluate_triggers(_state(lane_utilization_pending=True), NOW) == [
+        "lane-utilization-pending"
+    ]
+    debounced = _state(
+        last_cycle_start=NOW - 119,
+        min_cycle_interval_s=120,
+        lane_utilization_pending=True,
+    )
+    assert evaluate_triggers(debounced, NOW) == []
+    past_debounce = _state(
+        last_cycle_start=NOW - 121,
+        min_cycle_interval_s=120,
+        lane_utilization_pending=True,
+    )
+    assert evaluate_triggers(past_debounce, NOW) == ["lane-utilization-pending"]
+
+
+def test_lane_utilization_pending_absent_by_default():
+    assert evaluate_triggers(_state(), NOW) == []
 
 
 def test_lane_transition_trigger():
@@ -216,6 +249,35 @@ def test_lane_transition_tick_triggers(project, cycle_recorder, monkeypatch):
     assert len(cycle_recorder) == 1
     triggers = [e for e in _events(project) if e["event"] == "cycle-trigger"]
     assert triggers[-1]["reasons"] == ["lane-transition:web:errored"]
+
+
+def test_idle_routable_lane_retriggers_after_transition_debounce(
+    project, cycle_recorder, monkeypatch
+):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    _seed_loop_task(paths, "T7001", "web")
+    actions.record_ask(paths, "d-20260611-000000-0", "web", 1800)
+    monkeypatch.setenv("FAKE_LANE_STATUS_OVERRIDE", "web=working")
+    w = _watch(project, target_lane_utilization=1.0, min_cycle_interval_s=120)
+    w._prev_snapshot = w.observer.snapshot().to_dict()
+    w._last_cycle_start = NOW - 200
+
+    monkeypatch.setenv("FAKE_LANE_STATUS_OVERRIDE", "web=idle")
+    w.tick(NOW)
+
+    assert len(cycle_recorder) == 1
+    first = _cycle_triggers(project)[-1]["reasons"]
+    assert "lane-transition:web:idle" in first
+    assert "lane-utilization-pending" in first
+
+    w.tick(NOW + 119)
+    assert len(cycle_recorder) == 1
+
+    w.tick(NOW + 121)
+
+    assert len(cycle_recorder) == 2
+    assert _cycle_triggers(project)[-1]["reasons"] == ["lane-utilization-pending"]
 
 
 def test_state_file_mtime_change_triggers(project, cycle_recorder):

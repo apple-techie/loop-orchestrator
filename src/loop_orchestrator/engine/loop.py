@@ -655,6 +655,18 @@ def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
     return backlog
 
 
+def _marker_windows(markers: list[dict]) -> set[str]:
+    return {
+        window for marker in markers if isinstance((window := marker.get("window")), str) and window
+    }
+
+
+def _drive_in_flight_windows(paths: SessionPaths) -> set[str]:
+    return _marker_windows(actions_mod.load_build_markers(paths)) | _marker_windows(
+        actions_mod.load_verify_markers(paths)
+    )
+
+
 def _verify_drive_lines(
     substrate: Substrate,
     snap: EngineSnapshot,
@@ -663,16 +675,10 @@ def _verify_drive_lines(
     emitted_base_unresolved: set[str] | None = None,
 ) -> list[str]:
     build_markers = actions_mod.load_build_markers(paths)
-    build_in_flight_windows = {
-        window
-        for marker in build_markers
-        if isinstance((window := marker.get("window")), str) and window
-    }
+    build_in_flight_windows = _marker_windows(build_markers)
     build_outcomes = _latest_build_outcomes(paths)[-_BUILD_DRIVE_OUTCOME_LIMIT:]
     markers = actions_mod.load_verify_markers(paths)
-    in_flight_windows = {
-        window for marker in markers if isinstance((window := marker.get("window")), str) and window
-    }
+    in_flight_windows = _marker_windows(markers)
     latest_outcomes = _latest_verify_outcomes(paths)
     outcomes = latest_outcomes[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
     latest_outcome = {
@@ -882,16 +888,11 @@ def _lane_utilization_lines(
     open_backlog = _open_backlog_by_loop(paths)
     if not open_backlog:
         return []
+    lanes = _routable_idle_lanes(snap, paths, config, open_backlog=open_backlog)
     lines: list[str] = []
-    for name in sorted(snap.lanes):
-        if name == "coord":
-            continue
+    for name in lanes:
         info = snap.lanes.get(name) or {}
-        if info.get("status") in _BUSY_LANE_STATES:
-            continue
         tasks = open_backlog.get(name)
-        if not tasks:
-            continue
         lines.append(
             f"- lane={name} status={info.get('status') or 'unknown'} "
             f"kind={info.get('kind') or '?'} open-backlog={','.join(tasks)}"
@@ -899,6 +900,29 @@ def _lane_utilization_lines(
     if not lines:
         return []
     return ["--- idle lanes (route work here before stop) ---", *lines]
+
+
+def _routable_idle_lanes(
+    snap: EngineSnapshot,
+    paths: SessionPaths,
+    config: EngineConfig | None,
+    open_backlog: dict[str, list[str]] | None = None,
+) -> list[str]:
+    if config is None or getattr(config, "target_lane_utilization", 0.0) <= 0:
+        return []
+    candidates = [
+        name
+        for name in sorted(snap.lanes)
+        if name != "coord" and (snap.lanes.get(name) or {}).get("status") not in _BUSY_LANE_STATES
+    ]
+    if not candidates:
+        return []
+    if open_backlog is None:
+        open_backlog = _open_backlog_by_loop(paths)
+    if not open_backlog:
+        return []
+    in_flight_windows = _drive_in_flight_windows(paths)
+    return [name for name in candidates if open_backlog.get(name) and name not in in_flight_windows]
 
 
 def _roster_lines(roster: dict[str, dict], config: EngineConfig) -> list[str]:

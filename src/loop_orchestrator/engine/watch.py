@@ -224,6 +224,7 @@ class TriggerState:
     # would stall between drive steps until the hourly interval. Subject to the
     # min_cycle_interval debounce like every other reason.
     drive_pending: bool = False
+    lane_utilization_pending: bool = False
     # Interval baseline when no cycle has ever run: a fresh daemon must NOT
     # burn a brain call at boot — it waits a full checkpoint interval from
     # start (real triggers still fire immediately; debounce only applies
@@ -252,6 +253,8 @@ def evaluate_triggers(state: TriggerState, now: float) -> list[str]:
         reasons.append("reply-received")
     if state.drive_pending:
         reasons.append("drive-pending")
+    if state.lane_utilization_pending:
+        reasons.append("lane-utilization-pending")
     if reasons and last is not None and now - last < state.min_cycle_interval_s:
         return []  # debounce: too soon since the last cycle-start
     return reasons
@@ -384,7 +387,8 @@ class Watch:
             self._maybe_lint(now)
 
         try:
-            snap = self.observer.snapshot().to_dict()
+            snapshot = self.observer.snapshot()
+            snap = snapshot.to_dict()
         except SubstrateError as exc:
             self.events.append("error", kind="observe-failed", error=str(exc))
             return
@@ -414,6 +418,9 @@ class Watch:
             cycle_now=self.paths.cycle_now_path.exists(),
             reply_received=reply_received,
             drive_pending=_drive_pending(self.substrate, self.paths, now),
+            lane_utilization_pending=bool(
+                loop_mod._routable_idle_lanes(snapshot, self.paths, self.config)
+            ),
             watch_start=self._watch_started,
         )
         reasons = evaluate_triggers(trigger_state, now)
