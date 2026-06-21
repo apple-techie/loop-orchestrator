@@ -61,9 +61,9 @@ _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 _VERIFY_DRIVE_OUTCOME_EVENTS = frozenset(
     {"verify-passed", "verify-failed", "verify-timeout", "verify-stale"}
 )
-_FIX_ROUND_RESET_EVENTS = frozenset(
-    {"verify-passed", "merge-done", "merge-passed", "escalate-merged", "lane-reset"}
-)
+_FIX_ROUND_NONCONVERGING_EVENTS = frozenset({"verify-failed", "verify-timeout", "verify-stale"})
+_FIX_ROUND_RESET_EVENTS = frozenset({"verify-passed"})
+_FIX_ROUND_TRACK_EVENTS = _FIX_ROUND_NONCONVERGING_EVENTS | _FIX_ROUND_RESET_EVENTS
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
 _VERIFY_DIFF_TIMEOUT_S = 60
@@ -143,6 +143,8 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                             events.append(
                                 "verify-timeout-held",
                                 window=marker.get("window"),
+                                branch=marker.get("branch"),
+                                branch_head=marker.get("tip_sha"),
                                 pid=runner_status.pid,
                                 out_path=out_path,
                                 started_at=marker.get("started_at"),
@@ -179,6 +181,8 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                         events.append(
                             "verify-timeout",
                             window=marker.get("window"),
+                            branch=marker.get("branch"),
+                            branch_head=marker.get("tip_sha"),
                             pid=marker.get("pid"),
                             out_path=out_path,
                             started_at=marker.get("started_at"),
@@ -238,6 +242,8 @@ def surface_verify_results(substrate: Substrate, paths: SessionPaths, events: Ev
                 events.append(
                     event,
                     window=window,
+                    branch=branch,
+                    branch_head=marker.get("tip_sha"),
                     overall=overall,
                     findings=findings,
                     max_severity=max_severity,
@@ -599,51 +605,156 @@ def _latest_verify_outcomes(paths: SessionPaths) -> list[dict]:
     return list(latest_by_window.values())
 
 
-def _configured_max_fix_rounds(config: EngineConfig | None) -> int | None:
+@dataclasses.dataclass
+class _FixRoundConfig:
+    value: int | None
+    raw: object
+    disabled_reason: str | None = None
+
+
+@dataclasses.dataclass
+class _FixRoundWindowState:
+    rounds: int = 0
+    seen_nonconverging: bool = False
+    last_findings: int | None = None
+    latest_outcome: dict | None = None
+
+
+def _configured_max_fix_rounds(config: EngineConfig | None) -> _FixRoundConfig:
     raw = getattr(config, "max_fix_rounds", None)
+    if raw is None:
+        return _FixRoundConfig(None, raw)
+    if isinstance(raw, bool):
+        return _FixRoundConfig(None, raw, "bool")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _FixRoundConfig(None, raw, "non-integer")
+    if value <= 0:
+        return _FixRoundConfig(None, raw, "non-positive")
+    return _FixRoundConfig(value, raw)
+
+
+def _emit_fix_round_cap_disabled(events: EventLog | None, config_state: _FixRoundConfig) -> None:
+    if events is None or config_state.disabled_reason is None:
+        return
+    events.append(
+        "fix-round-cap-disabled",
+        reason=config_state.disabled_reason,
+        raw=str(config_state.raw),
+    )
+
+
+def _branch_by_window(paths: SessionPaths) -> dict[str, str]:
+    ledger = read_json(paths.state_file, {})
+    loops = ledger.get("loops") if isinstance(ledger, dict) else None
+    if not isinstance(loops, dict):
+        return {}
+    branches: dict[str, str] = {}
+    for window, entry in loops.items():
+        if not isinstance(window, str) or not isinstance(entry, dict):
+            continue
+        branch = entry.get("branch")
+        if isinstance(branch, str) and branch:
+            branches[window] = branch
+    return branches
+
+
+def _event_matches_branch(event: dict, branch: str | None) -> bool:
+    if branch is None:
+        return True
+    event_branch = event.get("branch")
+    return not isinstance(event_branch, str) or not event_branch or event_branch == branch
+
+
+def _finding_count(event: dict) -> int | None:
+    raw = event.get("findings")
     if isinstance(raw, bool):
         return None
     try:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    return value if value > 0 else None
+    return value if value >= 0 else None
 
 
-def _failed_fix_rounds_by_window(paths: SessionPaths) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for event in EventLog(paths.events_path).tail(_VERIFY_DRIVE_EVENT_TAIL):
+def _fix_round_state_by_window(paths: SessionPaths) -> dict[str, _FixRoundWindowState]:
+    branches = _branch_by_window(paths)
+    states: dict[str, _FixRoundWindowState] = {}
+    for event in EventLog(paths.events_path).read_all():
         window = event.get("window")
         if not isinstance(window, str) or not window:
             continue
         kind = event.get("event")
+        if kind not in _FIX_ROUND_TRACK_EVENTS:
+            continue
+        if not _event_matches_branch(event, branches.get(window)):
+            continue
+        state = states.setdefault(window, _FixRoundWindowState())
+        state.latest_outcome = event
         if kind in _FIX_ROUND_RESET_EVENTS:
-            counts[window] = 0
-        elif kind == "verify-failed":
-            counts[window] = counts.get(window, 0) + 1
-    return {window: count for window, count in counts.items() if count > 0}
+            state.rounds = 0
+            state.seen_nonconverging = False
+            state.last_findings = None
+            continue
+        findings = _finding_count(event)
+        if not state.seen_nonconverging:
+            state.rounds = 0
+            state.seen_nonconverging = True
+        elif (
+            findings is not None
+            and state.last_findings is not None
+            and findings < state.last_findings
+        ):
+            state.rounds = 0
+        else:
+            state.rounds += 1
+        if findings is not None:
+            state.last_findings = findings
+    return states
 
 
-def _fix_round_cap_hits(paths: SessionPaths, config: EngineConfig | None) -> dict[str, dict]:
-    max_fix_rounds = _configured_max_fix_rounds(config)
+def _fix_round_cap_hits(
+    paths: SessionPaths,
+    config: EngineConfig | None,
+    events: EventLog | None = None,
+) -> dict[str, dict]:
+    config_state = _configured_max_fix_rounds(config)
+    max_fix_rounds = config_state.value
     if max_fix_rounds is None:
+        _emit_fix_round_cap_disabled(events, config_state)
         return {}
-    failed_rounds = _failed_fix_rounds_by_window(paths)
+    states = _fix_round_state_by_window(paths)
+    branches = _branch_by_window(paths)
     hits: dict[str, dict] = {}
-    for outcome in _latest_verify_outcomes(paths):
-        if outcome.get("event") != "verify-failed":
+    for window, state in states.items():
+        outcome = state.latest_outcome
+        if outcome is None or outcome.get("event") not in _FIX_ROUND_NONCONVERGING_EVENTS:
             continue
-        window = outcome.get("window")
-        if not isinstance(window, str) or not window:
-            continue
-        rounds = failed_rounds.get(window, 0)
-        if rounds >= max_fix_rounds:
+        if state.rounds >= max_fix_rounds:
             hits[window] = {
-                "rounds": rounds,
+                "rounds": state.rounds,
                 "max": max_fix_rounds,
                 "findings": outcome.get("findings", "?"),
+                "event": outcome.get("event"),
+                "branch": outcome.get("branch") or branches.get(window),
+                "branch_head": outcome.get("branch_head"),
+                "latest_verify_seq": outcome.get("seq"),
             }
     return hits
+
+
+def _fix_round_cap_already_reported(paths: SessionPaths, window: str, hit: dict) -> bool:
+    for event in reversed(EventLog(paths.events_path).read_all()):
+        if event.get("event") != "fix-round-cap" or event.get("window") != window:
+            continue
+        return (
+            event.get("branch") == hit.get("branch")
+            and event.get("latest_verify_seq") == hit.get("latest_verify_seq")
+            and event.get("fix_rounds") == hit.get("rounds")
+            and event.get("max_fix_rounds") == hit.get("max")
+        )
+    return False
 
 
 def _latest_build_outcomes(paths: SessionPaths) -> list[dict]:
@@ -810,7 +921,7 @@ def _verify_drive_lines(
         for outcome in latest_outcomes
         if isinstance(outcome.get("window"), str)
     }
-    cap_hits = _fix_round_cap_hits(paths, config)
+    cap_hits = _fix_round_cap_hits(paths, config, events=events)
 
     # Candidate lanes = the worktree lanes (ledger loops with a branch, T0025) UNION
     # the live tmux lanes. build/verify are HEADLESS (codex exec / loop-verify run
@@ -935,8 +1046,8 @@ def _verify_drive_lines(
             hit = cap_hits[window]
             lines.append(
                 f"- window={window} branch={branch or '(unknown)'} "
-                f"failed_fix_rounds={hit['rounds']} max_fix_rounds={hit['max']} "
-                f"findings={hit['findings']} needs human review"
+                f"fix_rounds={hit['rounds']} max_fix_rounds={hit['max']} "
+                f"latest_event={hit['event']} findings={hit['findings']} needs human review"
             )
     if outcomes:
         lines.append("recent verify outcomes:")
@@ -1450,8 +1561,8 @@ def _apply_fix_round_cap(
         if isinstance(action, decision_mod.BuildAction) and action.window in cap_hits:
             hit = cap_hits[action.window]
             summary = (
-                f"lane {action.window}: verify not converging after {hit['rounds']} rounds, "
-                f"{hit['findings']} findings - needs human review"
+                f"lane {action.window}: verify not converging after {hit['rounds']} fix rounds, "
+                f"latest {hit['event']}, {hit['findings']} findings - needs human review"
             )
             actions.append(
                 decision_mod.EscalateAction(
@@ -1459,13 +1570,19 @@ def _apply_fix_round_cap(
                     rationale="max_fix_rounds cap reached; automated fixes are not converging",
                 )
             )
-            events.append(
-                "fix-round-cap",
-                window=action.window,
-                failed_fix_rounds=hit["rounds"],
-                max_fix_rounds=hit["max"],
-                findings=hit["findings"],
-            )
+            if not _fix_round_cap_already_reported(paths, action.window, hit):
+                events.append(
+                    "fix-round-cap",
+                    window=action.window,
+                    branch=hit.get("branch"),
+                    branch_head=hit.get("branch_head"),
+                    latest_verify_seq=hit.get("latest_verify_seq"),
+                    fix_rounds=hit["rounds"],
+                    failed_fix_rounds=hit["rounds"],
+                    max_fix_rounds=hit["max"],
+                    latest_event=hit["event"],
+                    findings=hit["findings"],
+                )
             changed = True
         else:
             actions.append(action)

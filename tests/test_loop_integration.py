@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from loop_orchestrator.engine import cli, decisions
+from loop_orchestrator.engine import decision as decision_mod
 from loop_orchestrator.engine import loop as loop_mod
 from loop_orchestrator.engine.actions import (
     execute,
@@ -202,8 +203,15 @@ def test_capped_failed_fix_round_rewrites_build_to_escalate(project, monkeypatch
     paths.ensure()
     atomic_write_json(paths.state_file, {"loops": {"flaky": {"branch": "loop/demo/flaky"}}})
     events = EventLog(paths.events_path)
-    events.append("verify-failed", window="flaky", overall="fail", findings=9)
-    events.append("verify-failed", window="flaky", overall="fail", findings=12)
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=9
+    )
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=12
+    )
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=12
+    )
 
     monkeypatch.setattr(
         loop_mod.Brain,
@@ -228,7 +236,7 @@ actions:
     action = doc["actions"][0]
     assert action["kind"] == "escalate"
     assert "flaky" in action["summary"]
-    assert "not converging after 2 rounds" in action["summary"]
+    assert "not converging after 2 fix rounds" in action["summary"]
     assert action["status"] == "awaiting-approval"
 
 
@@ -1190,8 +1198,15 @@ def test_prompt_verify_drive_caps_repeated_failed_fix_rounds(project):
     loops = {"flaky": {"branch": "loop/demo/flaky"}}
     atomic_write_json(paths.state_file, {"loops": loops})
     events = EventLog(paths.events_path)
-    events.append("verify-failed", window="flaky", overall="fail", findings=9)
-    events.append("verify-failed", window="flaky", overall="fail", findings=12)
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=9
+    )
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=12
+    )
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=12
+    )
     snap = _prompt_snap(
         {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
         loops=loops,
@@ -1207,7 +1222,8 @@ def test_prompt_verify_drive_caps_repeated_failed_fix_rounds(project):
 
     assert "fix-round cap tripped:" in prompt
     assert (
-        "- window=flaky branch=loop/demo/flaky failed_fix_rounds=2 max_fix_rounds=2 findings=12"
+        "- window=flaky branch=loop/demo/flaky fix_rounds=2 max_fix_rounds=2 "
+        "latest_event=verify-failed findings=12"
     ) in prompt
     assert "needs human review" in prompt
     assert "recent verify outcomes:\n- window=flaky event=verify-failed" not in prompt
@@ -1248,8 +1264,15 @@ def test_prompt_verify_drive_large_fix_round_cap_preserves_fix_behavior(project)
     loops = {"flaky": {"branch": "loop/demo/flaky"}}
     atomic_write_json(paths.state_file, {"loops": loops})
     events = EventLog(paths.events_path)
-    events.append("verify-failed", window="flaky", overall="fail", findings=9)
-    events.append("verify-failed", window="flaky", overall="fail", findings=12)
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=9
+    )
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=12
+    )
+    events.append(
+        "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail", findings=12
+    )
     snap = _prompt_snap(
         {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
         loops=loops,
@@ -1268,6 +1291,192 @@ def test_prompt_verify_drive_large_fix_round_cap_preserves_fix_behavior(project)
         "recent verify outcomes:\n- window=flaky event=verify-failed "
         "overall=fail findings=12 branch=loop/demo/flaky"
     ) in prompt
+
+
+def test_prompt_verify_drive_caps_timeout_rounds(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=9)
+    events.append("verify-timeout", window="flaky", branch="loop/demo/flaky")
+    events.append("verify-timeout", window="flaky", branch="loop/demo/flaky")
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        config=EngineConfig(max_fix_rounds=2),
+        checkpoint_body="# Base\n",
+    )
+
+    assert "fix-round cap tripped:" in prompt
+    assert "fix_rounds=2 max_fix_rounds=2 latest_event=verify-timeout" in prompt
+
+
+def test_prompt_verify_drive_caps_stale_rounds(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=9)
+    events.append("verify-stale", window="flaky", branch="loop/demo/flaky", findings=9)
+    events.append("verify-stale", window="flaky", branch="loop/demo/flaky", findings=9)
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        config=EngineConfig(max_fix_rounds=2),
+        checkpoint_body="# Base\n",
+    )
+
+    assert "fix-round cap tripped:" in prompt
+    assert "fix_rounds=2 max_fix_rounds=2 latest_event=verify-stale" in prompt
+
+
+def test_prompt_verify_drive_cap_uses_full_event_history(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=9)
+    for idx in range(120):
+        events.append("decision", id=f"d-noise-{idx}")
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=12)
+    for idx in range(120):
+        events.append("cycle-start", session=f"noise-{idx}")
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=12)
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        config=EngineConfig(max_fix_rounds=2),
+        checkpoint_body="# Base\n",
+    )
+
+    assert "fix-round cap tripped:" in prompt
+    assert "fix_rounds=2 max_fix_rounds=2 latest_event=verify-failed" in prompt
+
+
+def test_prompt_verify_drive_cap_ignores_recycled_window_old_branch(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/new-flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append("verify-failed", window="flaky", branch="loop/demo/old-flaky", findings=9)
+    events.append("verify-failed", window="flaky", branch="loop/demo/old-flaky", findings=12)
+    events.append("verify-failed", window="flaky", branch="loop/demo/new-flaky", findings=1)
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        config=EngineConfig(max_fix_rounds=1),
+        checkpoint_body="# Base\n",
+    )
+
+    assert "fix-round cap tripped:" not in prompt
+    assert "window=flaky event=verify-failed overall=(unknown) findings=1" in prompt
+
+
+def test_prompt_verify_drive_cap_allows_improving_findings(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=9)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=4)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=2)
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        config=EngineConfig(max_fix_rounds=1),
+        checkpoint_body="# Base\n",
+    )
+
+    assert "fix-round cap tripped:" not in prompt
+    assert "window=flaky event=verify-failed overall=(unknown) findings=2" in prompt
+
+
+def test_prompt_verify_drive_warns_when_fix_round_cap_config_invalid(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    snap = _prompt_snap(
+        {"flaky": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    _assemble_prompt(
+        _sub(project),
+        snap,
+        paths,
+        config=EngineConfig(max_fix_rounds=True),
+        checkpoint_body="# Base\n",
+        events=events,
+    )
+
+    disabled = [event for event in _events(paths) if event["event"] == "fix-round-cap-disabled"]
+    assert disabled and disabled[-1]["reason"] == "bool"
+
+
+def test_fix_round_cap_event_dedupes_same_latest_outcome(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    atomic_write_json(paths.state_file, {"loops": {"flaky": {"branch": "loop/demo/flaky"}}})
+    events = EventLog(paths.events_path)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=9)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=12)
+    events.append("verify-failed", window="flaky", branch="loop/demo/flaky", findings=12)
+    decision = decision_mod.Decision(
+        id="d-cap",
+        critique="try one more automated fix",
+        actions=[
+            decision_mod.BuildAction(
+                window="flaky",
+                brief="fix every finding",
+                rationale="latest verify failed",
+            )
+        ],
+        raw_text="",
+    )
+
+    loop_mod._apply_fix_round_cap(decision, paths, EngineConfig(max_fix_rounds=2), events)
+    loop_mod._apply_fix_round_cap(decision, paths, EngineConfig(max_fix_rounds=2), events)
+
+    cap_events = [event for event in _events(paths) if event["event"] == "fix-round-cap"]
+    assert len(cap_events) == 1
 
 
 def test_prompt_verify_drive_rearms_after_failed_verify_when_head_advances(project, monkeypatch):

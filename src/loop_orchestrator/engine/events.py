@@ -119,6 +119,21 @@ class EventLog:
         out.reverse()
         return out
 
+    def read_all(self) -> list[dict]:
+        """All parseable events, oldest first; corrupt lines are skipped."""
+        out: list[dict] = []
+        for line in self._lines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+
     def count_since(self, kind: str, seconds: float) -> int:
         """Events of `kind` within the last `seconds`; relies on ts monotonicity
         to stop scanning at the first line older than the cutoff."""
