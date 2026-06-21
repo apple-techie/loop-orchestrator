@@ -185,6 +185,7 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
     assert "distinct_lanes_used7d=3" in log
     assert "ingests7d=1" in log
     assert "lints7d=1" in log
+    assert "source=session-events-v2" in log
 
 
 def test_loop_metrics_missing_events_jsonl_degrades_to_zero(metrics_project: Path):
@@ -232,6 +233,74 @@ def test_loop_metrics_empty_events_do_not_bleed_repo_level_counts(metrics_projec
     assert "unsolicited_steers_7d:           0" in result.stdout
 
 
+def test_loop_metrics_checkpoint_falls_back_to_engine_checkpoint(metrics_project: Path):
+    checkpoint = metrics_project / ".loop" / "sessions" / "demo" / "engine" / "checkpoint.md"
+    checkpoint.write_text("x" * 400, encoding="utf-8")
+    _write_events(metrics_project, [])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkpoint_tokens: 100 (400 bytes / 4)" in result.stdout
+
+
+def test_loop_metrics_checkpoint_falls_back_to_latest_brain_prompt(metrics_project: Path):
+    brain = metrics_project / ".loop" / "sessions" / "demo" / "engine" / "brain"
+    brain.mkdir()
+    (brain / "older.prompt.md").write_text("x" * 80, encoding="utf-8")
+    latest = brain / "latest.prompt.md"
+    latest.write_text("x" * 800, encoding="utf-8")
+    os.utime(latest, None)
+    _write_events(metrics_project, [])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkpoint_tokens: 200 (800 bytes / 4)" in result.stdout
+
+
+def test_loop_metrics_corrupt_snapshot_is_reported(metrics_project: Path):
+    snapshot = metrics_project / ".loop" / "sessions" / "demo" / "engine" / "snapshot.json"
+    snapshot.write_text("{not json}", encoding="utf-8")
+    _write_events(metrics_project, [])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkpoint_tokens: 0" in result.stdout
+    assert "snapshot.json for session 'demo' unparseable" in result.stdout
+
+
+def test_loop_metrics_missing_mailbox_file_does_not_count_as_steer(metrics_project: Path):
+    missing = f"{_mailbox_stamp()}-andrew-to-coord.md"
+    _write_events(metrics_project, [{"event": "mailbox-new", "file": missing}])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "unsolicited_steers_7d:           0" in result.stdout
+    assert f"mailbox-new file '{missing}' not found" in result.stdout
+
+
+def test_loop_metrics_lint_dispatch_requires_boolean_ok(metrics_project: Path):
+    _write_events(
+        metrics_project,
+        [
+            {"event": "lint-dispatch", "ok": True},
+            {"event": "lint-dispatch"},
+            {"event": "lint-dispatch", "ok": False},
+            {"event": "lint-dispatch", "ok": 0},
+            {"event": "lint-dispatch", "ok": "false"},
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "lints_7d:          2" in result.stdout
+    assert "lint-dispatch with non-boolean ok skipped" in result.stdout
+
+
 def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path):
     metrics_project = tmp_path / "proj"
     (metrics_project / ".loop" / "messages" / "processed").mkdir(parents=True)
@@ -241,8 +310,8 @@ def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path
     (metrics_project / ".loop" / "sessions" / "beta" / "engine").mkdir(parents=True)
     _write_snapshot(metrics_project, "alpha", checkpoint_tokens=20, lanes={"web": "idle"})
     _write_snapshot(metrics_project, "beta", checkpoint_tokens=40, lanes={"ops": "idle"})
-    _write_task(metrics_project, "T9001", "web")
-    _write_task(metrics_project, "T9002", "ops")
+    _write_task(metrics_project, "T9001", "alpha")
+    _write_task(metrics_project, "T9002", "beta")
     _write_events(
         metrics_project,
         [
@@ -279,3 +348,23 @@ def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path
     assert "ingests_7d:                  1" in result.stdout
     assert "lints_7d:                    1" in result.stdout
     assert "lanes_idle_with_backlog:     2" in result.stdout
+
+
+def test_loop_metrics_all_surfaces_degradation_notes(metrics_project: Path):
+    result = _run_metrics_all(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "notes:" in result.stdout
+    assert "no events.jsonl for session 'demo'" in result.stdout
+
+
+def test_loop_metrics_all_log_is_rejected(metrics_project: Path):
+    log_file = metrics_project / "ops-wiki" / "log.md"
+    log_file.write_text("before\n", encoding="utf-8")
+    before = log_file.read_text(encoding="utf-8") if log_file.exists() else ""
+
+    result = _run_metrics_all(metrics_project, "--log")
+
+    assert result.returncode == 2
+    assert "--all and --log cannot be combined" in result.stderr
+    assert log_file.read_text(encoding="utf-8") == before

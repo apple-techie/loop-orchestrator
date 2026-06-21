@@ -40,7 +40,7 @@ Options:
   --all                 Print one row per .loop/sessions/<session> plus a
                         fleet aggregate across all selected project roots
   --log                 Also append `## [YYYY-MM-DD] metrics | <summary>`
-                        (exactly one entry) to ops-wiki/log.md
+                        (single-session mode only; rejected with --all)
   --session <name>      Session for .loop/sessions/<name>/ engine metrics;
                         default: the sole directory under .loop/sessions/,
                         else the current $TMUX session if it has one there
@@ -75,6 +75,11 @@ if [[ "${#PROJECT_ROOTS[@]}" -eq 0 ]]; then
   PROJECT_ROOTS+=("$(cd "$SCRIPT_DIR/.." && pwd)")
 fi
 
+if [[ "$ALL" -eq 1 && "$DO_LOG" -eq 1 ]]; then
+  echo "error: --all and --log cannot be combined; run --log per session" >&2
+  exit 2
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
   echo "error: python3 is required (substrate dependency, used for date math)" >&2
   exit 1
@@ -96,6 +101,8 @@ mailbox_name_re = re.compile(r"^(\d{8}-\d{6})-([^-]+(?:-[^-]+)*?)-to-([^-]+)\.md
 reply_subject_re = re.compile(r"re\s*:", re.IGNORECASE)
 task_id_re = re.compile(r"^(T\d+)-")
 log_pat = re.compile(r"^## \[(\d{4})-(\d{2})-(\d{2})\] ([a-z-]+) \| ?(.*)$")
+PENDING_TIMEOUT_S = 15
+TMUX_TIMEOUT_S = 5
 
 
 @dataclass
@@ -127,7 +134,6 @@ class Metrics:
     checkpoints_7d: int = 0
     experiments: int = 0
     lanes_idle_with_backlog: int = 0
-    active_backlog_loops: set[str] = field(default_factory=set)
     notes: list[str] = field(default_factory=list)
 
 
@@ -167,7 +173,11 @@ def default_session(root: Path, notes: list[str]) -> str:
                 check=False,
                 capture_output=True,
                 text=True,
+                timeout=TMUX_TIMEOUT_S,
             )
+        except subprocess.TimeoutExpired:
+            proc = None
+            notes.append("tmux session lookup timed out; pass --session for metrics")
         except OSError:
             proc = None
         tmux_session = proc.stdout.strip() if proc and proc.returncode == 0 else ""
@@ -179,22 +189,40 @@ def default_session(root: Path, notes: list[str]) -> str:
     return ""
 
 
-def json_file(path: Path):
+def json_file(path: Path, notes: list[str] | None = None, label: str | None = None):
+    display = label or str(path)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return None
-    return data if isinstance(data, dict) else None
+    except OSError as exc:
+        if notes is not None:
+            notes.append(f"{display} unreadable: {exc}; metrics using fallback/0")
+        return None
+    except json.JSONDecodeError as exc:
+        if notes is not None:
+            notes.append(f"{display} unparseable: {exc}; metrics using fallback/0")
+        return None
+    if not isinstance(data, dict):
+        if notes is not None:
+            notes.append(f"{display} is not a JSON object; metrics using fallback/0")
+        return None
+    return data
 
 
 def pending_count(root: Path, notes: list[str]) -> str:
     if pending_script.is_file() and os.access(pending_script, os.X_OK):
-        proc = subprocess.run(
-            [str(pending_script), "--quiet", "--project-root", str(root)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            proc = subprocess.run(
+                [str(pending_script), "--quiet", "--project-root", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=PENDING_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            notes.append("pending_messages n/a: loop-wiki-pending.sh timed out")
+            return "n/a"
         if proc.returncode == 0:
             return proc.stdout.strip() or "0"
         notes.append("pending_messages n/a: loop-wiki-pending.sh failed")
@@ -203,12 +231,20 @@ def pending_count(root: Path, notes: list[str]) -> str:
     return "n/a"
 
 
-def checkpoint_tokens(root: Path, session: str, notes: list[str]) -> tuple[int, str]:
+def session_snapshot(root: Path, session: str, notes: list[str]) -> dict | None:
+    if not session:
+        return None
+    path = root / ".loop" / "sessions" / session / "engine" / "snapshot.json"
+    return json_file(path, notes, f"snapshot.json for session '{session}'")
+
+
+def checkpoint_tokens(
+    root: Path, session: str, snapshot: dict | None, notes: list[str]
+) -> tuple[int, str]:
     if not session:
         notes.append("no session selected — checkpoint_tokens read 0")
         return 0, ""
     engine_dir = root / ".loop" / "sessions" / session / "engine"
-    snapshot = json_file(engine_dir / "snapshot.json")
     if snapshot is not None:
         value = snapshot.get("checkpoint_tokens")
         if isinstance(value, int):
@@ -294,16 +330,16 @@ def parse_mailbox_subject(path: Path) -> str:
     return ""
 
 
-def subject_for_mail(root: Path, name: str) -> str:
+def subject_for_mail(root: Path, name: str) -> str | None:
     mailbox = root / ".loop" / "messages"
     for directory in (mailbox, mailbox / "processed", mailbox / "failed"):
         path = directory / name
         if path.is_file():
             return parse_mailbox_subject(path)
-    return ""
+    return None
 
 
-def mailbox_file_is_unsolicited_steer(root: Path, name: str) -> bool:
+def mailbox_file_is_unsolicited_steer(root: Path, name: str, notes: list[str]) -> bool:
     match = mailbox_name_re.match(name)
     if not match:
         return False
@@ -314,7 +350,11 @@ def mailbox_file_is_unsolicited_steer(root: Path, name: str) -> bool:
         return False
     if stamp < cutoff_7d or recipient != "coord" or sender == "coord":
         return False
-    return not reply_subject_re.match(subject_for_mail(root, name).strip())
+    subject = subject_for_mail(root, name)
+    if subject is None:
+        notes.append(f"mailbox-new file '{name}' not found — skipped unsolicited steer count")
+        return False
+    return not reply_subject_re.match(subject.strip())
 
 
 def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
@@ -350,7 +390,6 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
     engine_approvals = total_decisions = 0
     dispatches_by_lane: dict[str, int] = {}
     unsolicited_files: set[str] = set()
-    explicit_steers = 0
 
     for line in lines:
         try:
@@ -385,18 +424,19 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         elif kind == "ingest-done":
             ingests += 1
         elif kind == "lint-dispatch":
-            if rec.get("ok") is not False:
+            ok = rec.get("ok", True)
+            if ok is True:
                 lints += 1
+            elif ok is not False:
+                notes.append("lint-dispatch with non-boolean ok skipped")
         elif kind == "cycle-trigger":
             checkpoints += 1
-        elif kind in {"unsolicited-steer", "human-unsolicited-steer"}:
-            explicit_steers += 1
         elif kind == "mailbox-new":
             name = rec.get("file")
-            if isinstance(name, str) and mailbox_file_is_unsolicited_steer(root, name):
+            if isinstance(name, str) and mailbox_file_is_unsolicited_steer(root, name, notes):
                 unsolicited_files.add(name)
 
-    unsolicited_steers = explicit_steers + len(unsolicited_files)
+    unsolicited_steers = len(unsolicited_files)
     interventions = escalations + unsolicited_steers + rejects
     autonomy = f"{engine_approvals / total_decisions:.2f}" if total_decisions else "n/a"
     per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
@@ -458,35 +498,38 @@ def open_tasks_by_loop(root: Path) -> dict[str, list[str]]:
     return out
 
 
-def idle_lanes_with_backlog(root: Path, session: str) -> tuple[int, set[str]]:
+def idle_lanes_with_backlog(root: Path, session: str, snapshot: dict | None) -> int:
     backlog = open_tasks_by_loop(root)
     if not session:
-        return 0, set(backlog)
-    snapshot = json_file(root / ".loop" / "sessions" / session / "engine" / "snapshot.json") or {}
-    lanes = snapshot.get("lanes") if isinstance(snapshot.get("lanes"), dict) else {}
+        return 0
+    snapshot_data = snapshot or {}
+    lanes = snapshot_data.get("lanes") if isinstance(snapshot_data.get("lanes"), dict) else {}
+    session_backlog = bool(backlog.get(session))
     count = 0
     for lane, info in lanes.items():
         if lane == "coord" or not isinstance(info, dict):
             continue
-        if info.get("status") == "idle" and lane in backlog:
+        lane_backlog = bool(backlog.get(lane))
+        if info.get("status") == "idle" and (session_backlog or lane_backlog):
             count += 1
-    return count, set(backlog)
+    return count
 
 
 def compute(root: Path, session: str) -> Metrics:
     notes: list[str] = []
     metrics = Metrics(root=root, session=session)
+    snapshot = session_snapshot(root, session, notes)
     metrics.pending_messages = pending_count(root, notes)
-    metrics.checkpoint_tokens, metrics.checkpoint_detail = checkpoint_tokens(root, session, notes)
+    metrics.checkpoint_tokens, metrics.checkpoint_detail = checkpoint_tokens(
+        root, session, snapshot, notes
+    )
     metrics.experiments, metrics.tasks_done_7d = repo_log_counts(root)
     metrics.restarts_24h, metrics.giveups_24h, metrics.lane_restarts_7d = restart_counts(
         root, session, notes
     )
     for key, value in event_metrics(root, session, metrics.tasks_done_7d, notes).items():
         setattr(metrics, key, value)
-    metrics.lanes_idle_with_backlog, metrics.active_backlog_loops = idle_lanes_with_backlog(
-        root, session
-    )
+    metrics.lanes_idle_with_backlog = idle_lanes_with_backlog(root, session, snapshot)
     metrics.notes = notes
     return metrics
 
@@ -542,7 +585,8 @@ def summary(metrics: Metrics) -> str:
         f"dispatches_per_lane7d={metrics.dispatches_per_lane_7d} "
         f"distinct_lanes_used7d={metrics.distinct_lanes_used_7d} "
         f"ingests7d={metrics.ingests_7d} lints7d={metrics.lints_7d} "
-        f"checkpoints7d={metrics.checkpoints_7d} experiments={metrics.experiments}"
+        f"checkpoints7d={metrics.checkpoints_7d} experiments={metrics.experiments} "
+        "source=session-events-v2"
     )
 
 
@@ -637,6 +681,11 @@ def print_all(rows: list[Metrics]) -> None:
     print(f"  checkpoints_7d:              {sum(m.checkpoints_7d for m in rows)}")
     print(f"  experiments:                 {sum(root_experiments.values())}")
     print(f"  lanes_idle_with_backlog:     {sum(m.lanes_idle_with_backlog for m in rows)}")
+    noted = [(m, note) for m in rows for note in m.notes]
+    if noted:
+        print("notes:")
+        for m, note in noted:
+            print(f"  - {m.root}:{m.session}: {note}")
 
 
 if all_mode:
