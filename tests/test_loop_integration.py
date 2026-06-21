@@ -1298,11 +1298,13 @@ def test_prompt_without_verify_drive_state_is_byte_identical(project):
     )
 
 
-def _seed_loop_task(paths, task_id, loop):
+def _seed_loop_task(paths, task_id, loop, status="open", depends_on=None):
     paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    depends_on = [] if depends_on is None else depends_on
+    deps = ", ".join(depends_on)
     fm = (
-        f"---\nid: {task_id}\ntitle: x\nstatus: open\n"
-        f"loop: {loop}\ndepends_on: []\nscope: src\n---\n"
+        f"---\nid: {task_id}\ntitle: x\nstatus: {status}\n"
+        f"loop: {loop}\ndepends_on: [{deps}]\nscope: src\n---\n"
     )
     (paths.tasks_dir / f"{task_id}-x.md").write_text(fm, encoding="utf-8")
 
@@ -1319,7 +1321,7 @@ def test_prompt_lane_utilization_surfaces_idle_lanes_with_backlog(project):
     prompt = _assemble_prompt(_sub(project), snap, paths, config=cfg, checkpoint_body="# Base\n")
 
     assert "--- idle lanes (route work here before stop) ---" in prompt
-    assert "lane=web status=idle" in prompt and "open-backlog=T7001" in prompt
+    assert "lane=web status=idle" in prompt and "routable-backlog=T7001" in prompt
     assert _UTILIZATION_RUBRIC in prompt
 
 
@@ -1369,6 +1371,44 @@ def test_routable_idle_lanes_truth_table(project):
 
     assert _routable_idle_lanes(snap, paths, EngineConfig(target_lane_utilization=1.0)) == ["web"]
     assert _routable_idle_lanes(snap, paths, EngineConfig()) == []
+
+
+def test_routable_idle_lanes_exclude_blocked_and_in_progress_backlog(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    _seed_loop_task(paths, "T7001", "web", depends_on=["T7000"])
+    _seed_loop_task(paths, "T7002", "ops", status="in-progress")
+    _seed_loop_task(paths, "T7003", "validate", status="review")
+    snap = _prompt_snap(
+        {
+            "web": {"status": "idle", "target": "", "kind": "claude"},
+            "ops": {"status": "idle", "target": "", "kind": "claude"},
+            "validate": {"status": "idle", "target": "", "kind": "claude"},
+        }
+    )
+    cfg = EngineConfig(target_lane_utilization=1.0)
+
+    assert _routable_idle_lanes(snap, paths, cfg) == []
+    assert _lane_utilization_lines(snap, paths, cfg) == []
+
+    _seed_loop_task(paths, "T7000", "setup", status="done")
+
+    assert _routable_idle_lanes(snap, paths, cfg) == ["web"]
+    assert "routable-backlog=T7001" in "\n".join(_lane_utilization_lines(snap, paths, cfg))
+
+
+def test_routable_idle_lanes_include_headless_worktree_lanes(project):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    atomic_write_json(paths.state_file, {"loops": {"code2": {"branch": "loop/demo/code2"}}})
+    _seed_loop_task(paths, "T7001", "code2")
+    snap = _prompt_snap({"web": {"status": "working", "target": "", "kind": "claude"}})
+    cfg = EngineConfig(target_lane_utilization=1.0)
+
+    assert _routable_idle_lanes(snap, paths, cfg) == ["code2"]
+    assert "lane=code2 status=unknown kind=headless-worktree" in "\n".join(
+        _lane_utilization_lines(snap, paths, cfg)
+    )
 
 
 def test_lane_utilization_lines_agree_with_routable_helper(project):

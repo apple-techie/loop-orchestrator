@@ -303,6 +303,16 @@ def _drive_pending(substrate: Substrate, paths: SessionPaths, now: float) -> boo
     )
 
 
+_UTILIZATION_ROUTE_KINDS = frozenset({"dispatch", "steer", "build"})
+
+
+def _action_routes_candidate(action: dict, lanes: set[str]) -> bool:
+    return (
+        action.get("kind") in _UTILIZATION_ROUTE_KINDS
+        and (action.get("lane") or action.get("window")) in lanes
+    )
+
+
 class Watch:
     """Singleton engine daemon for one (project_root, session)."""
 
@@ -324,6 +334,7 @@ class Watch:
         self._seen_replies: set[str] = set()
         self._paused_skip_logged = False
         self._last_skip: tuple | None = None
+        self._lane_utilization_no_progress: tuple[str, ...] | None = None
         # Brain-suppression backoff: epoch until which the BRAIN is suppressed
         # after a failure that must NOT be retried into the wall — failure_kind
         # "quota" (usage/session limit) or "model-unavailable" (F3: requested
@@ -407,6 +418,15 @@ class Watch:
         state_mtime = _mtime_ns(self.paths.state_file)
         state_changed = state_mtime != self._state_mtime
         self._state_mtime = state_mtime
+        lane_utilization_lanes = tuple(
+            loop_mod._routable_idle_lanes(snapshot, self.paths, self.config)
+        )
+        if lane_utilization_lanes != self._lane_utilization_no_progress:
+            self._lane_utilization_no_progress = None
+        lane_utilization_suppressed = (
+            bool(lane_utilization_lanes)
+            and lane_utilization_lanes == self._lane_utilization_no_progress
+        )
 
         trigger_state = TriggerState(
             last_cycle_start=self._last_cycle_start,
@@ -418,13 +438,14 @@ class Watch:
             cycle_now=self.paths.cycle_now_path.exists(),
             reply_received=reply_received,
             drive_pending=_drive_pending(self.substrate, self.paths, now),
-            lane_utilization_pending=bool(
-                loop_mod._routable_idle_lanes(snapshot, self.paths, self.config)
-            ),
+            lane_utilization_pending=bool(lane_utilization_lanes)
+            and not lane_utilization_suppressed,
             watch_start=self._watch_started,
         )
         reasons = evaluate_triggers(trigger_state, now)
         if not reasons:
+            if lane_utilization_suppressed:
+                self._log_skip("lane-utilization-no-progress", ["lane-utilization-pending"])
             return
         # Suppression checks run BEFORE the cycle-now flag is consumed, so a
         # cycle-now issued while paused or while a decision is pending survives
@@ -451,7 +472,7 @@ class Watch:
                 self.paths.cycle_now_path.unlink()  # consume the flag
             except FileNotFoundError:
                 pass
-        self._run_cycle(now, reasons)
+        self._run_cycle(now, reasons, lane_utilization_lanes)
 
     def _log_skip(self, reason: str, reasons: list[str]) -> None:
         """One cycle-skip event per distinct (reason, triggers) episode — the
@@ -486,8 +507,10 @@ class Watch:
             self._last_skip = sig
         return True
 
-    def _run_cycle(self, now: float, reasons: list[str]) -> None:
-        self.events.append("cycle-trigger", reasons=reasons)
+    def _run_cycle(
+        self, now: float, reasons: list[str], lane_utilization_lanes: tuple[str, ...] = ()
+    ) -> None:
+        trigger = self.events.append("cycle-trigger", reasons=reasons)
         self._last_cycle_start = now
         self._mailbox_since_cycle = False
         try:
@@ -507,6 +530,7 @@ class Watch:
         # run_once wrote events through its own EventLog; re-derive our seq.
         self.events = EventLog(self.paths.events_path)
         self.events.append("cycle-result", rc=rc, reasons=reasons)
+        self._record_lane_utilization_progress(trigger["seq"], rc, reasons, lane_utilization_lanes)
         self._maybe_arm_quota_backoff(now, rc)
         if self.config.metrics.log_after_cycle:
             try:
@@ -520,6 +544,56 @@ class Watch:
                     rc=rc,
                     **_metrics_event_fields(metrics_stdout),
                 )
+
+    def _record_lane_utilization_progress(
+        self,
+        trigger_seq: int,
+        rc: int,
+        reasons: list[str],
+        lane_utilization_lanes: tuple[str, ...],
+    ) -> None:
+        if not lane_utilization_lanes:
+            self._lane_utilization_no_progress = None
+            return
+        lanes = set(lane_utilization_lanes)
+        if self._cycle_routed_candidate(trigger_seq, lanes):
+            self._lane_utilization_no_progress = None
+            self.events.append("lane-utilization-progress", lanes=list(lane_utilization_lanes))
+            return
+        if "lane-utilization-pending" not in reasons and not (
+            len(reasons) == 1 and reasons[0] == "interval"
+        ):
+            return
+        self._lane_utilization_no_progress = lane_utilization_lanes
+        self._last_skip = None
+        self.events.append(
+            "lane-utilization-no-progress",
+            lanes=list(lane_utilization_lanes),
+            rc=rc,
+            reasons=reasons,
+        )
+
+    def _cycle_routed_candidate(self, trigger_seq: int, lanes: set[str]) -> bool:
+        if self.paths.pending_decision_path.exists():
+            doc = read_json(self.paths.pending_decision_path)
+            if isinstance(doc, dict):
+                actions = doc.get("actions")
+                if isinstance(actions, list) and any(
+                    isinstance(action, dict) and _action_routes_candidate(action, lanes)
+                    for action in actions
+                ):
+                    return True
+                return True
+        for event in self.events.tail(200):
+            seq = event.get("seq")
+            if not isinstance(seq, int) or seq <= trigger_seq:
+                continue
+            kind = event.get("event")
+            if kind == "action" and _action_routes_candidate(event, lanes):
+                return True
+            if kind == "build-started" and event.get("window") in lanes:
+                return True
+        return False
 
     def _maybe_arm_quota_backoff(self, now: float, rc: int) -> None:
         """When the cycle just ended on a brain failure that must NOT be retried

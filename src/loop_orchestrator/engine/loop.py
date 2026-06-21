@@ -619,20 +619,17 @@ def _verified_tip(paths: SessionPaths, lane: str) -> str | None:
     return verified_tip if isinstance(verified_tip, str) and verified_tip else None
 
 
-def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
-    """Map loop-id -> open task ids (status open/in-progress/review) parsed from
-    tasks/, so the awaiting-build drive section can point the brain at the backlog
-    for an idle lane. Mirrors derive_loops_from_tasks' frontmatter parsing; a
-    malformed task file is skipped, never fatal."""
+def _task_frontmatters(paths: SessionPaths) -> list[dict]:
+    """Parsed task frontmatters from tasks/, skipping malformed/racing files."""
     import yaml
 
     from ..pm import taskfiles
 
-    backlog: dict[str, list[str]] = {}
     try:
         task_paths = taskfiles.list_tasks(paths.tasks_dir)
     except OSError:
-        return backlog
+        return []
+    frontmatters: list[dict] = []
     for path in task_paths:
         try:
             fm = taskfiles.parse_frontmatter(path)
@@ -641,6 +638,17 @@ def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
             # a lane deleting/renaming a task between list_tasks and the read.
             # Skip the file, never abort the drive cycle ("never fatal").
             continue
+        frontmatters.append(fm)
+    return frontmatters
+
+
+def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
+    """Map loop-id -> open task ids (status open/in-progress/review) parsed from
+    tasks/, so the awaiting-build drive section can point the brain at the backlog
+    for an idle lane. Mirrors derive_loops_from_tasks' frontmatter parsing; a
+    malformed task file is skipped, never fatal."""
+    backlog: dict[str, list[str]] = {}
+    for fm in _task_frontmatters(paths):
         loop = fm.get("loop")
         task_id = fm.get("id")
         status = str(fm.get("status") or "")
@@ -653,6 +661,72 @@ def _open_backlog_by_loop(paths: SessionPaths) -> dict[str, list[str]]:
         ):
             backlog.setdefault(loop, []).append(task_id)
     return backlog
+
+
+def _dependency_ids(raw: object) -> list[str] | None:
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        return None
+    deps: list[str] = []
+    for value in raw:
+        if not isinstance(value, str) or not value:
+            return None
+        deps.append(value)
+    return deps
+
+
+def _routable_backlog_by_loop(
+    paths: SessionPaths, loop_filter: set[str] | None = None
+) -> dict[str, list[str]]:
+    """Map loop-id -> task ids that are actually dispatchable now.
+
+    The utilization trigger is level-triggered, so broad backlog is unsafe here:
+    dependency-blocked, in-progress, or review tasks would keep waking the brain
+    even though it cannot route them. A routable task is open and all dependencies
+    have reached done.
+    """
+    frontmatters = _task_frontmatters(paths)
+    status_by_id = {
+        task_id: str(fm.get("status") or "")
+        for fm in frontmatters
+        if isinstance((task_id := fm.get("id")), str) and task_id
+    }
+    backlog: dict[str, list[str]] = {}
+    for fm in frontmatters:
+        loop = fm.get("loop")
+        task_id = fm.get("id")
+        status = str(fm.get("status") or "")
+        if (
+            not isinstance(loop, str)
+            or not loop
+            or not isinstance(task_id, str)
+            or not task_id
+            or status != "open"
+            or (loop_filter is not None and loop not in loop_filter)
+        ):
+            continue
+        deps = _dependency_ids(fm.get("depends_on"))
+        if deps is None or any(status_by_id.get(dep) != "done" for dep in deps):
+            continue
+        backlog.setdefault(loop, []).append(task_id)
+    return backlog
+
+
+def _ledger_worktree_lanes(paths: SessionPaths) -> set[str]:
+    ledger = read_json(paths.state_file, {})
+    loops_doc = ledger.get("loops") if isinstance(ledger, dict) else None
+    return (
+        {
+            window
+            for window, entry in loops_doc.items()
+            if isinstance(entry, dict)
+            and isinstance(entry.get("branch"), str)
+            and entry.get("branch")
+        }
+        if isinstance(loops_doc, dict)
+        else set()
+    )
 
 
 def _marker_windows(markers: list[dict]) -> set[str]:
@@ -693,19 +767,7 @@ def _verify_drive_lines(
     # with no booted AI harness — it need not be a tmux window at all, and one that
     # is reads status "unknown" rather than "idle". Eligibility therefore keys off
     # the registered branch + a quiescent worktree, NOT a live idle pane.
-    ledger = read_json(paths.state_file, {})
-    loops_doc = ledger.get("loops") if isinstance(ledger, dict) else None
-    branch_lanes = (
-        {
-            window
-            for window, entry in loops_doc.items()
-            if isinstance(entry, dict)
-            and isinstance(entry.get("branch"), str)
-            and entry.get("branch")
-        }
-        if isinstance(loops_doc, dict)
-        else set()
-    )
+    branch_lanes = _ledger_worktree_lanes(paths)
     # Shared base (main HEAD): a lane whose branch is AT base has nothing built
     # yet (awaiting-build), and a lane ahead of base has a non-empty diff to
     # review (ready-to-verify). Resolving main from the project root is
@@ -870,9 +932,9 @@ Never escalate-merge a failed or timed-out build."""
 _UTILIZATION_RUBRIC = """\
 --- lane utilization rubric ---
 Route work to the idle lanes above before proposing `stop`: dispatch/steer for a
-live agent lane, `build` for a worktree lane — highest open-backlog first.
+live agent lane, `build` for a worktree lane — highest routable-backlog first.
 Fill AT MOST max_dispatches_per_cycle idle lanes per cycle (the fan-out cap); the
-rest next cycle. Never leave a lane idle while it has open backlog.
+rest next cycle. Never leave a lane idle while it has routable backlog.
 `stop` is valid only when no idle lane has routable backlog. Never target coord."""
 
 
@@ -880,49 +942,69 @@ def _lane_utilization_lines(
     snap: EngineSnapshot, paths: SessionPaths, config: EngineConfig | None
 ) -> list[str]:
     """Idle-lane inventory, config-gated by target_lane_utilization > 0: every
-    non-coord lane that is NOT busy AND has open backlog, so the brain routes work
+    non-coord lane that is NOT busy AND has routable backlog, so the brain routes work
     there instead of sitting idle. Returns [] (byte-identical prompt) when the knob
     is off or no idle lane has routable backlog — mirrors _verify_drive_lines."""
     if config is None or getattr(config, "target_lane_utilization", 0.0) <= 0:
         return []
-    open_backlog = _open_backlog_by_loop(paths)
-    if not open_backlog:
+    candidates = _idle_lane_candidates(snap, paths)
+    if not candidates:
         return []
-    lanes = _routable_idle_lanes(snap, paths, config, open_backlog=open_backlog)
+    routable_backlog = _routable_backlog_by_loop(paths, loop_filter=candidates)
+    lanes = _routable_idle_lanes(
+        snap, paths, config, routable_backlog=routable_backlog, candidates=candidates
+    )
     lines: list[str] = []
     for name in lanes:
         info = snap.lanes.get(name) or {}
-        tasks = open_backlog.get(name)
+        tasks = routable_backlog.get(name)
+        if not tasks:
+            continue
         lines.append(
             f"- lane={name} status={info.get('status') or 'unknown'} "
-            f"kind={info.get('kind') or '?'} open-backlog={','.join(tasks)}"
+            f"kind={info.get('kind') or 'headless-worktree'} "
+            f"routable-backlog={','.join(tasks)}"
         )
     if not lines:
         return []
     return ["--- idle lanes (route work here before stop) ---", *lines]
 
 
+def _idle_lane_candidates(snap: EngineSnapshot, paths: SessionPaths) -> set[str]:
+    live_candidates = {
+        name
+        for name in snap.lanes
+        if name != "coord" and (snap.lanes.get(name) or {}).get("status") not in _BUSY_LANE_STATES
+    }
+    worktree_candidates = {
+        name
+        for name in _ledger_worktree_lanes(paths)
+        if name != "coord" and (snap.lanes.get(name) or {}).get("status") not in _BUSY_LANE_STATES
+    }
+    return live_candidates | worktree_candidates
+
+
 def _routable_idle_lanes(
     snap: EngineSnapshot,
     paths: SessionPaths,
     config: EngineConfig | None,
-    open_backlog: dict[str, list[str]] | None = None,
+    routable_backlog: dict[str, list[str]] | None = None,
+    candidates: set[str] | None = None,
 ) -> list[str]:
     if config is None or getattr(config, "target_lane_utilization", 0.0) <= 0:
         return []
-    candidates = [
-        name
-        for name in sorted(snap.lanes)
-        if name != "coord" and (snap.lanes.get(name) or {}).get("status") not in _BUSY_LANE_STATES
-    ]
+    if candidates is None:
+        candidates = _idle_lane_candidates(snap, paths)
     if not candidates:
         return []
-    if open_backlog is None:
-        open_backlog = _open_backlog_by_loop(paths)
-    if not open_backlog:
+    if routable_backlog is None:
+        routable_backlog = _routable_backlog_by_loop(paths, loop_filter=candidates)
+    if not routable_backlog:
         return []
     in_flight_windows = _drive_in_flight_windows(paths)
-    return [name for name in candidates if open_backlog.get(name) and name not in in_flight_windows]
+    return sorted(
+        name for name in candidates if routable_backlog.get(name) and name not in in_flight_windows
+    )
 
 
 def _roster_lines(roster: dict[str, dict], config: EngineConfig) -> list[str]:

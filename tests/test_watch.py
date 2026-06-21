@@ -88,11 +88,15 @@ def _cycle_triggers(project: Path) -> list[dict]:
     return [e for e in _events(project) if e["event"] == "cycle-trigger"]
 
 
-def _seed_loop_task(paths: SessionPaths, task_id: str, loop: str) -> None:
+def _seed_loop_task(
+    paths: SessionPaths, task_id: str, loop: str, status: str = "open", depends_on=None
+) -> None:
     paths.tasks_dir.mkdir(parents=True, exist_ok=True)
+    depends_on = [] if depends_on is None else depends_on
+    deps = ", ".join(depends_on)
     (paths.tasks_dir / f"{task_id}-x.md").write_text(
-        f"---\nid: {task_id}\ntitle: x\nstatus: open\n"
-        f"loop: {loop}\ndepends_on: []\nscope: src\n---\n",
+        f"---\nid: {task_id}\ntitle: x\nstatus: {status}\n"
+        f"loop: {loop}\ndepends_on: [{deps}]\nscope: src\n---\n",
         encoding="utf-8",
     )
 
@@ -251,9 +255,7 @@ def test_lane_transition_tick_triggers(project, cycle_recorder, monkeypatch):
     assert triggers[-1]["reasons"] == ["lane-transition:web:errored"]
 
 
-def test_idle_routable_lane_retriggers_after_transition_debounce(
-    project, cycle_recorder, monkeypatch
-):
+def test_idle_routable_lane_no_progress_suppresses_retrigger(project, cycle_recorder, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     _seed_loop_task(paths, "T7001", "web")
@@ -276,7 +278,43 @@ def test_idle_routable_lane_retriggers_after_transition_debounce(
 
     w.tick(NOW + 121)
 
-    assert len(cycle_recorder) == 2
+    assert len(cycle_recorder) == 1
+    kinds = [event["event"] for event in _events(project)]
+    assert "lane-utilization-no-progress" in kinds
+    skips = [event for event in _events(project) if event["event"] == "cycle-skip"]
+    assert skips[-1]["reason"] == "lane-utilization-no-progress"
+
+
+def test_unroutable_idle_backlog_does_not_trigger_utilization(project, cycle_recorder, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    _seed_loop_task(paths, "T7001", "web", depends_on=["T7000"])
+    _seed_loop_task(paths, "T7002", "ops", status="in-progress")
+    monkeypatch.setenv("FAKE_LANE_STATUS_OVERRIDE", "web=idle,ops=idle")
+    w = _watch(project, target_lane_utilization=1.0, min_cycle_interval_s=120)
+    w._prev_snapshot = w.observer.snapshot().to_dict()
+    w._last_cycle_start = NOW - 200
+
+    w.tick(NOW)
+
+    assert cycle_recorder == []
+    assert _cycle_triggers(project) == []
+
+
+def test_headless_worktree_backlog_triggers_utilization(project, cycle_recorder):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    paths.state_file.write_text(
+        json.dumps({"loops": {"code2": {"branch": "loop/demo/code2"}}}), encoding="utf-8"
+    )
+    _seed_loop_task(paths, "T7001", "code2")
+    w = _watch(project, target_lane_utilization=1.0, min_cycle_interval_s=120)
+    w._prev_snapshot = w.observer.snapshot().to_dict()
+    w._last_cycle_start = NOW - 200
+
+    w.tick(NOW)
+
+    assert len(cycle_recorder) == 1
     assert _cycle_triggers(project)[-1]["reasons"] == ["lane-utilization-pending"]
 
 
