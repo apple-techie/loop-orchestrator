@@ -198,6 +198,59 @@ def test_full_mode_still_surfaces_escalate(project, call_log, monkeypatch):
     assert doc["actions"][0]["status"] == "awaiting-approval"
 
 
+def test_run_once_merge_ready_escalate_dedups_post_resolve(project, monkeypatch):
+    """End-to-end (run_once + full decision lifecycle): a merge-ready lane escalates
+    `merge` ONCE; after the human resolves it (the post-resolve gap, lane unchanged)
+    the next full cycle must NOT re-surface verify-passed and must NOT re-escalate.
+    This is the phantom's real-cycle proof (T0068 P1) — the gap the prompt-level units
+    can miss. The stub brain follows the rubric: it escalates iff handed verify-passed."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "tip-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    EventLog(paths.events_path).append(
+        "verify-passed", window="web", branch="loop/demo/web",
+        branch_head="tip-sha", overall="pass", findings=0,
+    )
+    _merge_ready_web(monkeypatch)
+
+    prompts: list[str] = []
+
+    def fake_invoke(self, prompt):
+        prompts.append(prompt)
+        if "event=verify-passed" in prompt:
+            return (
+                "```decision\nversion: 1\ncritique: web is verified and ahead of main\n"
+                "actions:\n  - kind: escalate\n"
+                "    summary: merge loop/demo/web - verified, 0 findings\n"
+                "    rationale: verify-passed and mergeable\n```"
+            )
+        return (
+            "```decision\nversion: 1\ncritique: nothing actionable this cycle\n"
+            "actions:\n  - kind: stop\n    rationale: no pending drive signals\n```"
+        )
+
+    monkeypatch.setattr(loop_mod.Brain, "invoke", fake_invoke)
+
+    # cycle 1: brain is handed verify-passed -> escalates -> pending decision created
+    assert run_once(project, "demo", EngineConfig()) == 0
+    doc = decisions.get(paths)
+    assert doc is not None and doc["actions"][0]["kind"] == "escalate"
+    assert "event=verify-passed" in prompts[0]
+    assert len([e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]) == 1
+
+    # human resolves (reject) -> clears the pending file; lane state UNCHANGED (the gap)
+    assert cli.main(["--project-root", str(project), "--session", "demo", "reject", doc["id"]]) == 0
+    assert not paths.pending_decision_path.exists()
+
+    # cycle 2 (the resolve gap): the merge signal must be deduped -> brain proposes stop
+    assert run_once(project, "demo", EngineConfig()) == 0
+    assert "event=verify-passed" not in prompts[1]  # deduped out of the prompt
+    after = decisions.get(paths)
+    assert after is None or after["actions"][0]["kind"] != "escalate"  # no re-escalate
+    assert len([e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]) == 1
+
+
 def test_capped_failed_fix_round_rewrites_build_to_escalate(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
@@ -1694,6 +1747,152 @@ def test_prompt_verify_drive_keeps_current_ahead_verified_pass(project, monkeypa
 
     assert prompt.count("window=web event=verify-passed") == 1
     assert not any(event["event"] == "drive-already-landed" for event in _events(paths))
+
+
+def _merge_ready_web(monkeypatch):
+    """Stub substrate so lane 'web' (branch loop/demo/web) reads genuinely AHEAD of
+    main (verified, mergeable, NOT landed) — the only un-suppressed verify-passed path."""
+    monkeypatch.setattr(
+        Substrate, "branch_head",
+        lambda self, _wt, branch: "base-sha" if branch == "main" else "tip-sha",
+    )
+    monkeypatch.setattr(
+        Substrate, "is_ancestor",
+        lambda self, _wt, ancestor, ref: (ancestor, ref) == ("main", "loop/demo/web"),
+    )
+
+
+def test_prompt_verify_drive_merge_ready_dedups_across_cycles(project, monkeypatch):
+    """A verified lane genuinely ahead of main is mergeable -> surface the merge
+    escalate signal ONCE; an unchanged next cycle must dedup it. The phantom (T0068
+    P1) was re-escalating `merge <branch>` every cycle in auto-mode / the post-resolve
+    gap. The merge signal itself must still surface the first time (NOT inverted)."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "tip-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append(
+        "verify-passed", window="web", branch="loop/demo/web",
+        branch_head="tip-sha", overall="pass", findings=0,
+    )
+    _merge_ready_web(monkeypatch)
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+    p1 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n", events=events)
+    p2 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n", events=events)
+    assert p1.count("window=web event=verify-passed") == 1  # surfaced once
+    assert p2.count("window=web event=verify-passed") == 0  # deduped on the unchanged repeat
+    surfaced = [e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]
+    assert len(surfaced) == 1
+    assert surfaced[0]["window"] == "web" and surfaced[0]["signal_kind"] == "merge"
+
+
+def test_prompt_verify_drive_escalate_dedup_rearms_on_new_verify(project, monkeypatch):
+    """Dedup re-arms when the lane genuinely advances: a fresh verify (new seq)
+    re-surfaces the merge signal so a re-verified lane is escalated again."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "tip-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append(
+        "verify-passed", window="web", branch="loop/demo/web",
+        branch_head="tip-sha", overall="pass", findings=0,
+    )
+    _merge_ready_web(monkeypatch)
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+    _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n", events=events)
+    # a new verify cycle (new seq) on the still-mergeable lane -> re-arm
+    events.append(
+        "verify-passed", window="web", branch="loop/demo/web",
+        branch_head="tip-sha", overall="pass", findings=0,
+    )
+    p2 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n", events=events)
+    assert p2.count("window=web event=verify-passed") == 1  # re-surfaced after a fresh verify
+    surfaced = [e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]
+    assert len(surfaced) == 2
+
+
+def test_prompt_verify_drive_dedups_cap_signal_across_cycles(project):
+    """A fix-round-cap escalate ('needs human review') also dedups across cycles."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    for findings in (9, 12, 12):
+        events.append(
+            "verify-failed", window="flaky", branch="loop/demo/flaky", overall="fail",
+            findings=findings,
+        )
+    snap = _prompt_snap({"flaky": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+    cfg = EngineConfig(max_fix_rounds=2)
+    sub = _sub(project)
+    p1 = _assemble_prompt(sub, snap, paths, config=cfg, checkpoint_body="# B\n", events=events)
+    p2 = _assemble_prompt(sub, snap, paths, config=cfg, checkpoint_body="# B\n", events=events)
+    assert "fix-round cap tripped:" in p1
+    assert "fix-round cap tripped:" not in p2  # deduped on the unchanged repeat
+    surfaced = [e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]
+    assert len(surfaced) == 1 and surfaced[0]["signal_kind"] == "cap"
+
+
+def test_prompt_verify_drive_dedups_stale_signal_across_cycles(project):
+    """A verify-stale rebase escalate also dedups across cycles."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"flaky": {"branch": "loop/demo/flaky"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append(
+        "verify-stale", window="flaky", branch="loop/demo/flaky", overall="stale", findings=0
+    )
+    snap = _prompt_snap({"flaky": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+    p1 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# B\n", events=events)
+    p2 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# B\n", events=events)
+    assert "event=verify-stale" in p1
+    assert "event=verify-stale" not in p2  # deduped
+    surfaced = [e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]
+    assert len(surfaced) == 1 and surfaced[0]["signal_kind"] == "stale"
+
+
+def test_prompt_verify_drive_no_events_log_surfaces_every_cycle(project, monkeypatch):
+    """events=None (prompt-preview callers) => no memory => no dedup, byte-identical
+    to today: the merge signal surfaces on every call."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "tip-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    EventLog(paths.events_path).append(
+        "verify-passed", window="web", branch="loop/demo/web",
+        branch_head="tip-sha", overall="pass", findings=0,
+    )
+    _merge_ready_web(monkeypatch)
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+    p1 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")  # events=None
+    p2 = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")  # events=None
+    assert p1.count("window=web event=verify-passed") == 1
+    assert p2.count("window=web event=verify-passed") == 1  # no dedup without an events log
+
+
+def test_drive_escalate_surfaced_key_semantics(project):
+    """The dedup key is (window, signal_kind, latest_verify_seq, branch_head): a change
+    in seq, branch_head, OR signal_kind is a distinct (re-armed) signal; events=None
+    never dedups."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    out = {"seq": 7}
+    assert loop_mod._drive_escalate_surfaced(None, "web", "merge", 7, "h1") is False  # no log
+    assert loop_mod._drive_escalate_surfaced(events, "web", "merge", 7, "h1") is False  # none yet
+    loop_mod._append_drive_escalate_surfaced(events, "web", "merge", out, "loop/demo/web", "h1")
+    assert loop_mod._drive_escalate_surfaced(events, "web", "merge", 7, "h1") is True  # same key
+    assert loop_mod._drive_escalate_surfaced(events, "web", "merge", 8, "h1") is False  # new seq
+    assert loop_mod._drive_escalate_surfaced(events, "web", "merge", 7, "h2") is False  # new head
+    assert loop_mod._drive_escalate_surfaced(events, "web", "cap", 7, "h1") is False  # other signal
+    assert loop_mod._drive_escalate_surfaced(events, "x", "merge", 7, "h1") is False  # other lane
+    # _append is idempotent for an unchanged key
+    loop_mod._append_drive_escalate_surfaced(events, "web", "merge", out, "loop/demo/web", "h1")
+    assert len([e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]) == 1
 
 
 def test_prompt_verify_drive_suppresses_passed_outcome_when_branch_stale(project, monkeypatch):

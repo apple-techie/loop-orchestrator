@@ -944,6 +944,60 @@ def _append_drive_already_landed(
     )
 
 
+def _drive_escalate_surfaced(
+    events: EventLog | None,
+    window: str,
+    signal_kind: str,
+    latest_verify_seq: object,
+    branch_head: object,
+) -> bool:
+    """True when an escalate-class drive signal (merge / cap / stale) for this
+    (window, signal_kind, latest_verify_seq, branch_head) was already surfaced to
+    the brain in a prior cycle — so it must not re-surface and re-escalate. The
+    key re-arms automatically: a new verify (seq changes) or an advanced branch
+    (branch_head changes) is a fresh signal. Mirrors _drive_already_landed_reported.
+    events is None (prompt-preview callers) => no memory => no dedup (surface)."""
+    if events is None:
+        return False
+    for event in reversed(events.read_all()):
+        if event.get("event") != "drive-escalate-surfaced" or event.get("window") != window:
+            continue
+        if event.get("signal_kind") != signal_kind:
+            continue
+        return (
+            event.get("latest_verify_seq") == latest_verify_seq
+            and event.get("branch_head") == branch_head
+        )
+    return False
+
+
+def _append_drive_escalate_surfaced(
+    events: EventLog | None,
+    window: str,
+    signal_kind: str,
+    outcome: dict,
+    branch: object,
+    branch_head: object,
+) -> None:
+    """Record that an escalate-class drive signal was surfaced to the brain this
+    cycle, so the next unchanged cycle dedups it. No-op when events is None
+    (prompt-preview) or when this exact signal was already recorded. Mirrors
+    _append_drive_already_landed."""
+    if events is None:
+        return
+    latest_verify_seq = outcome.get("seq")
+    if _drive_escalate_surfaced(events, window, signal_kind, latest_verify_seq, branch_head):
+        return
+    events.append(
+        "drive-escalate-surfaced",
+        window=window,
+        signal_kind=signal_kind,
+        branch=branch,
+        branch_head=branch_head,
+        latest_verify_seq=latest_verify_seq,
+    )
+
+
 def _landed_verify_pass(
     substrate: Substrate,
     paths: SessionPaths,
@@ -1149,30 +1203,55 @@ def _verify_drive_lines(
                 f"pre_build_sha={outcome.get('pre_build_sha') or '(unknown)'} "
                 f"branch_head={outcome.get('branch_head') or '(unknown)'}"
             )
-    if capped_outcomes:
+    cap_lines: list[str] = []
+    for outcome in capped_outcomes:
+        window = str(outcome["window"])
+        branch = actions_mod._predecessor_branch(paths, window)
+        hit = cap_hits[window]
+        branch_head = outcome.get("branch_head") or outcome.get("tip_sha")
+        # cap tripped -> escalate "needs human review"; dedup across cycles so a
+        # stuck lane escalates once, not every cycle (the application-layer
+        # _fix_round_cap_already_reported guards the action, this guards the prompt).
+        if _drive_escalate_surfaced(events, window, "cap", outcome.get("seq"), branch_head):
+            continue
+        cap_lines.append(
+            f"- window={window} branch={branch or '(unknown)'} "
+            f"fix_rounds={hit['rounds']} max_fix_rounds={hit['max']} "
+            f"latest_event={hit['event']} findings={hit['findings']} needs human review"
+        )
+        _append_drive_escalate_surfaced(events, window, "cap", outcome, branch, branch_head)
+    if cap_lines:
         lines.append("fix-round cap tripped:")
-        for outcome in capped_outcomes:
-            window = str(outcome["window"])
-            branch = actions_mod._predecessor_branch(paths, window)
-            hit = cap_hits[window]
-            lines.append(
-                f"- window={window} branch={branch or '(unknown)'} "
-                f"fix_rounds={hit['rounds']} max_fix_rounds={hit['max']} "
-                f"latest_event={hit['event']} findings={hit['findings']} needs human review"
+        lines.extend(cap_lines)
+    outcome_lines: list[str] = []
+    for outcome in outcomes:
+        window = str(outcome["window"])
+        branch = actions_mod._predecessor_branch(paths, window)
+        event = outcome.get("event")
+        overall = outcome.get("overall")
+        if event == "verify-timeout" and not overall:
+            overall = "timeout"
+        # verify-passed (merge-ready by construction here) and verify-stale each
+        # drive an `escalate` (merge / rebase) -> dedup across cycles. verify-failed
+        # /-timeout drive a cheap in-flight-guarded `build`, so they re-propose freely.
+        signal_kind = {"verify-passed": "merge", "verify-stale": "stale"}.get(event)
+        branch_head = outcome.get("branch_head") or outcome.get("tip_sha")
+        if signal_kind is not None and _drive_escalate_surfaced(
+            events, window, signal_kind, outcome.get("seq"), branch_head
+        ):
+            continue
+        outcome_lines.append(
+            f"- window={window} event={event} "
+            f"overall={overall or '(unknown)'} findings={outcome.get('findings', '?')} "
+            f"branch={branch or '(unknown)'}"
+        )
+        if signal_kind is not None:
+            _append_drive_escalate_surfaced(
+                events, window, signal_kind, outcome, branch, branch_head
             )
-    if outcomes:
+    if outcome_lines:
         lines.append("recent verify outcomes:")
-        for outcome in outcomes:
-            window = str(outcome["window"])
-            branch = actions_mod._predecessor_branch(paths, window)
-            overall = outcome.get("overall")
-            if outcome.get("event") == "verify-timeout" and not overall:
-                overall = "timeout"
-            lines.append(
-                f"- window={window} event={outcome.get('event')} "
-                f"overall={overall or '(unknown)'} findings={outcome.get('findings', '?')} "
-                f"branch={branch or '(unknown)'}"
-            )
+        lines.extend(outcome_lines)
     if not lines:
         return []
     return ["--- verify drive ---", *lines]
