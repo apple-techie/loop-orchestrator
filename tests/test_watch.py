@@ -1116,3 +1116,54 @@ def test_record_daemon_build_stamps_module_mtime(project):
     assert build["started_at"]
     # a freshly-recorded build is, by construction, NOT stale
     assert watch_mod.stale_daemon_warning(paths) is None
+
+
+def test_stale_warning_ignores_mtime_bump_when_content_unchanged(project, monkeypatch, tmp_path):
+    """A `uv tool install --reinstall` (for THIS session or a sibling sharing the
+    single installed copy) bumps the installed module's mtime without changing its
+    bytes; the daemon's loaded code is identical, so it must NOT be flagged stale.
+    Staleness is a CONTENT question, not an mtime question — the mtime proxy gave
+    false positives that made loop-restart's readiness gate flap and convinced us
+    'fresh code never runs' (T0068 P0)."""
+    from loop_orchestrator.engine import gate as gate_mod
+
+    module = tmp_path / "gate.py"
+    module.write_bytes(b"print('v1')\n")
+    monkeypatch.setattr(gate_mod, "__file__", str(module))
+
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    watch_mod.record_daemon_build(paths, pid=os.getpid())
+    assert watch_mod.stale_daemon_warning(paths) is None  # fresh boot
+
+    # reinstall touches the file forward in time but writes identical bytes
+    st = module.stat()
+    bump = st.st_mtime_ns + 10_000_000_000
+    os.utime(module, ns=(bump, bump))
+    assert watch_mod.stale_daemon_warning(paths) is None  # same content -> NOT stale
+
+    # a genuine code change DOES still flag stale
+    module.write_bytes(b"print('v2')\n")
+    assert watch_mod.stale_daemon_warning(paths) is not None
+
+
+def test_stale_warning_back_compat_mtime_only_record(project, monkeypatch, tmp_path):
+    """Records written before the content-hash upgrade carry only module_mtime_ns;
+    they must still fall back to the mtime comparison (no crash, no silent miss)."""
+    import json as _json
+
+    from loop_orchestrator.engine import gate as gate_mod
+
+    module = tmp_path / "gate.py"
+    module.write_bytes(b"code\n")
+    monkeypatch.setattr(gate_mod, "__file__", str(module))
+
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    current = os.stat(module).st_mtime_ns
+    # legacy record: mtime older than on-disk, NO module_sha256
+    paths.daemon_build_path.write_text(
+        _json.dumps({"pid": os.getpid(), "module_mtime_ns": current - 10_000_000_000}),
+        encoding="utf-8",
+    )
+    assert watch_mod.stale_daemon_warning(paths) is not None  # legacy mtime path still fires

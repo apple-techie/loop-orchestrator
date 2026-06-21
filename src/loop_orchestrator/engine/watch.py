@@ -11,6 +11,7 @@ Substrate wrappers and cycles run in-process.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -34,38 +35,88 @@ from .observe import Observer, delta
 
 
 def _module_build_mtime_ns() -> int | None:
-    """mtime of the loaded gate.py — the code-of-record for the daemon. A
-    reinstall touches this file; the stale-daemon guard compares the on-disk
-    mtime to the one a running daemon recorded at boot."""
+    """mtime of the loaded gate.py — the code-of-record for the daemon. Kept as a
+    human-readable hint in the build stamp; staleness itself is decided by
+    content (see _module_build_sha256), because mtime moves on every reinstall
+    even when the bytes are identical."""
     source = getattr(gate_mod, "__file__", None)
     if not source:
         return None
     return _mtime_ns(Path(source))
 
 
+def _engine_code_sha256() -> str | None:
+    """sha256 digest over ALL *.py in the installed engine package — the
+    code-of-record for the daemon. This is the staleness signal: a daemon runs
+    the bytecode it imported at boot, so "am I stale?" means "do the installed
+    engine bytes differ from what I loaded?", NOT "did a file's mtime move?".
+
+    Two reasons content beats mtime: (1) a `uv tool install --reinstall` (for THIS
+    session OR a sibling sharing the single installed copy) bumps every file's
+    mtime without changing the bytes — a content digest ignores that, so a fresh
+    daemon and untouched siblings stop being flagged stale (T0068 P0). (2) The
+    old single-file (gate.py) check only caught other-file changes by accident,
+    via that global mtime bump; digesting the whole engine package catches a
+    genuine change to watch.py/loop.py/brain.py/etc. on its own merits."""
+    source = getattr(gate_mod, "__file__", None)
+    if not source:
+        return None
+    root = Path(source).parent
+    try:
+        files = sorted(root.rglob("*.py"))
+        digest = hashlib.sha256()
+        for path in files:
+            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+    except OSError:
+        return None
+
+
 def record_daemon_build(paths: SessionPaths, pid: int) -> None:
-    """Stamp daemon-build.json with the loaded module mtime + pid + start time so
-    `status` can detect a daemon running stale code after a reinstall."""
+    """Stamp daemon-build.json with the loaded module content hash (+ mtime/pid/
+    start time) so `status` can detect a daemon running stale code after a
+    reinstall that genuinely changed the code."""
     build = {
         "pid": pid,
         "started_at": utc_now(),
         "module": getattr(gate_mod, "__file__", ""),
         "module_mtime_ns": _module_build_mtime_ns(),
+        "code_sha256": _engine_code_sha256(),
     }
     paths.daemon_build_path.parent.mkdir(parents=True, exist_ok=True)
     paths.daemon_build_path.write_text(json.dumps(build) + "\n", encoding="utf-8")
 
 
 def stale_daemon_warning(paths: SessionPaths) -> str | None:
-    """Warning string when the running daemon's recorded module mtime is OLDER
-    than the on-disk module (a reinstall landed after the daemon started);
-    None when build info is absent, unreadable, or the daemon is current."""
+    """Warning string when the daemon is running code that DIFFERS from what is
+    installed on disk now (a reinstall changed the bytes after the daemon booted);
+    None when build info is absent/unreadable or the daemon is current.
+
+    Staleness is content-based: compare the recorded sha256 of the code-of-record
+    module to the on-disk sha256. Records written before this upgrade carry only
+    module_mtime_ns — those fall back to the legacy mtime comparison so old
+    daemons are still covered."""
     try:
         build = json.loads(paths.daemon_build_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(build, dict):
         return None
+
+    recorded_sha = build.get("code_sha256")
+    current_sha = _engine_code_sha256()
+    if isinstance(recorded_sha, str) and current_sha is not None:
+        if current_sha == recorded_sha:
+            return None
+        return (
+            "daemon is running stale code (installed engine bytes differ from "
+            "the code this daemon loaded at start) — run: loop-engine restart"
+        )
+
+    # Legacy record (no content hash): fall back to the mtime comparison.
     recorded = build.get("module_mtime_ns")
     current = _module_build_mtime_ns()
     if not isinstance(recorded, int) or current is None or current <= recorded:
