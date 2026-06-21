@@ -39,11 +39,16 @@ def _mailbox_stamp(delta: timedelta = timedelta()) -> str:
     return (datetime.now(timezone.utc) + delta).strftime("%Y%m%d-%H%M%S")
 
 
-def _write_events(project: Path, events: list[dict]) -> None:
-    path = project / ".loop" / "sessions" / "demo" / "engine" / "events.jsonl"
+def _write_events(project: Path, events: list[dict], session: str = "demo") -> None:
+    path = project / ".loop" / "sessions" / session / "engine" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         for seq, event in enumerate(events, start=1):
-            record = {"ts": event.pop("ts", _ts()), "seq": seq, **event}
+            record = {
+                "ts": event.get("ts", _ts()),
+                "seq": seq,
+                **{k: v for k, v in event.items() if k != "ts"},
+            }
             fh.write(json.dumps(record) + "\n")
         fh.write("{not json}\n")
 
@@ -63,9 +68,45 @@ def _run_metrics(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_metrics_all(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(SCRIPT), "--project-root", str(project), "--all", *args],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ),
+    )
+
+
+def _write_snapshot(
+    project: Path, session: str, *, checkpoint_tokens: int = 0, lanes: dict[str, str] | None = None
+) -> None:
+    engine = project / ".loop" / "sessions" / session / "engine"
+    engine.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "checkpoint_tokens": checkpoint_tokens,
+        "lanes": {name: {"status": status} for name, status in (lanes or {}).items()},
+    }
+    (engine / "snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+
+def _write_task(project: Path, task_id: str, loop: str, status: str = "open") -> None:
+    tasks = project / "tasks"
+    tasks.mkdir(parents=True, exist_ok=True)
+    (tasks / f"{task_id}-x.md").write_text(
+        f"---\nid: {task_id}\ntitle: x\nstatus: {status}\nloop: {loop}\n"
+        "depends_on: []\nscope: test\n---\n",
+        encoding="utf-8",
+    )
+
+
 def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Path):
     today = _day()
     old = _day(timedelta(days=-9))
+    stamp = _mailbox_stamp()
+    duplicate = f"{stamp}-andrew-to-coord.md"
+    peer = f"{stamp}-web-to-coord.md"
+    reply = f"{stamp}-qa-to-coord.md"
+    coord = f"{stamp}-coord-to-web.md"
     (metrics_project / "ops-wiki" / "log.md").write_text(
         f"## [{today}] ingest | mail\n"
         f"## [{today}] task | T0001 done\n"
@@ -90,6 +131,14 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
             {"event": "action", "kind": "dispatch", "lane": "old", "ts": _ts(timedelta(days=-9))},
             {"event": "ingest-timeout"},
             {"event": "brain-call"},
+            {"event": "ingest-done"},
+            {"event": "lint-dispatch", "ok": True},
+            {"event": "cycle-trigger"},
+            {"event": "mailbox-new", "file": duplicate},
+            {"event": "mailbox-new", "file": duplicate},  # dedupe by file
+            {"event": "mailbox-new", "file": peer},
+            {"event": "mailbox-new", "file": reply},
+            {"event": "mailbox-new", "file": coord},
             {"event": "escalate", "ts": _ts(timedelta(days=-9))},
         ],
     )
@@ -105,13 +154,11 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
         + "\n",
         encoding="utf-8",
     )
-    stamp = _mailbox_stamp()
-    duplicate = f"{stamp}-andrew-to-coord.md"
     _write_mail(metrics_project, "", duplicate, "ship the next unit")
     _write_mail(metrics_project, "processed", duplicate, "ship the next unit")
-    _write_mail(metrics_project, "processed", f"{stamp}-web-to-coord.md", "prove the gate")
-    _write_mail(metrics_project, "processed", f"{stamp}-qa-to-coord.md", "re : d-1-0")
-    _write_mail(metrics_project, "processed", f"{stamp}-coord-to-web.md", "go validate")
+    _write_mail(metrics_project, "processed", peer, "prove the gate")
+    _write_mail(metrics_project, "processed", reply, "re : d-1-0")
+    _write_mail(metrics_project, "processed", coord, "go validate")
 
     result = _run_metrics(metrics_project, "--log")
 
@@ -127,12 +174,17 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
     assert "brain_calls_7d:                  1" in result.stdout
     assert 'dispatches_per_lane_7d:          {"my_lane":1,"validate":1,"web":2}' in result.stdout
     assert "distinct_lanes_used_7d:          3" in result.stdout
+    assert "ingests_7d:        1" in result.stdout
+    assert "lints_7d:          1" in result.stdout
+    assert "checkpoints_7d:    1" in result.stdout
     log = (metrics_project / "ops-wiki" / "log.md").read_text(encoding="utf-8")
     assert "autonomy=0.50(2/4)" in log
     assert "interventions_per_shipped=2.00(4/2)" in log
     assert "escalations7d=1" in log
     assert 'dispatches_per_lane7d={"my_lane":1,"validate":1,"web":2}' in log
     assert "distinct_lanes_used7d=3" in log
+    assert "ingests7d=1" in log
+    assert "lints7d=1" in log
 
 
 def test_loop_metrics_missing_events_jsonl_degrades_to_zero(metrics_project: Path):
@@ -153,3 +205,77 @@ def test_loop_metrics_missing_events_jsonl_degrades_to_zero(metrics_project: Pat
     assert "dispatches_per_lane_7d:          {}" in result.stdout
     assert "distinct_lanes_used_7d:          0" in result.stdout
     assert "no events.jsonl for session 'demo'" in result.stdout
+
+
+def test_loop_metrics_empty_events_do_not_bleed_repo_level_counts(metrics_project: Path):
+    today = _day()
+    stamp = _mailbox_stamp()
+    (metrics_project / "ops-wiki" / "log.md").write_text(
+        f"## [{today}] ingest | old shared ingest\n## [{today}] lint | old shared lint\n",
+        encoding="utf-8",
+    )
+    (metrics_project / "ops-wiki" / "checkpoint.md").write_text("x" * 4000, encoding="utf-8")
+    _write_mail(
+        metrics_project,
+        "processed",
+        f"{stamp}-andrew-to-coord.md",
+        "repo-level steer that the fresh session never observed",
+    )
+    _write_events(metrics_project, [])
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "checkpoint_tokens: 0" in result.stdout
+    assert "ingests_7d:        0" in result.stdout
+    assert "lints_7d:          0" in result.stdout
+    assert "unsolicited_steers_7d:           0" in result.stdout
+
+
+def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path):
+    metrics_project = tmp_path / "proj"
+    (metrics_project / ".loop" / "messages" / "processed").mkdir(parents=True)
+    (metrics_project / "ops-wiki").mkdir()
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    (metrics_project / ".loop" / "sessions" / "alpha" / "engine").mkdir(parents=True)
+    (metrics_project / ".loop" / "sessions" / "beta" / "engine").mkdir(parents=True)
+    _write_snapshot(metrics_project, "alpha", checkpoint_tokens=20, lanes={"web": "idle"})
+    _write_snapshot(metrics_project, "beta", checkpoint_tokens=40, lanes={"ops": "idle"})
+    _write_task(metrics_project, "T9001", "web")
+    _write_task(metrics_project, "T9002", "ops")
+    _write_events(
+        metrics_project,
+        [
+            {"event": "decision-approved", "decided_by": "engine"},
+            {"event": "brain-call"},
+            {"event": "ingest-done"},
+            {"event": "lint-dispatch", "ok": True},
+            {"event": "cycle-trigger"},
+        ],
+        session="alpha",
+    )
+    _write_events(
+        metrics_project,
+        [
+            {"event": "decision-approved"},
+            {"event": "decision-rejected"},
+            {"event": "escalate"},
+            {"event": "brain-call"},
+        ],
+        session="beta",
+    )
+
+    result = _run_metrics_all(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "SESSION" in result.stdout
+    assert "alpha" in result.stdout
+    assert "beta" in result.stdout
+    assert "fleet aggregate:" in result.stdout
+    assert "sessions:                    2" in result.stdout
+    assert "checkpoint_tokens:           60" in result.stdout
+    assert "autonomy_ratio:              0.33 (1/3)" in result.stdout
+    assert "brain_calls_7d:              2" in result.stdout
+    assert "ingests_7d:                  1" in result.stdout
+    assert "lints_7d:                    1" in result.stdout
+    assert "lanes_idle_with_backlog:     2" in result.stdout
