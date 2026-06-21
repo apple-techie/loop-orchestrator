@@ -945,6 +945,7 @@ def _verify_drive_lines(
 
     ready: list[str] = []
     ready_lanes: set[str] = set()
+    merge_ready_lanes: set[str] = set()
     awaiting: list[str] = []
     for lane in sorted(set(snap.lanes) | branch_lanes):
         info = snap.lanes.get(lane) or {}
@@ -974,6 +975,10 @@ def _verify_drive_lines(
                     f"open-tasks={','.join(tasks)}"
                 )
             continue
+        if head is not None and base_head is not None and head != base_head:
+            worktree = actions_mod._lane_worktree(paths, lane)
+            if substrate.is_ancestor(worktree, "main", branch):
+                merge_ready_lanes.add(lane)
         # Ready-to-verify requires the branch to be AHEAD of base (the at-base
         # case is handled above), so a lane sitting at main never false-reads ready.
         if head is None:
@@ -987,7 +992,10 @@ def _verify_drive_lines(
         ready.append(f"- lane={lane} branch={branch} status={status_label}")
 
     eligible_outcomes = [
-        outcome for outcome in latest_outcomes if str(outcome["window"]) not in ready_lanes
+        outcome
+        for outcome in latest_outcomes
+        if str(outcome["window"]) not in ready_lanes
+        and (outcome.get("event") != "verify-passed" or str(outcome["window"]) in merge_ready_lanes)
     ]
     capped_outcomes = [
         outcome for outcome in eligible_outcomes if str(outcome.get("window")) in cap_hits

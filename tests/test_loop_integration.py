@@ -925,7 +925,7 @@ def test_prompt_unchanged_without_roster(project):
     assert "selection rubric" not in prompt
 
 
-def test_prompt_verify_drive_addendum_and_rubric(project):
+def test_prompt_verify_drive_addendum_and_rubric(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     loops = {
@@ -971,6 +971,12 @@ def test_prompt_verify_drive_addendum_and_rubric(project):
         },
         loops=loops,
     )
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "base-sha" if branch == "main" else "tip-sha",
+    )
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: True)
 
     prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
 
@@ -1565,12 +1571,60 @@ def test_prompt_verify_drive_suppresses_outcome_when_head_has_not_advanced(
     assert "- lane=web branch=loop/demo/web status=idle" not in prompt
 
 
-def test_prompt_verify_drive_suppresses_git_error_with_recent_outcome(project, monkeypatch):
+def test_prompt_verify_drive_suppresses_passed_outcome_when_branch_at_base(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "base-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    EventLog(paths.events_path).append("verify-passed", window="web", overall="pass", findings=0)
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "base-sha")
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: True)
+    snap = _prompt_snap(
+        {"web": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "window=web event=verify-passed" not in prompt
+    assert "ready-to-verify:" not in prompt
+
+
+def test_prompt_verify_drive_suppresses_passed_outcome_when_branch_stale(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "old-tip"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    EventLog(paths.events_path).append("verify-passed", window="web", overall="pass", findings=0)
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "new-base" if branch == "main" else "old-tip",
+    )
+    monkeypatch.setattr(Substrate, "is_ancestor", lambda *a, **k: False)
+    snap = _prompt_snap(
+        {"web": {"status": "idle", "target": "", "kind": "claude"}},
+        loops=loops,
+    )
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
+
+    assert "window=web event=verify-passed" not in prompt
+    assert "ready-to-verify:" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("event", "overall", "visible"),
+    [("verify-passed", "pass", False), ("verify-failed", "fail", True)],
+)
+def test_prompt_verify_drive_handles_git_error_with_recent_outcome(
+    project, monkeypatch, event, overall, visible
+):
     paths = SessionPaths(project, "demo")
     paths.ensure()
     loops = {"web": {"branch": "loop/demo/web"}}
     atomic_write_json(paths.state_file, {"loops": loops})
-    EventLog(paths.events_path).append("verify-passed", window="web", overall="pass", findings=0)
+    EventLog(paths.events_path).append(event, window="web", overall=overall, findings=0)
     monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: None)
     snap = _prompt_snap(
         {"web": {"status": "idle", "target": "", "kind": "claude"}},
@@ -1580,7 +1634,8 @@ def test_prompt_verify_drive_suppresses_git_error_with_recent_outcome(project, m
     prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n")
 
     assert "ready-to-verify:" not in prompt
-    assert "window=web event=verify-passed overall=pass findings=0 branch=loop/demo/web" in prompt
+    needle = f"window=web event={event} overall={overall} findings=0 branch=loop/demo/web"
+    assert (needle in prompt) is visible
 
 
 def test_prompt_verify_drive_suppression_uses_full_outcome_tail_not_display_cap(
