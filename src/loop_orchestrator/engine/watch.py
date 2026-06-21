@@ -583,7 +583,11 @@ class Watch:
                     for action in actions
                 ):
                     return True
-                return True
+                # A pending decision that does NOT route the candidate idle lane
+                # (e.g. stop / a coord-only action) is NOT progress for that lane —
+                # return False so the no-progress latch can engage instead of waking
+                # the brain every cycle (was an erroneous `return True`).
+                return False
         for event in self.events.tail(200):
             seq = event.get("seq")
             if not isinstance(seq, int) or seq <= trigger_seq:
