@@ -67,6 +67,8 @@ _TOKEN_FIELDS = (
 def _nonnegative_int(value) -> int | None:
     if type(value) is int and value >= 0:
         return value
+    if type(value) is float and value >= 0 and value.is_integer():
+        return int(value)
     return None
 
 
@@ -90,28 +92,52 @@ def _usage_fields(usage: object) -> dict[str, int] | None:
     return out
 
 
-def _model_usage_cost(obj: dict) -> float | None:
+def _model_usage_cost(obj: dict) -> tuple[float | None, str | None]:
     model_usage = obj.get("modelUsage")
     if not isinstance(model_usage, dict):
-        return None
+        return None, None
     total = 0.0
     seen = False
     for value in model_usage.values():
         if not isinstance(value, dict):
             continue
         cost = _nonnegative_float(value.get("costUSD"))
+        if cost is None:
+            return None, "unpriced"
+        total += cost
+        seen = True
+    return (total, "provider") if seen else (None, None)
+
+
+def _result_cost(obj: dict, usage: dict[str, int] | None) -> tuple[float | None, str]:
+    model_usage = obj.get("modelUsage")
+    cost = _nonnegative_float(obj.get("total_cost_usd"))
+    usage_tokens = usage.get("total_tokens", 0) if usage is not None else 0
+    if isinstance(model_usage, dict) and model_usage:
+        model_cost, source = _model_usage_cost(obj)
+        if source == "unpriced":
+            return None, "unpriced"
         if cost is not None:
-            total += cost
-            seen = True
-    return total if seen else None
+            if cost == 0 and usage_tokens > 0:
+                return None, "unpriced"
+            return cost, "provider"
+        if model_cost is not None:
+            if model_cost == 0 and usage_tokens > 0:
+                return None, "unpriced"
+            return model_cost, "provider"
+    if cost is not None:
+        if cost == 0 and usage_tokens > 0:
+            return None, "unpriced"
+        return cost, "provider"
+    return None, "unpriced" if usage is not None else "unavailable"
 
 
 def _model_from_usage(obj: dict) -> str | None:
     model_usage = obj.get("modelUsage")
-    if isinstance(model_usage, dict) and len(model_usage) == 1:
-        model = next(iter(model_usage))
-        if isinstance(model, str) and model:
-            return model
+    if isinstance(model_usage, dict):
+        models = sorted(model for model in model_usage if isinstance(model, str) and model)
+        if models:
+            return ",".join(models)
     return None
 
 
@@ -235,6 +261,7 @@ class StreamRenderer:
         self.model: str | None = None
         self.usage: dict[str, int] | None = None
         self.cost_usd: float | None = None
+        self.cost_source: str = "unavailable"
 
     def feed(self, text: str) -> str:
         self._buf += text
@@ -304,11 +331,9 @@ class StreamRenderer:
             model = _model_from_usage(obj)
             if model is not None:
                 self.model = model
-            cost = _nonnegative_float(obj.get("total_cost_usd"))
-            if cost is None:
-                cost = _model_usage_cost(obj)
-            if cost is not None:
-                self.cost_usd = cost
+            cost, source = _result_cost(obj, usage)
+            self.cost_source = source
+            self.cost_usd = cost
             return f"=== result: {subtype or '?'} ===\n"
         return ""  # hooks, thinking_tokens, tool results, rate limits: noise
 
@@ -407,17 +432,25 @@ def _emit_brain_usage(
     events: EventLog,
     renderer: StreamRenderer | None,
     call_fields: dict,
+    *,
+    attempt: int | None = None,
+    attempt_status: str | None = None,
 ) -> None:
     harness = call_fields.get("harness")
+    attempt_fields = {}
+    if attempt is not None:
+        attempt_fields["attempt"] = attempt
+    if attempt_status is not None:
+        attempt_fields["attempt_status"] = attempt_status
     if renderer is not None and renderer.usage is not None:
-        cost_usd = renderer.cost_usd
         events.append(
             "brain-usage",
             harness=harness,
             model=renderer.model,
             usage_source="stream-json",
-            cost_source="provider" if cost_usd is not None else "unavailable",
-            cost_usd=cost_usd,
+            cost_source=renderer.cost_source,
+            cost_usd=renderer.cost_usd,
+            **attempt_fields,
             **renderer.usage,
         )
         return
@@ -433,6 +466,7 @@ def _emit_brain_usage(
         cache_read_input_tokens=None,
         total_tokens=None,
         cost_usd=None,
+        **attempt_fields,
     )
 
 
@@ -500,19 +534,47 @@ def run_oneshot(
             if returncode == 0:
                 if renderer is not None:
                     if renderer.result_error is not None:
+                        if kind_prefix == "brain" and renderer.usage is not None:
+                            _emit_brain_usage(
+                                events,
+                                renderer,
+                                call_fields,
+                                attempt=attempt,
+                                attempt_status="failed",
+                            )
                         last_error = renderer.result_error
                         last_failure_kind = "exit"
                         last_excerpt = ""
                     else:
                         result = renderer.result_text or "".join(renderer.assistant_text) or stdout
                         if kind_prefix == "brain":
-                            _emit_brain_usage(events, renderer, call_fields)
+                            _emit_brain_usage(
+                                events,
+                                renderer,
+                                call_fields,
+                                attempt=attempt,
+                                attempt_status="success",
+                            )
                         return result
                 else:
                     if kind_prefix == "brain":
-                        _emit_brain_usage(events, None, call_fields)
+                        _emit_brain_usage(
+                            events,
+                            None,
+                            call_fields,
+                            attempt=attempt,
+                            attempt_status="success",
+                        )
                     return stdout
             else:
+                if kind_prefix == "brain" and renderer is not None and renderer.usage is not None:
+                    _emit_brain_usage(
+                        events,
+                        renderer,
+                        call_fields,
+                        attempt=attempt,
+                        attempt_status="failed",
+                    )
                 stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
                 last_error = f"exit {returncode}: {stderr_text.strip()[:500]}"
                 # stdout carries the model-unavailable notice (F3); the response

@@ -384,6 +384,125 @@ def test_stream_json_reassembly_from_fixture(tmp_path, env, monkeypatch):
     assert usage[0]["cost_usd"] == pytest.approx(0.570531)
 
 
+def test_stream_json_unpriced_usage_is_not_reported_as_zero(tmp_path, env, monkeypatch):
+    paths, events = env
+    stream = tmp_path / "unpriced.stream.jsonl"
+    stream.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "ok",
+                        "total_cost_usd": 0,
+                        "usage": {
+                            "input_tokens": 10.0,
+                            "output_tokens": 5.0,
+                        },
+                        "modelUsage": {
+                            "claude-retired-20260101": {
+                                "inputTokens": 10,
+                                "outputTokens": 5,
+                            }
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script = _script(tmp_path, "claude", f'cat "{stream}"\n')
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(stream=True)), None, paths, events)
+
+    assert brain.invoke("p") == "ok"
+
+    usage = [e for e in events.tail(10) if e["event"] == "brain-usage"]
+    assert len(usage) == 1
+    assert usage[0]["model"] == "claude-retired-20260101"
+    assert usage[0]["cost_source"] == "unpriced"
+    assert usage[0]["cost_usd"] is None
+    assert usage[0]["total_tokens"] == 15
+
+
+def test_stream_json_multi_model_usage_keeps_model_label():
+    renderer = StreamRenderer()
+    renderer.feed(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+                "modelUsage": {
+                    "model-b": {"costUSD": 0.2},
+                    "model-a": {"costUSD": 0.1},
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert renderer.model == "model-a,model-b"
+    assert renderer.cost_source == "provider"
+    assert renderer.cost_usd == pytest.approx(0.3)
+
+
+def test_stream_json_failed_retry_records_attempt_usage(tmp_path, env, monkeypatch):
+    paths, events = env
+    state = tmp_path / "failed-once"
+    script = _script(
+        tmp_path,
+        "claude",
+        "\n".join(
+            [
+                f'if [ ! -f "{state}" ]; then',
+                f'  : > "{state}"',
+                "  cat <<'JSON'",
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "error_max_turns",
+                        "is_error": True,
+                        "result": "too many turns",
+                        "usage": {"input_tokens": 10, "output_tokens": 5},
+                        "modelUsage": {"model-a": {"costUSD": 0.15}},
+                    }
+                ),
+                "JSON",
+                "  exit 0",
+                "fi",
+                "cat <<'JSON'",
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "is_error": False,
+                        "result": "ok",
+                        "usage": {"input_tokens": 20, "output_tokens": 10},
+                        "modelUsage": {"model-a": {"costUSD": 0.3}},
+                    }
+                ),
+                "JSON",
+            ]
+        )
+        + "\n",
+    )
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(stream=True, max_retries=1)), None, paths, events)
+
+    assert brain.invoke("p") == "ok"
+
+    usage = [e for e in events.tail(20) if e["event"] == "brain-usage"]
+    assert [e["attempt_status"] for e in usage] == ["failed", "success"]
+    assert [e["attempt"] for e in usage] == [1, 2]
+    assert [e["total_tokens"] for e in usage] == [15, 30]
+    assert [e["cost_usd"] for e in usage] == [0.15, 0.3]
+
+
 def test_stream_renderer_result_fallback_to_assistant_text():
     renderer = StreamRenderer()
     blocks = [{"type": "text", "text": "A"}]

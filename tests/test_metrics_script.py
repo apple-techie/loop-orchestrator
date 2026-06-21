@@ -199,17 +199,18 @@ def test_loop_metrics_computes_brain_cost_from_usage_events(metrics_project: Pat
     _write_events(
         metrics_project,
         [
+            {"event": "decision-approved", "decided_by": "engine"},
             {"event": "brain-call"},
             {
                 "event": "brain-usage",
                 "model": "claude-fable-5",
                 "usage_source": "stream-json",
                 "cost_source": "provider",
-                "input_tokens": 50,
-                "output_tokens": 10,
-                "cache_creation_input_tokens": 20,
-                "cache_read_input_tokens": 20,
-                "total_tokens": 100,
+                "input_tokens": 50.0,
+                "output_tokens": 10.0,
+                "cache_creation_input_tokens": 20.0,
+                "cache_read_input_tokens": 20.0,
+                "total_tokens": 100.0,
                 "cost_usd": 0.5,
             },
             {"event": "brain-call"},
@@ -235,12 +236,44 @@ def test_loop_metrics_computes_brain_cost_from_usage_events(metrics_project: Pat
     assert "brain_tokens_7d:                 150" in result.stdout
     assert "cost_usd_7d:                     0.750000" in result.stdout
     assert "cost_per_shipped_unit:           0.375000" in result.stdout
-    assert "cost_per_decision:               0.375000" in result.stdout
+    assert "cost_per_decision:               0.750000" in result.stdout
     log = (metrics_project / "ops-wiki" / "log.md").read_text(encoding="utf-8")
     assert "brain_tokens7d=150" in log
     assert "cost_usd7d=0.750000" in log
     assert "brain_cost_per_shipped=0.375000" in log
-    assert "cost_per_decision=0.375000" in log
+    assert "cost_per_decision=0.750000" in log
+
+
+def test_loop_metrics_missing_failed_turn_usage_does_not_null_cost_window(
+    metrics_project: Path,
+):
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [
+            {"event": "decision-approved", "decided_by": "engine"},
+            {"event": "brain-call"},
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": "claude-fable-5",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "total_tokens": 80,
+                "cost_usd": 0.4,
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "brain_calls_7d:                  2" in result.stdout
+    assert "brain_tokens_7d:                 80" in result.stdout
+    assert "cost_usd_7d:                     0.400000" in result.stdout
+    assert "cost_per_decision:               0.400000" in result.stdout
+    assert "1 brain-call event(s) lack brain-usage; skipped missing usage" in result.stdout
+    assert "cost metrics n/a" not in result.stdout
 
 
 def test_loop_metrics_unpriced_usage_does_not_undercount_cost(metrics_project: Path):
@@ -426,6 +459,13 @@ def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path
         [
             {"event": "decision-approved", "decided_by": "engine"},
             {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "total_tokens": 60,
+                "cost_usd": 0.6,
+            },
             {"event": "ingest-done"},
             {"event": "lint-dispatch", "ok": True},
             {"event": "cycle-trigger"},
@@ -439,6 +479,13 @@ def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path
             {"event": "decision-rejected"},
             {"event": "escalate"},
             {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "total_tokens": 30,
+                "cost_usd": 0.3,
+            },
         ],
         session="beta",
     )
@@ -454,6 +501,9 @@ def test_loop_metrics_all_prints_session_rows_and_fleet_aggregate(tmp_path: Path
     assert "checkpoint_tokens:           60" in result.stdout
     assert "autonomy_ratio:              0.33 (1/3)" in result.stdout
     assert "brain_calls_7d:              2" in result.stdout
+    assert "brain_tokens_7d:             90" in result.stdout
+    assert "cost_usd_7d:                 0.900000" in result.stdout
+    assert "cost_per_decision:           0.300000" in result.stdout
     assert "ingests_7d:                  1" in result.stdout
     assert "lints_7d:                    1" in result.stdout
     assert "lanes_idle_with_backlog:     2" in result.stdout

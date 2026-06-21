@@ -36,6 +36,8 @@ brain_tokens_7d, cost_usd_7d, cost_per_shipped_unit, cost_per_decision,
 dispatches_per_lane_7d, distinct_lanes_used_7d, ingests_7d, lints_7d,
 checkpoints_7d, experiments (legacy dispatch counts are n/a).
 Missing inputs degrade to 0/n-a with a note instead of failing.
+cost_per_decision is cost_usd_7d divided by total decision-approved +
+decision-rejected events in the same 7d event window.
 
 Options:
   --all                 Print one row per .loop/sessions/<session> plus a
@@ -416,7 +418,11 @@ def mailbox_file_is_unsolicited_steer(root: Path, name: str, notes: list[str]) -
 
 
 def nonnegative_int(value) -> int | None:
-    return value if type(value) is int and value >= 0 else None
+    if type(value) is int and value >= 0:
+        return value
+    if type(value) is float and value >= 0 and value.is_integer():
+        return int(value)
+    return None
 
 
 def nonnegative_float(value) -> float | None:
@@ -481,10 +487,11 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
     escalations = rejects = stops = ingest_timeouts = brain_calls = 0
     brain_usage_events = 0
     brain_token_total = 0
-    brain_tokens_incomplete = False
+    brain_tokens_skipped = 0
     brain_cost_total = 0.0
     brain_cost_incomplete = False
     unpriced_usage_events = 0
+    unavailable_usage_events = 0
     ingests = lints = 0
     engine_approvals = total_decisions = 0
     dispatches_by_lane: dict[str, int] = {}
@@ -528,14 +535,19 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         elif kind == "brain-usage":
             brain_usage_events += 1
             tokens = usage_total(rec)
-            if tokens is None:
-                brain_tokens_incomplete = True
-            else:
-                brain_token_total += tokens
-            cost = nonnegative_float(rec.get("cost_usd"))
             cost_source = rec.get("cost_source")
+            usage_unavailable = cost_source == "unavailable"
+            if tokens is not None:
+                brain_token_total += tokens
+            elif usage_unavailable:
+                brain_tokens_skipped += 1
+            else:
+                brain_tokens_skipped += 1
+            cost = nonnegative_float(rec.get("cost_usd"))
             if cost is not None:
                 brain_cost_total += cost
+            elif usage_unavailable:
+                unavailable_usage_events += 1
             else:
                 brain_cost_incomplete = True
                 if cost_source == "unpriced" or (
@@ -561,17 +573,21 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         notes.append(f"events.jsonl for session '{session}' skipped {skipped} corrupt line(s)")
     if brain_usage_events < brain_calls:
         missing = brain_calls - brain_usage_events
-        brain_tokens_incomplete = True
-        brain_cost_incomplete = True
-        notes.append(f"{missing} brain-call event(s) lack brain-usage; cost metrics n/a")
+        notes.append(f"{missing} brain-call event(s) lack brain-usage; skipped missing usage")
     if unpriced_usage_events:
         notes.append(f"{unpriced_usage_events} brain-usage event(s) unpriced; cost metrics n/a")
+    if unavailable_usage_events:
+        notes.append(
+            f"{unavailable_usage_events} brain-usage event(s) unavailable; skipped from token/cost totals"
+        )
+    if brain_tokens_skipped:
+        notes.append(f"{brain_tokens_skipped} brain-usage event(s) lacked token totals; skipped tokens")
 
     unsolicited_steers = len(unsolicited_files)
     interventions = escalations + unsolicited_steers + rejects
     autonomy = f"{engine_approvals / total_decisions:.2f}" if total_decisions else "n/a"
     per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
-    brain_tokens = "n/a" if brain_tokens_incomplete else str(brain_token_total)
+    brain_tokens = str(brain_token_total)
     brain_cost = "n/a" if brain_cost_incomplete else fmt_usd(brain_cost_total)
     brain_cost_per_shipped = (
         fmt_usd(brain_cost_total / shipped)
@@ -579,8 +595,8 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         else "n/a"
     )
     brain_cost_per_decision = (
-        fmt_usd(brain_cost_total / brain_calls)
-        if brain_calls and not brain_cost_incomplete
+        fmt_usd(brain_cost_total / total_decisions)
+        if total_decisions and not brain_cost_incomplete
         else "n/a"
     )
     dispatches_json = json.dumps(dispatches_by_lane, sort_keys=True, separators=(",", ":"))
@@ -854,8 +870,8 @@ def print_all(rows: list[Metrics]) -> None:
         fmt_usd(float(brain_cost) / shipped) if shipped and brain_cost != "n/a" else "n/a"
     )
     brain_cost_per_decision = (
-        fmt_usd(float(brain_cost) / brain_calls)
-        if brain_calls and brain_cost != "n/a"
+        fmt_usd(float(brain_cost) / total)
+        if total and brain_cost != "n/a"
         else "n/a"
     )
     active_sessions = {f"{m.root}:{m.session}" for m in rows}
