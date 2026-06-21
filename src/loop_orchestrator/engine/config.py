@@ -128,6 +128,7 @@ class EngineConfig:
     # (byte-identical prompt). Raise destructive.max_dispatches_per_cycle in lockstep
     # when enabling, else fanning to many idle lanes trips the fan-out gate.
     target_lane_utilization: float = 0.0
+    max_fix_rounds: int = 2
     ingest: IngestConfig = field(default_factory=IngestConfig)
     destructive: DestructiveConfig = field(default_factory=DestructiveConfig)
     pm: PmConfig = field(default_factory=PmConfig)

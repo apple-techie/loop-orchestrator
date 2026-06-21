@@ -61,6 +61,9 @@ _SEVERITY_RANK = {"low": 1, "medium": 2, "high": 3, "critical": 4}
 _VERIFY_DRIVE_OUTCOME_EVENTS = frozenset(
     {"verify-passed", "verify-failed", "verify-timeout", "verify-stale"}
 )
+_FIX_ROUND_RESET_EVENTS = frozenset(
+    {"verify-passed", "merge-done", "merge-passed", "escalate-merged", "lane-reset"}
+)
 _VERIFY_DRIVE_EVENT_TAIL = 100
 _VERIFY_DRIVE_OUTCOME_LIMIT = 5
 _VERIFY_DIFF_TIMEOUT_S = 60
@@ -596,6 +599,53 @@ def _latest_verify_outcomes(paths: SessionPaths) -> list[dict]:
     return list(latest_by_window.values())
 
 
+def _configured_max_fix_rounds(config: EngineConfig | None) -> int | None:
+    raw = getattr(config, "max_fix_rounds", None)
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _failed_fix_rounds_by_window(paths: SessionPaths) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for event in EventLog(paths.events_path).tail(_VERIFY_DRIVE_EVENT_TAIL):
+        window = event.get("window")
+        if not isinstance(window, str) or not window:
+            continue
+        kind = event.get("event")
+        if kind in _FIX_ROUND_RESET_EVENTS:
+            counts[window] = 0
+        elif kind == "verify-failed":
+            counts[window] = counts.get(window, 0) + 1
+    return {window: count for window, count in counts.items() if count > 0}
+
+
+def _fix_round_cap_hits(paths: SessionPaths, config: EngineConfig | None) -> dict[str, dict]:
+    max_fix_rounds = _configured_max_fix_rounds(config)
+    if max_fix_rounds is None:
+        return {}
+    failed_rounds = _failed_fix_rounds_by_window(paths)
+    hits: dict[str, dict] = {}
+    for outcome in _latest_verify_outcomes(paths):
+        if outcome.get("event") != "verify-failed":
+            continue
+        window = outcome.get("window")
+        if not isinstance(window, str) or not window:
+            continue
+        rounds = failed_rounds.get(window, 0)
+        if rounds >= max_fix_rounds:
+            hits[window] = {
+                "rounds": rounds,
+                "max": max_fix_rounds,
+                "findings": outcome.get("findings", "?"),
+            }
+    return hits
+
+
 def _latest_build_outcomes(paths: SessionPaths) -> list[dict]:
     latest_by_window: dict[str, dict] = {}
     for event in EventLog(paths.events_path).tail(_BUILD_DRIVE_EVENT_TAIL):
@@ -745,6 +795,7 @@ def _verify_drive_lines(
     substrate: Substrate,
     snap: EngineSnapshot,
     paths: SessionPaths,
+    config: EngineConfig | None = None,
     events: EventLog | None = None,
     emitted_base_unresolved: set[str] | None = None,
 ) -> list[str]:
@@ -754,12 +805,12 @@ def _verify_drive_lines(
     markers = actions_mod.load_verify_markers(paths)
     in_flight_windows = _marker_windows(markers)
     latest_outcomes = _latest_verify_outcomes(paths)
-    outcomes = latest_outcomes[-_VERIFY_DRIVE_OUTCOME_LIMIT:]
     latest_outcome = {
         str(outcome["window"]): outcome
         for outcome in latest_outcomes
         if isinstance(outcome.get("window"), str)
     }
+    cap_hits = _fix_round_cap_hits(paths, config)
 
     # Candidate lanes = the worktree lanes (ledger loops with a branch, T0025) UNION
     # the live tmux lanes. build/verify are HEADLESS (codex exec / loop-verify run
@@ -824,7 +875,16 @@ def _verify_drive_lines(
         ready_lanes.add(lane)
         ready.append(f"- lane={lane} branch={branch} status={status_label}")
 
-    outcomes = [outcome for outcome in outcomes if str(outcome["window"]) not in ready_lanes]
+    eligible_outcomes = [
+        outcome for outcome in latest_outcomes if str(outcome["window"]) not in ready_lanes
+    ]
+    capped_outcomes = [
+        outcome for outcome in eligible_outcomes if str(outcome.get("window")) in cap_hits
+    ]
+    capped_windows = {str(outcome["window"]) for outcome in capped_outcomes}
+    outcomes = [
+        outcome for outcome in eligible_outcomes if str(outcome["window"]) not in capped_windows
+    ][-_VERIFY_DRIVE_OUTCOME_LIMIT:]
 
     lines: list[str] = []
     if awaiting:
@@ -866,6 +926,17 @@ def _verify_drive_lines(
                 f"branch={branch or '(unknown)'} "
                 f"pre_build_sha={outcome.get('pre_build_sha') or '(unknown)'} "
                 f"branch_head={outcome.get('branch_head') or '(unknown)'}"
+            )
+    if capped_outcomes:
+        lines.append("fix-round cap tripped:")
+        for outcome in capped_outcomes:
+            window = str(outcome["window"])
+            branch = actions_mod._predecessor_branch(paths, window)
+            hit = cap_hits[window]
+            lines.append(
+                f"- window={window} branch={branch or '(unknown)'} "
+                f"failed_fix_rounds={hit['rounds']} max_fix_rounds={hit['max']} "
+                f"findings={hit['findings']} needs human review"
             )
     if outcomes:
         lines.append("recent verify outcomes:")
@@ -919,6 +990,8 @@ latest build-timeout -> propose a narrower `build` for that lane.
 latest verify-passed -> propose `escalate` summary: merge <branch> — verified, N findings.
 verify-passed = gate passed + NO high/critical finding (low/medium may remain) = mergeable.
 Escalate a verify-passed lane (note residual low/medium in the summary); do NOT keep fixing it.
+fix-round cap tripped -> propose `escalate` summary: lane <window> verify not
+converging after N rounds, M findings - needs human review; do NOT build again.
 latest verify-failed/verify-timeout -> propose a `build` for that lane with a fix brief.
 latest verify-stale -> the branch is behind main and cannot clean-merge.
 propose `escalate`: rebase <branch> onto main, then re-verify — do NOT merge a stale branch.
@@ -1099,6 +1172,7 @@ def _assemble_prompt(
         substrate,
         snap,
         paths,
+        config=config,
         events=events,
         emitted_base_unresolved=emitted_base_unresolved,
     )
@@ -1361,6 +1435,45 @@ def _persist(paths: SessionPaths, doc: dict) -> None:
         atomic_write_json(paths.pending_decision_path, doc)
 
 
+def _apply_fix_round_cap(
+    parsed: decision_mod.Decision,
+    paths: SessionPaths,
+    config: EngineConfig,
+    events: EventLog,
+) -> decision_mod.Decision:
+    cap_hits = _fix_round_cap_hits(paths, config)
+    if not cap_hits:
+        return parsed
+    actions = []
+    changed = False
+    for action in parsed.actions:
+        if isinstance(action, decision_mod.BuildAction) and action.window in cap_hits:
+            hit = cap_hits[action.window]
+            summary = (
+                f"lane {action.window}: verify not converging after {hit['rounds']} rounds, "
+                f"{hit['findings']} findings - needs human review"
+            )
+            actions.append(
+                decision_mod.EscalateAction(
+                    summary=summary,
+                    rationale="max_fix_rounds cap reached; automated fixes are not converging",
+                )
+            )
+            events.append(
+                "fix-round-cap",
+                window=action.window,
+                failed_fix_rounds=hit["rounds"],
+                max_fix_rounds=hit["max"],
+                findings=hit["findings"],
+            )
+            changed = True
+        else:
+            actions.append(action)
+    if not changed:
+        return parsed
+    return dataclasses.replace(parsed, actions=actions)
+
+
 def _file_needs_human(
     paths: SessionPaths,
     events: EventLog,
@@ -1606,6 +1719,7 @@ def run_once(
                 paths, events, approval, second_error, reply, keep=config.checkpoint.keep_decisions
             )
 
+    parsed = _apply_fix_round_cap(parsed, paths, config, events)
     events.append("decision", id=parsed.id, actions=[a.kind for a in parsed.actions])
     # T0032 (B2) + T0045 defensive stop: a `stop` is honored only when the fleet
     # is genuinely idle AND no new mailbox work arrived after observe.

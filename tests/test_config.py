@@ -21,6 +21,7 @@ def test_defaults_with_no_file(tmp_path):
     assert cfg.destructive.max_dispatches_per_cycle == 4
     assert cfg.destructive.payload_patterns == ["git push --force", "rm -rf", "reset --hard"]
     assert cfg.pm.adapters == []
+    assert cfg.max_fix_rounds == 2
 
 
 def test_engine_section_parsed(tmp_path):
@@ -33,6 +34,7 @@ engine:
     timeout_s: 60
   destructive:
     max_lanes: 5
+  max_fix_rounds: 4
   unknown_key: ignored
 """,
         encoding="utf-8",
@@ -45,6 +47,7 @@ engine:
     assert cfg.destructive.max_lanes == 5
     assert cfg.destructive.max_dispatches_per_cycle == 4  # untouched default
     assert cfg.poll_interval_s == 10
+    assert cfg.max_fix_rounds == 4
 
 
 def test_host_override_replaces_top_level_keys(tmp_path, monkeypatch):
