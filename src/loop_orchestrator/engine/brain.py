@@ -56,6 +56,63 @@ _MODEL_UNAVAILABLE_RE = re.compile(
 # Length-capped excerpt of the stderr tail carried on the failure event so the
 # watch loop (and the miner) can read the reset hint without re-opening files.
 _STDERR_EXCERPT_LEN = 280
+_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _nonnegative_int(value) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    return None
+
+
+def _nonnegative_float(value) -> float | None:
+    if type(value) in {int, float} and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
+def _usage_fields(usage: object) -> dict[str, int] | None:
+    if not isinstance(usage, dict):
+        return None
+    out: dict[str, int] = {}
+    for key in _TOKEN_FIELDS:
+        value = _nonnegative_int(usage.get(key))
+        if value is not None:
+            out[key] = value
+    if not out:
+        return None
+    out["total_tokens"] = sum(out.values())
+    return out
+
+
+def _model_usage_cost(obj: dict) -> float | None:
+    model_usage = obj.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return None
+    total = 0.0
+    seen = False
+    for value in model_usage.values():
+        if not isinstance(value, dict):
+            continue
+        cost = _nonnegative_float(value.get("costUSD"))
+        if cost is not None:
+            total += cost
+            seen = True
+    return total if seen else None
+
+
+def _model_from_usage(obj: dict) -> str | None:
+    model_usage = obj.get("modelUsage")
+    if isinstance(model_usage, dict) and len(model_usage) == 1:
+        model = next(iter(model_usage))
+        if isinstance(model, str) and model:
+            return model
+    return None
 
 
 def classify_failure(stderr: str, stdout: str, timed_out: bool) -> str:
@@ -173,7 +230,11 @@ class StreamRenderer:
     def __init__(self):
         self._buf = ""
         self.result_text: str | None = None
+        self.result_error: str | None = None
         self.assistant_text: list[str] = []
+        self.model: str | None = None
+        self.usage: dict[str, int] | None = None
+        self.cost_usd: float | None = None
 
     def feed(self, text: str) -> str:
         self._buf += text
@@ -199,12 +260,23 @@ class StreamRenderer:
             return ""
         kind = obj.get("type")
         if kind == "system" and obj.get("subtype") == "init":
+            model = obj.get("model")
+            if isinstance(model, str) and model:
+                self.model = model
             return (
                 f"=== {obj.get('model', '?')} session={obj.get('session_id', '?')} "
                 f"cwd={obj.get('cwd', '?')} ===\n"
             )
         if kind == "assistant":
-            content = (obj.get("message") or {}).get("content")
+            message = obj.get("message") or {}
+            if isinstance(message, dict):
+                model = message.get("model")
+                if isinstance(model, str) and model:
+                    self.model = model
+                usage = _usage_fields(message.get("usage"))
+                if usage is not None:
+                    self.usage = usage
+            content = message.get("content") if isinstance(message, dict) else None
             out: list[str] = []
             for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict):
@@ -219,9 +291,25 @@ class StreamRenderer:
                     out.append(_tool_line(block))
             return "".join(out)
         if kind == "result":
+            subtype = obj.get("subtype")
+            if obj.get("is_error") is True or (
+                isinstance(subtype, str) and subtype.startswith("error")
+            ):
+                self.result_error = f"stream-json result error: {subtype or 'error'}"
             if isinstance(obj.get("result"), str):
                 self.result_text = obj["result"]
-            return f"=== result: {obj.get('subtype', '?')} ===\n"
+            usage = _usage_fields(obj.get("usage"))
+            if usage is not None:
+                self.usage = usage
+            model = _model_from_usage(obj)
+            if model is not None:
+                self.model = model
+            cost = _nonnegative_float(obj.get("total_cost_usd"))
+            if cost is None:
+                cost = _model_usage_cost(obj)
+            if cost is not None:
+                self.cost_usd = cost
+            return f"=== result: {subtype or '?'} ===\n"
         return ""  # hooks, thinking_tokens, tool results, rate limits: noise
 
 
@@ -315,6 +403,39 @@ def _read_text(path: Path) -> str:
         return ""
 
 
+def _emit_brain_usage(
+    events: EventLog,
+    renderer: StreamRenderer | None,
+    call_fields: dict,
+) -> None:
+    harness = call_fields.get("harness")
+    if renderer is not None and renderer.usage is not None:
+        cost_usd = renderer.cost_usd
+        events.append(
+            "brain-usage",
+            harness=harness,
+            model=renderer.model,
+            usage_source="stream-json",
+            cost_source="provider" if cost_usd is not None else "unavailable",
+            cost_usd=cost_usd,
+            **renderer.usage,
+        )
+        return
+    events.append(
+        "brain-usage",
+        harness=harness,
+        model=renderer.model if renderer is not None else None,
+        usage_source="unavailable",
+        cost_source="unavailable",
+        input_tokens=None,
+        output_tokens=None,
+        cache_creation_input_tokens=None,
+        cache_read_input_tokens=None,
+        total_tokens=None,
+        cost_usd=None,
+    )
+
+
 def run_oneshot(
     argv: list[str],
     prompt: str,
@@ -378,14 +499,26 @@ def run_oneshot(
         else:
             if returncode == 0:
                 if renderer is not None:
-                    return renderer.result_text or "".join(renderer.assistant_text) or stdout
-                return stdout
-            stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
-            last_error = f"exit {returncode}: {stderr_text.strip()[:500]}"
-            # stdout carries the model-unavailable notice (F3); the response
-            # transcript already holds it, but `stdout` is the authoritative copy.
-            last_failure_kind = classify_failure(stderr_text, stdout, timed_out=False)
-            last_excerpt = _stderr_excerpt(stderr_text)
+                    if renderer.result_error is not None:
+                        last_error = renderer.result_error
+                        last_failure_kind = "exit"
+                        last_excerpt = ""
+                    else:
+                        result = renderer.result_text or "".join(renderer.assistant_text) or stdout
+                        if kind_prefix == "brain":
+                            _emit_brain_usage(events, renderer, call_fields)
+                        return result
+                else:
+                    if kind_prefix == "brain":
+                        _emit_brain_usage(events, None, call_fields)
+                    return stdout
+            else:
+                stderr_text = _read_text(_sibling(response_path, ".stderr.txt"))
+                last_error = f"exit {returncode}: {stderr_text.strip()[:500]}"
+                # stdout carries the model-unavailable notice (F3); the response
+                # transcript already holds it, but `stdout` is the authoritative copy.
+                last_failure_kind = classify_failure(stderr_text, stdout, timed_out=False)
+                last_excerpt = _stderr_excerpt(stderr_text)
         if attempt < attempts:
             events.append(f"{kind_prefix}-retry", attempt=attempt, error=last_error)
     response_path.unlink(missing_ok=True)  # failed runs leave no response transcript

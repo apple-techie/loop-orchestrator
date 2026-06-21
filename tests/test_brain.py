@@ -1,5 +1,5 @@
 """Brain invocation: argv shapes, budget guard, retries, transcripts,
-incremental (live-tailable) writes, timeout kill, stream-json reassembly."""
+incremental (live-tailable) writes, timeout kill, stream-json reassembly/usage."""
 
 from __future__ import annotations
 
@@ -371,6 +371,17 @@ def test_stream_json_reassembly_from_fixture(tmp_path, env, monkeypatch):
     assert "hook_started" not in response  # noise events are not rendered
     raw = next(iter(paths.brain_dir.glob("*.stream.jsonl"))).read_text(encoding="utf-8")
     assert raw == fixture.read_text(encoding="utf-8")  # raw JSONL provenance
+    usage = [e for e in events.tail(10) if e["event"] == "brain-usage"]
+    assert len(usage) == 1
+    assert usage[0]["usage_source"] == "stream-json"
+    assert usage[0]["cost_source"] == "provider"
+    assert usage[0]["model"] == "claude-fable-5"
+    assert usage[0]["input_tokens"] == 13827
+    assert usage[0]["output_tokens"] == 144
+    assert usage[0]["cache_creation_input_tokens"] == 18982
+    assert usage[0]["cache_read_input_tokens"] == 45421
+    assert usage[0]["total_tokens"] == 78374
+    assert usage[0]["cost_usd"] == pytest.approx(0.570531)
 
 
 def test_stream_renderer_result_fallback_to_assistant_text():
@@ -397,6 +408,78 @@ def test_stream_unsupported_harness_warns_and_runs_plain(tmp_path, env, monkeypa
     assert warnings[0]["kind"] == "brain-stream-unsupported"
     assert warnings[0]["harness"] == "hermes"
     assert list(paths.brain_dir.glob("*.stream.jsonl")) == []  # no stream artifacts
+    usage = [e for e in events.tail(10) if e["event"] == "brain-usage"]
+    assert len(usage) == 1
+    assert usage[0]["usage_source"] == "unavailable"
+    assert usage[0]["cost_source"] == "unavailable"
+    assert usage[0]["input_tokens"] is None
+    assert usage[0]["cost_usd"] is None
+
+
+def test_plain_brain_records_unavailable_usage_without_json_flags(tmp_path, env, monkeypatch):
+    paths, events = env
+    argv_file = tmp_path / "argv.txt"
+    script = _script(
+        tmp_path,
+        "claude",
+        f'printf "%s\\n" "$@" > "{argv_file}"\nprintf "plain decision"\n',
+    )
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(), None, paths, events)
+
+    assert brain.invoke("p") == "plain decision"
+
+    argv_text = argv_file.read_text(encoding="utf-8")
+    assert "--output-format" not in argv_text
+    assert "json" not in argv_text
+    assert "--verbose" not in argv_text
+    records = events.tail(10)
+    call = next(e for e in records if e["event"] == "brain-call")
+    usage = next(e for e in records if e["event"] == "brain-usage")
+    assert call["seq"] < usage["seq"]
+    assert usage["usage_source"] == "unavailable"
+    assert usage["cost_source"] == "unavailable"
+    assert usage["total_tokens"] is None
+
+
+def test_stream_json_error_result_raises_not_reply(tmp_path, env, monkeypatch):
+    paths, events = env
+    stream = tmp_path / "error.stream.jsonl"
+    stream.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "system",
+                        "subtype": "init",
+                        "model": "claude-fable-5",
+                        "session_id": "s1",
+                        "cwd": str(paths.project_root),
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": "error_max_turns",
+                        "is_error": True,
+                        "result": "aborted turn",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    script = _script(tmp_path, "claude", f'cat "{stream}"\n')
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", str(script))
+    brain = Brain(EngineConfig(brain=BrainConfig(stream=True, max_retries=0)), None, paths, events)
+
+    with pytest.raises(BrainInvocationError, match="stream-json result error"):
+        brain.invoke("p")
+
+    assert list(paths.brain_dir.glob("*.response.md")) == []
+    assert "brain-usage" not in [e["event"] for e in events.tail(20)]
+    assert "brain-failed" in [e["event"] for e in events.tail(20)]
 
 
 def test_stream_defaults_off_and_brain_cmd_path_identical(tmp_path, env, monkeypatch):

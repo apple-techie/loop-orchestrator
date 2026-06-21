@@ -190,6 +190,87 @@ def test_loop_metrics_counts_events_jsonl_and_mailbox_steers(metrics_project: Pa
     assert "source=session-events-v2" in log
 
 
+def test_loop_metrics_computes_brain_cost_from_usage_events(metrics_project: Path):
+    today = _day()
+    (metrics_project / "ops-wiki" / "log.md").write_text(
+        f"## [{today}] task | T0001 done\n## [{today}] task | T0002 done\n",
+        encoding="utf-8",
+    )
+    _write_events(
+        metrics_project,
+        [
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": "claude-fable-5",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 20,
+                "total_tokens": 100,
+                "cost_usd": 0.5,
+            },
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": "claude-fable-5",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "input_tokens": 25,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 10,
+                "cache_read_input_tokens": 10,
+                "total_tokens": 50,
+                "cost_usd": 0.25,
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project, "--log")
+
+    assert result.returncode == 0, result.stderr
+    assert "brain_calls_7d:                  2" in result.stdout
+    assert "brain_tokens_7d:                 150" in result.stdout
+    assert "cost_usd_7d:                     0.750000" in result.stdout
+    assert "cost_per_shipped_unit:           0.375000" in result.stdout
+    assert "cost_per_decision:               0.375000" in result.stdout
+    log = (metrics_project / "ops-wiki" / "log.md").read_text(encoding="utf-8")
+    assert "brain_tokens7d=150" in log
+    assert "cost_usd7d=0.750000" in log
+    assert "brain_cost_per_shipped=0.375000" in log
+    assert "cost_per_decision=0.375000" in log
+
+
+def test_loop_metrics_unpriced_usage_does_not_undercount_cost(metrics_project: Path):
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": "future-model",
+                "usage_source": "stream-json",
+                "cost_source": "unpriced",
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "cost_usd": None,
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "brain_tokens_7d:                 15" in result.stdout
+    assert "cost_usd_7d:                     n/a" in result.stdout
+    assert "cost_per_decision:               n/a" in result.stdout
+    assert "1 brain-usage event(s) unpriced; cost metrics n/a" in result.stdout
+
+
 def test_loop_metrics_missing_events_jsonl_degrades_to_zero(metrics_project: Path):
     (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
 

@@ -32,6 +32,7 @@ Usage:
 Prints the coordinator-efficiency summary block: checkpoint_tokens,
 pending_messages, restarts_24h, giveups_24h, autonomy_ratio,
 interventions_per_shipped_unit, event-derived 7d attention/autonomy counts,
+brain_tokens_7d, cost_usd_7d, cost_per_shipped_unit, cost_per_decision,
 dispatches_per_lane_7d, distinct_lanes_used_7d, ingests_7d, lints_7d,
 checkpoints_7d, experiments (legacy dispatch counts are n/a).
 Missing inputs degrade to 0/n-a with a note instead of failing.
@@ -134,6 +135,10 @@ class Metrics:
     ingest_timeouts_7d: int = 0
     unsolicited_steers_7d: int = 0
     brain_calls_7d: int = 0
+    brain_tokens_7d: str = "0"
+    cost_usd_7d: str = "0.000000"
+    cost_per_shipped_unit: str = "n/a"
+    cost_per_decision: str = "n/a"
     dispatches_per_lane_7d: str = "{}"
     distinct_lanes_used_7d: int = 0
     ingests_7d: int = 0
@@ -410,6 +415,34 @@ def mailbox_file_is_unsolicited_steer(root: Path, name: str, notes: list[str]) -
     return not reply_subject_re.match(subject.strip())
 
 
+def nonnegative_int(value) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def nonnegative_float(value) -> float | None:
+    if type(value) in {int, float} and not isinstance(value, bool) and value >= 0:
+        return float(value)
+    return None
+
+
+def usage_total(rec: dict) -> int | None:
+    total = nonnegative_int(rec.get("total_tokens"))
+    if total is not None:
+        return total
+    parts = [
+        nonnegative_int(rec.get("input_tokens")),
+        nonnegative_int(rec.get("output_tokens")),
+        nonnegative_int(rec.get("cache_creation_input_tokens")),
+        nonnegative_int(rec.get("cache_read_input_tokens")),
+    ]
+    values = [value for value in parts if value is not None]
+    return sum(values) if values else None
+
+
+def fmt_usd(value: float) -> str:
+    return f"{value:.6f}"
+
+
 def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
     if not session:
         notes.append("no session selected — events.jsonl metrics read 0/n/a")
@@ -425,6 +458,10 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
             "ingest_timeouts_7d": 0,
             "unsolicited_steers_7d": 0,
             "brain_calls_7d": 0,
+            "brain_tokens_7d": "0",
+            "cost_usd_7d": "0.000000",
+            "cost_per_shipped_unit": "n/a",
+            "cost_per_decision": "n/a",
             "dispatches_per_lane_7d": "{}",
             "distinct_lanes_used_7d": 0,
             "ingests_7d": 0,
@@ -442,6 +479,12 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
             lines = []
 
     escalations = rejects = stops = ingest_timeouts = brain_calls = 0
+    brain_usage_events = 0
+    brain_token_total = 0
+    brain_tokens_incomplete = False
+    brain_cost_total = 0.0
+    brain_cost_incomplete = False
+    unpriced_usage_events = 0
     ingests = lints = 0
     engine_approvals = total_decisions = 0
     dispatches_by_lane: dict[str, int] = {}
@@ -482,6 +525,23 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
             ingest_timeouts += 1
         elif kind == "brain-call":
             brain_calls += 1
+        elif kind == "brain-usage":
+            brain_usage_events += 1
+            tokens = usage_total(rec)
+            if tokens is None:
+                brain_tokens_incomplete = True
+            else:
+                brain_token_total += tokens
+            cost = nonnegative_float(rec.get("cost_usd"))
+            cost_source = rec.get("cost_source")
+            if cost is not None:
+                brain_cost_total += cost
+            else:
+                brain_cost_incomplete = True
+                if cost_source == "unpriced" or (
+                    tokens is not None and cost_source != "unavailable"
+                ):
+                    unpriced_usage_events += 1
         elif kind == "ingest-done":
             ingests += 1
         elif kind == "lint-dispatch":
@@ -499,11 +559,30 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
                 unsolicited_files.add(name)
     if skipped:
         notes.append(f"events.jsonl for session '{session}' skipped {skipped} corrupt line(s)")
+    if brain_usage_events < brain_calls:
+        missing = brain_calls - brain_usage_events
+        brain_tokens_incomplete = True
+        brain_cost_incomplete = True
+        notes.append(f"{missing} brain-call event(s) lack brain-usage; cost metrics n/a")
+    if unpriced_usage_events:
+        notes.append(f"{unpriced_usage_events} brain-usage event(s) unpriced; cost metrics n/a")
 
     unsolicited_steers = len(unsolicited_files)
     interventions = escalations + unsolicited_steers + rejects
     autonomy = f"{engine_approvals / total_decisions:.2f}" if total_decisions else "n/a"
     per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
+    brain_tokens = "n/a" if brain_tokens_incomplete else str(brain_token_total)
+    brain_cost = "n/a" if brain_cost_incomplete else fmt_usd(brain_cost_total)
+    brain_cost_per_shipped = (
+        fmt_usd(brain_cost_total / shipped)
+        if shipped and not brain_cost_incomplete
+        else "n/a"
+    )
+    brain_cost_per_decision = (
+        fmt_usd(brain_cost_total / brain_calls)
+        if brain_calls and not brain_cost_incomplete
+        else "n/a"
+    )
     dispatches_json = json.dumps(dispatches_by_lane, sort_keys=True, separators=(",", ":"))
     return {
         "autonomy_ratio": autonomy,
@@ -517,6 +596,10 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         "ingest_timeouts_7d": ingest_timeouts,
         "unsolicited_steers_7d": unsolicited_steers,
         "brain_calls_7d": brain_calls,
+        "brain_tokens_7d": brain_tokens,
+        "cost_usd_7d": brain_cost,
+        "cost_per_shipped_unit": brain_cost_per_shipped,
+        "cost_per_decision": brain_cost_per_decision,
         "dispatches_per_lane_7d": dispatches_json,
         "distinct_lanes_used_7d": len(dispatches_by_lane),
         "ingests_7d": ingests,
@@ -629,6 +712,10 @@ def print_single(metrics: Metrics) -> None:
     print(f"  lane_restarts_7d:                {metrics.lane_restarts_7d}")
     print(f"  unsolicited_steers_7d:           {metrics.unsolicited_steers_7d}")
     print(f"  brain_calls_7d:                  {metrics.brain_calls_7d}")
+    print(f"  brain_tokens_7d:                 {metrics.brain_tokens_7d}")
+    print(f"  cost_usd_7d:                     {metrics.cost_usd_7d}")
+    print(f"  cost_per_shipped_unit:           {metrics.cost_per_shipped_unit}")
+    print(f"  cost_per_decision:               {metrics.cost_per_decision}")
     print(f"  dispatches_per_lane_7d:          {metrics.dispatches_per_lane_7d}")
     print(f"  distinct_lanes_used_7d:          {metrics.distinct_lanes_used_7d}")
     print(f"  ingests_7d:        {metrics.ingests_7d}")
@@ -654,6 +741,10 @@ def summary(metrics: Metrics) -> str:
         f"lane_restarts7d={metrics.lane_restarts_7d} "
         f"unsolicited_steers7d={metrics.unsolicited_steers_7d} "
         f"brain_calls7d={metrics.brain_calls_7d} "
+        f"brain_tokens7d={metrics.brain_tokens_7d} "
+        f"cost_usd7d={metrics.cost_usd_7d} "
+        f"brain_cost_per_shipped={metrics.cost_per_shipped_unit} "
+        f"cost_per_decision={metrics.cost_per_decision} "
         f"dispatches_per_lane7d={metrics.dispatches_per_lane_7d} "
         f"distinct_lanes_used7d={metrics.distinct_lanes_used_7d} "
         f"ingests7d={metrics.ingests_7d} lints7d={metrics.lints_7d} "
@@ -678,6 +769,29 @@ def format_ratio(engine: int, total: int) -> str:
     return f"{engine / total:.2f}" if total else "n/a"
 
 
+def sum_int_metric(rows: list[Metrics], attr: str) -> str:
+    total = 0
+    for row in rows:
+        value = getattr(row, attr)
+        if not isinstance(value, str) or not value.isdigit():
+            return "n/a"
+        total += int(value)
+    return str(total)
+
+
+def sum_usd_metric(rows: list[Metrics], attr: str) -> str:
+    total = 0.0
+    for row in rows:
+        value = getattr(row, attr)
+        if not isinstance(value, str) or value == "n/a":
+            return "n/a"
+        try:
+            total += float(value)
+        except ValueError:
+            return "n/a"
+    return fmt_usd(total)
+
+
 def print_all(rows: list[Metrics]) -> None:
     print(f"loop-metrics --all — {today}")
     if not rows:
@@ -695,6 +809,8 @@ def print_all(rows: list[Metrics]) -> None:
                 "INGEST",
                 "LINT",
                 "STEER",
+                "BRAIN_TOKENS",
+                "COST_USD",
                 "IDLE_BACKLOG",
             ]
         ]
@@ -711,6 +827,8 @@ def print_all(rows: list[Metrics]) -> None:
                     str(m.ingests_7d),
                     str(m.lints_7d),
                     str(m.unsolicited_steers_7d),
+                    m.brain_tokens_7d,
+                    m.cost_usd_7d,
                     str(m.lanes_idle_with_backlog),
                 ]
             )
@@ -730,6 +848,16 @@ def print_all(rows: list[Metrics]) -> None:
         root_experiments.setdefault(m.root, m.experiments)
     shipped = sum(root_shipped.values())
     per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
+    brain_cost = sum_usd_metric(rows, "cost_usd_7d")
+    brain_calls = sum(m.brain_calls_7d for m in rows)
+    brain_cost_per_shipped = (
+        fmt_usd(float(brain_cost) / shipped) if shipped and brain_cost != "n/a" else "n/a"
+    )
+    brain_cost_per_decision = (
+        fmt_usd(float(brain_cost) / brain_calls)
+        if brain_calls and brain_cost != "n/a"
+        else "n/a"
+    )
     active_sessions = {f"{m.root}:{m.session}" for m in rows}
     print("fleet aggregate:")
     print(f"  sessions:                    {len(rows)}")
@@ -748,6 +876,10 @@ def print_all(rows: list[Metrics]) -> None:
     print(f"  lane_restarts_7d:            {sum(m.lane_restarts_7d for m in rows)}")
     print(f"  unsolicited_steers_7d:       {sum(m.unsolicited_steers_7d for m in rows)}")
     print(f"  brain_calls_7d:              {sum(m.brain_calls_7d for m in rows)}")
+    print(f"  brain_tokens_7d:             {sum_int_metric(rows, 'brain_tokens_7d')}")
+    print(f"  cost_usd_7d:                 {brain_cost}")
+    print(f"  cost_per_shipped_unit:       {brain_cost_per_shipped}")
+    print(f"  cost_per_decision:           {brain_cost_per_decision}")
     print(f"  ingests_7d:                  {sum(m.ingests_7d for m in rows)}")
     print(f"  lints_7d:                    {sum(m.lints_7d for m in rows)}")
     print(f"  checkpoints_7d:              {sum(m.checkpoints_7d for m in rows)}")
