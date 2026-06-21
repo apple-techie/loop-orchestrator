@@ -101,6 +101,41 @@ def _seed_loop_task(
     )
 
 
+def test_cycle_routed_candidate_non_routing_pending_decision_is_not_progress(project: Path):
+    """HIGH regression: a pending decision that does NOT route the candidate idle
+    lane must NOT count as lane-utilization progress — otherwise the no-progress
+    latch never engages and the brain is woken every cycle (was a wrong `return
+    True`). A routing action still counts; a `stop` or a different-lane action does
+    not."""
+    w = _watch(project)
+    lanes = {"web"}
+
+    # A routing action targeting the candidate lane -> progress.
+    w.paths.pending_decision_path.write_text(
+        json.dumps(
+            {"id": "d-1", "status": "pending", "actions": [{"kind": "dispatch", "lane": "web"}]}
+        ),
+        encoding="utf-8",
+    )
+    assert w._cycle_routed_candidate(0, lanes) is True
+
+    # A non-routing pending decision (stop) -> NOT progress (the fixed branch).
+    w.paths.pending_decision_path.write_text(
+        json.dumps({"id": "d-2", "status": "pending", "actions": [{"kind": "stop"}]}),
+        encoding="utf-8",
+    )
+    assert w._cycle_routed_candidate(0, lanes) is False
+
+    # A routing KIND but a different lane -> NOT progress.
+    w.paths.pending_decision_path.write_text(
+        json.dumps(
+            {"id": "d-3", "status": "pending", "actions": [{"kind": "dispatch", "lane": "infra"}]}
+        ),
+        encoding="utf-8",
+    )
+    assert w._cycle_routed_candidate(0, lanes) is False
+
+
 # ── evaluate_triggers (pure, injected clock) ────────────────────────────────
 
 
