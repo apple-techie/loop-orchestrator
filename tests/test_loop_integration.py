@@ -1590,6 +1590,112 @@ def test_prompt_verify_drive_suppresses_passed_outcome_when_branch_at_base(proje
     assert "ready-to-verify:" not in prompt
 
 
+def test_prompt_verify_drive_at_base_cached_pass_emits_already_landed_event(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "base-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append(
+        "verify-passed",
+        window="web",
+        branch="loop/demo/web",
+        branch_head="base-sha",
+        overall="pass",
+        findings=0,
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _worktree, _branch: "base-sha")
+
+    prompt = _assemble_prompt(
+        _sub(project),
+        snap=_prompt_snap({}, loops=loops),
+        paths=paths,
+        checkpoint_body="# Base\n",
+        events=events,
+    )
+    _assemble_prompt(
+        _sub(project),
+        snap=_prompt_snap({}, loops=loops),
+        paths=paths,
+        checkpoint_body="# Base\n",
+        events=events,
+    )
+
+    assert "window=web event=verify-passed" not in prompt
+    landed = [event for event in _events(paths) if event["event"] == "drive-already-landed"]
+    assert len(landed) == 1
+    assert landed[0]["window"] == "web"
+    assert landed[0]["reason"] == "at-base"
+
+
+def test_prompt_verify_drive_suppresses_passed_outcome_when_verified_tip_already_landed(
+    project, monkeypatch
+):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append(
+        "verify-passed",
+        window="web",
+        branch="loop/demo/web",
+        branch_head="old-tip",
+        overall="pass",
+        findings=0,
+    )
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "base-sha" if branch == "main" else "new-tip",
+    )
+
+    def is_ancestor(self, _worktree, ancestor, ref):
+        return (ancestor, ref) in {("main", "loop/demo/web"), ("old-tip", "main")}
+
+    monkeypatch.setattr(Substrate, "is_ancestor", is_ancestor)
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n", events=events)
+
+    assert "window=web event=verify-passed" not in prompt
+    landed = [event for event in _events(paths) if event["event"] == "drive-already-landed"]
+    assert landed and landed[-1]["reason"] == "verified-tip-already-landed"
+    assert landed[-1]["branch_head"] == "old-tip"
+
+
+def test_prompt_verify_drive_keeps_current_ahead_verified_pass(project, monkeypatch):
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    loops = {"web": {"branch": "loop/demo/web", "verified_tip": "tip-sha"}}
+    atomic_write_json(paths.state_file, {"loops": loops})
+    events = EventLog(paths.events_path)
+    events.append(
+        "verify-passed",
+        window="web",
+        branch="loop/demo/web",
+        branch_head="tip-sha",
+        overall="pass",
+        findings=0,
+    )
+    monkeypatch.setattr(
+        Substrate,
+        "branch_head",
+        lambda self, _worktree, branch: "base-sha" if branch == "main" else "tip-sha",
+    )
+    monkeypatch.setattr(
+        Substrate,
+        "is_ancestor",
+        lambda self, _worktree, ancestor, ref: (ancestor, ref) == ("main", "loop/demo/web"),
+    )
+    snap = _prompt_snap({"web": {"status": "idle", "target": "", "kind": "claude"}}, loops=loops)
+
+    prompt = _assemble_prompt(_sub(project), snap, paths, checkpoint_body="# Base\n", events=events)
+
+    assert prompt.count("window=web event=verify-passed") == 1
+    assert not any(event["event"] == "drive-already-landed" for event in _events(paths))
+
+
 def test_prompt_verify_drive_suppresses_passed_outcome_when_branch_stale(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()

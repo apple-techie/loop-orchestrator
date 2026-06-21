@@ -902,6 +902,81 @@ def _drive_in_flight_windows(paths: SessionPaths) -> set[str]:
     )
 
 
+def _drive_already_landed_reported(
+    events: EventLog,
+    window: str,
+    latest_verify_seq: object,
+    branch_head: object,
+    base_head: object,
+) -> bool:
+    for event in reversed(events.read_all()):
+        if event.get("event") != "drive-already-landed" or event.get("window") != window:
+            continue
+        return (
+            event.get("latest_verify_seq") == latest_verify_seq
+            and event.get("branch_head") == branch_head
+            and event.get("base_head") == base_head
+        )
+    return False
+
+
+def _append_drive_already_landed(
+    events: EventLog | None,
+    window: str,
+    outcome: dict,
+    landed: dict,
+) -> None:
+    if events is None:
+        return
+    latest_verify_seq = outcome.get("seq")
+    branch_head = landed.get("branch_head")
+    base_head = landed.get("base_head")
+    if _drive_already_landed_reported(events, window, latest_verify_seq, branch_head, base_head):
+        return
+    events.append(
+        "drive-already-landed",
+        window=window,
+        branch=landed.get("branch"),
+        branch_head=branch_head,
+        base_head=base_head,
+        latest_verify_seq=latest_verify_seq,
+        reason=landed.get("reason"),
+    )
+
+
+def _landed_verify_pass(
+    substrate: Substrate,
+    paths: SessionPaths,
+    window: str,
+    outcome: dict,
+    base_head: str | None,
+    current_landed: dict | None,
+) -> dict | None:
+    if outcome.get("event") != "verify-passed":
+        return None
+    if current_landed is not None:
+        return current_landed
+    tip = outcome.get("branch_head") or outcome.get("tip_sha")
+    if not isinstance(tip, str) or not tip:
+        return None
+    branch = outcome.get("branch") or actions_mod._predecessor_branch(paths, window)
+    if base_head is not None and tip == base_head:
+        return {
+            "branch": branch,
+            "branch_head": tip,
+            "base_head": base_head,
+            "reason": "verified-tip-at-base",
+        }
+    if substrate.is_ancestor(actions_mod._lane_worktree(paths, window), tip, "main"):
+        return {
+            "branch": branch,
+            "branch_head": tip,
+            "base_head": base_head,
+            "reason": "verified-tip-already-landed",
+        }
+    return None
+
+
 def _verify_drive_lines(
     substrate: Substrate,
     snap: EngineSnapshot,
@@ -946,6 +1021,7 @@ def _verify_drive_lines(
     ready: list[str] = []
     ready_lanes: set[str] = set()
     merge_ready_lanes: set[str] = set()
+    already_landed_lanes: dict[str, dict] = {}
     awaiting: list[str] = []
     for lane in sorted(set(snap.lanes) | branch_lanes):
         info = snap.lanes.get(lane) or {}
@@ -968,6 +1044,12 @@ def _verify_drive_lines(
         # ready-to-verify (head != verified_tip=None) and there was no signal that
         # an idle lane was waiting for its first build.
         if head is not None and base_head is not None and head == base_head:
+            already_landed_lanes[lane] = {
+                "branch": branch,
+                "branch_head": head,
+                "base_head": base_head,
+                "reason": "at-base",
+            }
             tasks = open_backlog.get(lane)
             if tasks:
                 awaiting.append(
@@ -979,6 +1061,13 @@ def _verify_drive_lines(
             worktree = actions_mod._lane_worktree(paths, lane)
             if substrate.is_ancestor(worktree, "main", branch):
                 merge_ready_lanes.add(lane)
+            elif substrate.is_ancestor(worktree, head, "main"):
+                already_landed_lanes[lane] = {
+                    "branch": branch,
+                    "branch_head": head,
+                    "base_head": base_head,
+                    "reason": "branch-already-landed",
+                }
         # Ready-to-verify requires the branch to be AHEAD of base (the at-base
         # case is handled above), so a lane sitting at main never false-reads ready.
         if head is None:
@@ -991,12 +1080,26 @@ def _verify_drive_lines(
         ready_lanes.add(lane)
         ready.append(f"- lane={lane} branch={branch} status={status_label}")
 
-    eligible_outcomes = [
-        outcome
-        for outcome in latest_outcomes
-        if str(outcome["window"]) not in ready_lanes
-        and (outcome.get("event") != "verify-passed" or str(outcome["window"]) in merge_ready_lanes)
-    ]
+    eligible_outcomes: list[dict] = []
+    for outcome in latest_outcomes:
+        window = str(outcome["window"])
+        if window in ready_lanes:
+            continue
+        if outcome.get("event") == "verify-passed":
+            landed = _landed_verify_pass(
+                substrate,
+                paths,
+                window,
+                outcome,
+                base_head,
+                already_landed_lanes.get(window),
+            )
+            if landed is not None:
+                _append_drive_already_landed(events, window, outcome, landed)
+                continue
+            if window not in merge_ready_lanes:
+                continue
+        eligible_outcomes.append(outcome)
     capped_outcomes = [
         outcome for outcome in eligible_outcomes if str(outcome.get("window")) in cap_hits
     ]
