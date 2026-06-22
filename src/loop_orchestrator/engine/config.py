@@ -136,6 +136,9 @@ class EngineConfig:
     lint: LintConfig = field(default_factory=LintConfig)
     harness_policy: HarnessPolicy = field(default_factory=HarnessPolicy)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    # Per-1M-token USD rates for codex usage (brain + build), keyed input/cached/output.
+    # Empty = unpriced (codex reports tokens, not cost) -> cost reads n/a until set.
+    codex_pricing: dict = field(default_factory=dict)
 
 
 def _merge(cls: type, data: object):

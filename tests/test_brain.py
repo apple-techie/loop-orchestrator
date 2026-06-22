@@ -16,6 +16,8 @@ from loop_orchestrator.engine.brain import (
     BrainInvocationError,
     StreamRenderer,
     classify_failure,
+    codex_cost,
+    codex_usage,
     oneshot_argv,
     run_oneshot,
     stream_argv,
@@ -609,3 +611,71 @@ def test_stream_defaults_off_and_brain_cmd_path_identical(tmp_path, env, monkeyp
     brain = Brain(EngineConfig(), None, paths, events)
     assert brain.invoke("p") == "raw:p"  # claude-named binary, stream off: plain
     assert list(paths.brain_dir.glob("*.stream.jsonl")) == []
+
+
+# ── codex usage + pricing (T0069: codex cost instrumentation) ──────────────────
+
+
+def test_codex_usage_sums_turn_completed_events():
+    """Real codex `exec --json` schema (live-probed): turn.completed.usage with
+    input/cached/output/reasoning. input INCLUDES cached, reasoning bills as output,
+    summed across turns; cached is not double-counted in total."""
+    out = "\n".join(
+        [
+            '{"type":"thread.started"}',
+            '{"type":"turn.completed","usage":{"input_tokens":1000,'
+            '"cached_input_tokens":200,"output_tokens":50,"reasoning_output_tokens":10}}',
+            "not json",
+            '{"type":"turn.completed","usage":{"input_tokens":500,'
+            '"cached_input_tokens":0,"output_tokens":20,"reasoning_output_tokens":5}}',
+        ]
+    )
+    assert codex_usage(out) == {
+        "input_tokens": 1500,
+        "output_tokens": 85,  # (50+10) + (20+5)
+        "cache_read_input_tokens": 200,
+        "total_tokens": 1585,  # 1500 input + 85 output (cached is within input)
+    }
+
+
+def test_codex_usage_none_without_turn_completed():
+    assert codex_usage('{"type":"turn.started"}\nplain stdout text\n') is None
+    assert codex_usage("") is None
+
+
+def test_codex_cost_unpriced_or_unavailable_without_rates():
+    usage = {
+        "input_tokens": 1000,
+        "output_tokens": 100,
+        "cache_read_input_tokens": 200,
+        "total_tokens": 1100,
+    }
+    assert codex_cost(usage, None) == (None, "unpriced")
+    assert codex_cost(usage, {}) == (None, "unpriced")
+    assert codex_cost(usage, {"input": 1.0}) == (None, "unpriced")  # output rate missing
+    assert codex_cost(None, {"input": 1.0, "output": 2.0}) == (None, "unavailable")
+
+
+def test_codex_cost_computed_bills_cached_separately():
+    usage = {
+        "input_tokens": 1_000_000,  # includes 200k cached
+        "output_tokens": 100_000,
+        "cache_read_input_tokens": 200_000,
+        "total_tokens": 1_100_000,
+    }
+    cost, source = codex_cost(usage, {"input": 1.0, "cached": 0.25, "output": 4.0})
+    assert source == "computed"
+    # 800k non-cached input @1 + 200k cached @0.25 + 100k output @4 = 1.25
+    assert cost == pytest.approx(0.8 + 0.05 + 0.4)
+
+
+def test_codex_cost_cached_defaults_to_input_rate():
+    usage = {
+        "input_tokens": 1_000_000,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 200_000,
+        "total_tokens": 1_000_000,
+    }
+    cost, source = codex_cost(usage, {"input": 2.0, "output": 8.0})  # no cached rate
+    assert source == "computed"
+    assert cost == pytest.approx(2.0)  # all 1M input @ $2 (cached billed at input rate)

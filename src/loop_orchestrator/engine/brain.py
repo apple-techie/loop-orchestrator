@@ -98,7 +98,8 @@ def _usage_fields(usage: object) -> dict[str, int] | None:
 # loop-metrics.sh against drift from these names.
 COST_SOURCE_PROVIDER = "provider"  # real cost captured from the harness
 COST_SOURCE_UNPRICED = "unpriced"  # usage present but no price for the model
-COST_SOURCE_UNAVAILABLE = "unavailable"  # no usage/renderer (e.g. codex): cost unknown
+COST_SOURCE_UNAVAILABLE = "unavailable"  # no usage/renderer: cost unknown
+COST_SOURCE_COMPUTED = "computed"  # tokens captured (e.g. codex) + priced from config
 
 
 def _model_usage_cost(obj: dict) -> tuple[float | None, str | None]:
@@ -148,6 +149,66 @@ def _model_from_usage(obj: dict) -> str | None:
         if models:
             return ",".join(models)
     return None
+
+
+def codex_usage(stdout: str) -> dict[str, int] | None:
+    """Sum the per-turn `usage` from codex `exec --json` `turn.completed` events into
+    the brain-usage token shape. Codex reports {input_tokens, cached_input_tokens,
+    output_tokens, reasoning_output_tokens} per turn; input_tokens already INCLUDES
+    cached, and reasoning is billed as output, so total = input + output(+reasoning)
+    and cached is NOT added again. A run has many turns -> sum across them. None when
+    no usage-bearing turn.completed is present."""
+    inp = cached = out = 0
+    found = False
+    for line in stdout.splitlines():
+        if '"turn.completed"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "turn.completed" or not isinstance(obj.get("usage"), dict):
+            continue
+        usage = obj["usage"]
+        inp += _nonnegative_int(usage.get("input_tokens")) or 0
+        cached += _nonnegative_int(usage.get("cached_input_tokens")) or 0
+        out += (_nonnegative_int(usage.get("output_tokens")) or 0) + (
+            _nonnegative_int(usage.get("reasoning_output_tokens")) or 0
+        )
+        found = True
+    if not found:
+        return None
+    return {
+        "input_tokens": inp,
+        "output_tokens": out,
+        "cache_read_input_tokens": cached,
+        "total_tokens": inp + out,  # cached is a subset of input -> not added again
+    }
+
+
+def codex_cost(usage: dict[str, int] | None, pricing: dict | None) -> tuple[float | None, str]:
+    """USD cost for a codex usage dict from a per-1M-token price table
+    {input, cached, output} (USD per million tokens). Non-cached input is billed at
+    `input`, cached input at `cached` (defaults to the input rate when absent), and
+    output (incl. reasoning) at `output`. Empty/partial pricing -> (None, 'unpriced')
+    — tokens are real but no rates configured; priced -> (cost, 'computed')."""
+    if usage is None:
+        return None, COST_SOURCE_UNAVAILABLE
+    if not isinstance(pricing, dict) or not pricing:
+        return None, COST_SOURCE_UNPRICED
+    rate_in = _nonnegative_float(pricing.get("input"))
+    rate_out = _nonnegative_float(pricing.get("output"))
+    if rate_in is None or rate_out is None:
+        return None, COST_SOURCE_UNPRICED
+    rate_cached = _nonnegative_float(pricing.get("cached"))
+    if rate_cached is None:
+        rate_cached = rate_in
+    cached = usage.get("cache_read_input_tokens", 0)
+    non_cached_input = max(0, usage.get("input_tokens", 0) - cached)
+    cost = (
+        non_cached_input * rate_in + cached * rate_cached + usage.get("output_tokens", 0) * rate_out
+    ) / 1_000_000
+    return cost, COST_SOURCE_COMPUTED
 
 
 def classify_failure(stderr: str, stdout: str, timed_out: bool) -> str:
