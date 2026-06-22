@@ -191,6 +191,10 @@ def cmd_status(args: argparse.Namespace, root: Path) -> int:
             if warning is not None:
                 print(f"warning: {warning}")
                 EventLog(paths.events_path).append("daemon-stale", warning=warning)
+            # Machine-readable, content-based liveness for bin/loop-restart's clean-swap
+            # poll (T0070): deterministic + written at daemon boot, so it does not flap
+            # like an mtime warning nor depend on cycle-timing like the heartbeat.
+            print("code: current" if warning is None else "code: stale")
         else:
             print(f"watch: not running (stale pid file: {paths.pid_path})")
     tail = EventLog(paths.events_path).tail(5)

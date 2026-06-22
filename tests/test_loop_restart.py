@@ -42,19 +42,24 @@ class _Result:
     engine_marker: Path
 
 
-def _engine_stub(marker: Path, ready_file: Path, pid: str = "$$") -> str:
+def _engine_stub(
+    marker: Path, ready_file: Path, pid: str = "$$", code: str = "current", age: str = "0"
+) -> str:
     # `restart` records the call, marks the daemon ready, then BLOCKS in a
     # heartbeat loop forever (the real Watch.run() never returns). `status`
-    # reports alive with a fresh heartbeat once the ready file exists, under the
-    # given pid ($$ = a NEW pid each run, i.e. a clean swap; a fixed pid equal to
-    # a pre-written engine.pid models the OLD daemon surviving — no swap).
+    # reports alive with the given heartbeat AGE + a content-based `code: <current|
+    # stale>` line (T0070) once the daemon is ready, under the given pid ($$ = a NEW
+    # pid each run, i.e. a clean swap; a fixed pid equal to a pre-written engine.pid
+    # models the OLD daemon surviving — no swap). code=stale models a daemon running
+    # stale code; age>0 models an active daemon that hasn't heartbeat recently.
     return (
         'cmd="${@: -1}"\n'
         'case "$cmd" in\n'
         f'  restart) echo restart >> "{marker}"; : > "{ready_file}";\n'
         f'    while true; do : > "{ready_file}"; sleep 0.2; done ;;\n'
         f'  status) if [ -f "{ready_file}" ]; then\n'
-        f'      echo "watch: alive (pid {pid}, heartbeat 0s ago)";\n'
+        f'      echo "watch: alive (pid {pid}, heartbeat {age}s ago)";\n'
+        f'      echo "code: {code}";\n'
         '    else echo "watch: not running"; fi ;;\n'
         "esac\n"
         "exit 0\n"
@@ -69,6 +74,8 @@ def _run(
     pm_listing: str = "",
     session: str = "govern",
     stale_pid: str | None = None,
+    code: str = "current",
+    age: str = "0",
 ) -> _Result:
     root = tmp_path / "proj"
     root.mkdir()
@@ -93,7 +100,9 @@ def _run(
     engine_marker = tmp_path / "engine-called"
     _stub(
         stub_bin / "loop-engine",
-        _engine_stub(engine_marker, tmp_path / "daemon-ready", pid=stale_pid or "$$"),
+        _engine_stub(
+            engine_marker, tmp_path / "daemon-ready", pid=stale_pid or "$$", code=code, age=age
+        ),
     )
     # the wrapper only invokes `loop-pm list-adapters`; echo the canned listing.
     _stub(
@@ -173,6 +182,37 @@ def test_restart_rejects_stale_non_swap(tmp_path):
     assert proc.returncode == 1, proc.stderr
     assert "did not cleanly swap" in proc.stderr
     assert proc.engine_marker.exists()  # the restart was attempted
+
+
+def test_restart_accepts_active_daemon_with_stale_heartbeat(tmp_path):
+    """T0070: an ACTIVE (non-paused) daemon mid-cycle hasn't heartbeat recently, so the
+    old heartbeat<=15s gate false-FATAL'd it. The content-based criterion accepts a
+    new live pid running current code regardless of heartbeat age."""
+    proc = _run(
+        tmp_path,
+        lane_config=LANE_CONFIG_NO_PM,
+        env_present=False,
+        code="current",
+        age="99",  # stale heartbeat (busy daemon) — would have failed the old <=15s gate
+    )
+    assert not proc.timed_out, proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    assert "daemon swapped" in proc.stderr
+    assert "current code" in proc.stderr
+
+
+def test_restart_rejects_swap_running_stale_code(tmp_path):
+    """T0070: a new pid that comes up still running STALE code (`code: stale`) must be
+    rejected — content, not heartbeat/mtime, is the swap signal."""
+    proc = _run(
+        tmp_path,
+        lane_config=LANE_CONFIG_NO_PM,
+        env_present=False,
+        code="stale",
+    )
+    assert not proc.timed_out, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "did not cleanly swap" in proc.stderr
 
 
 def test_pm_loop_env_present_adapter_available_exits_0(tmp_path):

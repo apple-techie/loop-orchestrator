@@ -153,12 +153,10 @@ restart_pid=$!
 
 _dump_restart_log() { [[ -s "$restart_log" ]] && sed 's/^/  | /' "$restart_log" >&2 || true; }
 
-# A genuine swap (stop the old daemon — which may be mid-cycle — then start the
-# new one and wait for its first fresh heartbeat) routinely takes >30s, so the
-# strict swap-confirmation needs real headroom; the old 30s false-passed only
-# because it accepted the OLD daemon's heartbeat. Override with LOOP_RESTART_TIMEOUT.
+# A genuine swap (stop the old daemon — which may be mid-cycle — then start the new
+# one, which records its code digest at boot) routinely takes >30s, so the swap-
+# confirmation needs real headroom. Override with LOOP_RESTART_TIMEOUT.
 restart_timeout="${LOOP_RESTART_TIMEOUT:-60}"
-max_heartbeat="${LOOP_RESTART_MAX_HEARTBEAT:-15}"
 ready=""
 deadline=$((SECONDS + restart_timeout))
 while ((SECONDS < deadline)); do
@@ -175,19 +173,19 @@ while ((SECONDS < deadline)); do
     fi
     restart_pid=""  # reaped; stop checking liveness, keep polling status
   fi
-  # Capture stderr too (2>&1) so the engine's "running stale code" warning is
-  # visible to the freshness check below.
   status="$(loop-engine --project-root "$project_root" --session "$session" status 2>&1 || true)"
   if grep -Eq 'watch: alive \(pid [0-9]+, heartbeat [0-9]+s ago\)' <<<"$status"; then
     cur_pid="$(sed -E -n 's/.*watch: alive \(pid ([0-9]+),.*/\1/p' <<<"$status" | head -1)"
     age="$(sed -E -n 's/.*heartbeat ([0-9]+)s ago.*/\1/p' <<<"$status" | head -1)"
-    # A CLEAN swap = alive + fresh heartbeat + a live pid that differs from the
-    # pre-restart daemon + no stale-code warning. The pid-changed check is what
-    # catches the racy case where the old daemon survives stop and heartbeats
-    # through the window (its code is stale, so an OK there would be a lie).
-    if [[ -n "$age" ]] && ((age <= max_heartbeat)) \
-       && [[ -n "$cur_pid" && "$cur_pid" != "$pre_pid" ]] \
-       && ! grep -q 'stale' <<<"$status"; then
+    # CLEAN swap = a genuinely-new LIVE daemon (pid differs from the pre-restart pid)
+    # whose loaded engine code MATCHES what is installed (`code: current`, content-
+    # based, from loop-engine status). This is deterministic and is recorded at daemon
+    # boot, so — unlike the old `! grep stale` + heartbeat<=Ns gate (T0070) — it neither
+    # flaps during a legacy-record -> content-digest swap nor false-FATALs an ACTIVE
+    # daemon that is mid-cycle and hasn't heartbeat recently. The pid-changed check
+    # still catches the old daemon surviving stop (`code: stale` would also reject it).
+    if [[ -n "$cur_pid" && "$cur_pid" != "$pre_pid" ]] \
+       && grep -q '^code: current' <<<"$status"; then
       ready=1
       break
     fi
@@ -195,13 +193,13 @@ while ((SECONDS < deadline)); do
   sleep 0.5
 done
 if [[ -z "$ready" ]]; then
-  echo "loop-restart: FATAL: daemon did not cleanly swap (new pid + fresh heartbeat," \
-    "no stale-code warning) within ${restart_timeout}s — pre_pid=${pre_pid:-none}," \
-    "last seen pid=${cur_pid:-none}" >&2
+  echo "loop-restart: FATAL: daemon did not cleanly swap (new live pid running current" \
+    "code) within ${restart_timeout}s — pre_pid=${pre_pid:-none}, last seen pid=${cur_pid:-none}" >&2
   _dump_restart_log
   exit 1
 fi
-echo "loop-restart: daemon swapped (pid ${pre_pid:-none} -> ${cur_pid}, heartbeat ${age}s ago)" >&2
+echo "loop-restart: daemon swapped (pid ${pre_pid:-none} -> ${cur_pid}, current code," \
+  "heartbeat ${age}s ago)" >&2
 
 # ── step 4: assert PM readiness ──────────────────────────────────────────────
 # list-adapters reports each installed adapter's env-based availability; it takes
