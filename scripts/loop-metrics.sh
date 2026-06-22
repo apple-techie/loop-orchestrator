@@ -139,6 +139,8 @@ class Metrics:
     brain_calls_7d: int = 0
     brain_tokens_7d: str = "0"
     cost_usd_7d: str = "0.000000"
+    build_tokens_7d: str = "0"
+    build_cost_usd_7d: str = "0.000000"
     cost_per_shipped_unit: str = "n/a"
     cost_per_decision: str = "n/a"
     dispatches_per_lane_7d: str = "{}"
@@ -466,6 +468,8 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
             "brain_calls_7d": 0,
             "brain_tokens_7d": "0",
             "cost_usd_7d": "0.000000",
+            "build_tokens_7d": "0",
+            "build_cost_usd_7d": "0.000000",
             "cost_per_shipped_unit": "n/a",
             "cost_per_decision": "n/a",
             "dispatches_per_lane_7d": "{}",
@@ -494,6 +498,12 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
     brain_cost_incomplete = False
     unpriced_usage_events = 0
     unavailable_usage_events = 0
+    build_usage_events = 0
+    build_token_total = 0
+    build_token_events = 0
+    build_cost_total = 0.0
+    build_cost_events = 0
+    build_cost_incomplete = False
     ingests = lints = 0
     engine_approvals = total_decisions = 0
     dispatches_by_lane: dict[str, int] = {}
@@ -562,6 +572,21 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
                     tokens is not None and cost_source != "unavailable"
                 ):
                     unpriced_usage_events += 1
+        elif kind == "build-usage":
+            # Each build is a distinct dispatch (not a retry), so every build-usage
+            # counts. codex `--json` builds always carry tokens; cost is computed
+            # (priced) or unpriced when no codex rates are configured.
+            build_usage_events += 1
+            tokens = usage_total(rec)
+            if tokens is not None:
+                build_token_total += tokens
+                build_token_events += 1
+            cost = nonnegative_float(rec.get("cost_usd"))
+            if cost is not None:
+                build_cost_total += cost
+                build_cost_events += 1
+            elif rec.get("cost_source") != "unavailable":
+                build_cost_incomplete = True
         elif kind == "ingest-done":
             ingests += 1
         elif kind == "lint-dispatch":
@@ -619,6 +644,22 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         if total_decisions and brain_cost != "n/a"
         else "n/a"
     )
+    # Build (codex exec) token cost — separate axis from the brain. n/a when builds
+    # ran but carried no usable tokens; unpriced (cost n/a) when no codex rates set.
+    build_tokens = str(build_token_total) if build_token_events else (
+        "n/a" if build_usage_events else "0"
+    )
+    if build_cost_incomplete:
+        build_cost = "n/a"
+    elif build_cost_events == 0 and build_usage_events:
+        build_cost = "n/a"
+    else:
+        build_cost = fmt_usd(build_cost_total)
+    if build_usage_events and build_cost == "n/a":
+        notes.append(
+            f"{build_usage_events} build-usage event(s) unpriced; set engine.codex_pricing "
+            "for build cost"
+        )
     dispatches_json = json.dumps(dispatches_by_lane, sort_keys=True, separators=(",", ":"))
     return {
         "autonomy_ratio": autonomy,
@@ -634,6 +675,8 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         "brain_calls_7d": brain_calls,
         "brain_tokens_7d": brain_tokens,
         "cost_usd_7d": brain_cost,
+        "build_tokens_7d": build_tokens,
+        "build_cost_usd_7d": build_cost,
         "cost_per_shipped_unit": brain_cost_per_shipped,
         "cost_per_decision": brain_cost_per_decision,
         "dispatches_per_lane_7d": dispatches_json,
@@ -750,6 +793,8 @@ def print_single(metrics: Metrics) -> None:
     print(f"  brain_calls_7d:                  {metrics.brain_calls_7d}")
     print(f"  brain_tokens_7d:                 {metrics.brain_tokens_7d}")
     print(f"  cost_usd_7d:                     {metrics.cost_usd_7d}")
+    print(f"  build_tokens_7d:                 {metrics.build_tokens_7d}")
+    print(f"  build_cost_usd_7d:               {metrics.build_cost_usd_7d}")
     print(f"  cost_per_shipped_unit:           {metrics.cost_per_shipped_unit}")
     print(f"  cost_per_decision:               {metrics.cost_per_decision}")
     print(f"  dispatches_per_lane_7d:          {metrics.dispatches_per_lane_7d}")
@@ -779,6 +824,8 @@ def summary(metrics: Metrics) -> str:
         f"brain_calls7d={metrics.brain_calls_7d} "
         f"brain_tokens7d={metrics.brain_tokens_7d} "
         f"cost_usd7d={metrics.cost_usd_7d} "
+        f"build_tokens7d={metrics.build_tokens_7d} "
+        f"build_cost_usd7d={metrics.build_cost_usd_7d} "
         f"brain_cost_per_shipped={metrics.cost_per_shipped_unit} "
         f"cost_per_decision={metrics.cost_per_decision} "
         f"dispatches_per_lane7d={metrics.dispatches_per_lane_7d} "
@@ -928,6 +975,15 @@ def print_all(rows: list[Metrics]) -> None:
         print(
             f"    (cost_usd_7d is a partial total; {na_cost_rows} session(s) report n/a "
             "cost and are excluded)"
+        )
+    build_cost = sum_usd_metric(rows, "build_cost_usd_7d")
+    print(f"  build_tokens_7d:             {sum_int_metric(rows, 'build_tokens_7d')}")
+    print(f"  build_cost_usd_7d:           {build_cost}")
+    na_build_rows = sum(1 for m in rows if m.build_cost_usd_7d == "n/a")
+    if na_build_rows and build_cost != "n/a":
+        print(
+            f"    (build_cost_usd_7d is a partial total; {na_build_rows} session(s) report "
+            "n/a build cost and are excluded)"
         )
     print(f"  cost_per_shipped_unit:       {brain_cost_per_shipped}")
     print(f"  cost_per_decision:           {brain_cost_per_decision}")

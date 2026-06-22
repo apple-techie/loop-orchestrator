@@ -333,7 +333,7 @@ def test_loop_metrics_codex_all_unavailable_reports_na_not_zero(metrics_project:
     assert result.returncode == 0, result.stderr
     assert "brain_tokens_7d:                 n/a" in result.stdout
     assert "cost_usd_7d:                     n/a" in result.stdout
-    assert "0.000000" not in result.stdout  # NOT reported as free
+    assert "cost_usd_7d:                     0.000000" not in result.stdout  # brain not free
     assert "unavailable; skipped from token/cost totals" in result.stdout
 
 
@@ -353,7 +353,72 @@ def test_loop_metrics_brain_calls_without_usage_report_na_not_zero(metrics_proje
     assert "brain_calls_7d:                  3" in result.stdout
     assert "brain_tokens_7d:                 n/a" in result.stdout
     assert "cost_usd_7d:                     n/a" in result.stdout
-    assert "0.000000" not in result.stdout
+    assert "cost_usd_7d:                     0.000000" not in result.stdout  # brain not free
+
+
+def test_loop_metrics_build_usage_priced_surfaces_build_cost(metrics_project: Path):
+    """codex build token cost (build-usage events) surfaces as build_tokens_7d /
+    build_cost_usd_7d, summed across builds — T0069 phase 4."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [
+            {
+                "event": "build-usage",
+                "window": "web",
+                "branch": "loop/demo/web",
+                "usage_source": "codex-json",
+                "cost_source": "computed",
+                "input_tokens": 1000,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 200,
+                "total_tokens": 1100,
+                "cost_usd": 0.25,
+            },
+            {
+                "event": "build-usage",
+                "window": "web",
+                "branch": "loop/demo/web",
+                "usage_source": "codex-json",
+                "cost_source": "computed",
+                "total_tokens": 900,
+                "cost_usd": 0.15,
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "build_tokens_7d:                 2000" in result.stdout
+    assert "build_cost_usd_7d:               0.400000" in result.stdout
+
+
+def test_loop_metrics_build_usage_unpriced_reports_na(metrics_project: Path):
+    """codex builds report tokens but no USD until codex_pricing is set -> build cost
+    reads n/a (with a note), tokens still visible."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [
+            {
+                "event": "build-usage",
+                "window": "web",
+                "branch": "loop/demo/web",
+                "usage_source": "codex-json",
+                "cost_source": "unpriced",
+                "total_tokens": 500,
+                "cost_usd": None,
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "build_tokens_7d:                 500" in result.stdout
+    assert "build_cost_usd_7d:               n/a" in result.stdout
+    assert "build-usage event(s) unpriced" in result.stdout
 
 
 def test_cost_source_contract_in_sync():
