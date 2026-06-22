@@ -487,8 +487,10 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
     escalations = rejects = stops = ingest_timeouts = brain_calls = 0
     brain_usage_events = 0
     brain_token_total = 0
+    brain_token_events = 0
     brain_tokens_skipped = 0
     brain_cost_total = 0.0
+    brain_cost_events = 0
     brain_cost_incomplete = False
     unpriced_usage_events = 0
     unavailable_usage_events = 0
@@ -533,19 +535,25 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
         elif kind == "brain-call":
             brain_calls += 1
         elif kind == "brain-usage":
+            # A fail-then-succeed retry emits one brain-usage per attempt
+            # (attempt_status failed + success); count ONLY the successful attempt so
+            # a retry is not double-counted and brain_usage_events stays <= brain_calls.
+            # Events without attempt_status (legacy / single-attempt) still count.
+            if rec.get("attempt_status") not in (None, "success"):
+                continue
             brain_usage_events += 1
             tokens = usage_total(rec)
             cost_source = rec.get("cost_source")
             usage_unavailable = cost_source == "unavailable"
             if tokens is not None:
                 brain_token_total += tokens
-            elif usage_unavailable:
-                brain_tokens_skipped += 1
+                brain_token_events += 1
             else:
                 brain_tokens_skipped += 1
             cost = nonnegative_float(rec.get("cost_usd"))
             if cost is not None:
                 brain_cost_total += cost
+                brain_cost_events += 1
             elif usage_unavailable:
                 unavailable_usage_events += 1
             else:
@@ -587,16 +595,28 @@ def event_metrics(root: Path, session: str, shipped: int, notes: list[str]):
     interventions = escalations + unsolicited_steers + rejects
     autonomy = f"{engine_approvals / total_decisions:.2f}" if total_decisions else "n/a"
     per_shipped = f"{interventions / shipped:.2f}" if shipped else "n/a"
-    brain_tokens = str(brain_token_total)
-    brain_cost = "n/a" if brain_cost_incomplete else fmt_usd(brain_cost_total)
+    # n/a (not 0) when brain activity happened (calls or usage events) but NONE of it
+    # carried real token/cost data — an all-unavailable codex session, or calls that
+    # predate usage emission, are NOT free, and 0 reads as free. 0 only when there was
+    # genuinely no brain activity at all.
+    brain_activity = brain_usage_events or brain_calls
+    brain_tokens = str(brain_token_total) if brain_token_events else (
+        "n/a" if brain_activity else "0"
+    )
+    if brain_cost_incomplete:
+        brain_cost = "n/a"
+    elif brain_cost_events == 0 and brain_activity:
+        brain_cost = "n/a"
+    else:
+        brain_cost = fmt_usd(brain_cost_total)
     brain_cost_per_shipped = (
         fmt_usd(brain_cost_total / shipped)
-        if shipped and not brain_cost_incomplete
+        if shipped and brain_cost != "n/a"
         else "n/a"
     )
     brain_cost_per_decision = (
         fmt_usd(brain_cost_total / total_decisions)
-        if total_decisions and not brain_cost_incomplete
+        if total_decisions and brain_cost != "n/a"
         else "n/a"
     )
     dispatches_json = json.dumps(dispatches_by_lane, sort_keys=True, separators=(",", ":"))
@@ -786,26 +806,35 @@ def format_ratio(engine: int, total: int) -> str:
 
 
 def sum_int_metric(rows: list[Metrics], attr: str) -> str:
+    # Degrade gracefully: a single n/a session (e.g. a codex loop with unavailable
+    # usage) must NOT null the whole fleet total — skip it, sum the rest, and only
+    # report n/a when EVERY row is n/a.
     total = 0
+    counted = 0
     for row in rows:
         value = getattr(row, attr)
         if not isinstance(value, str) or not value.isdigit():
-            return "n/a"
+            continue
         total += int(value)
-    return str(total)
+        counted += 1
+    return str(total) if counted else "n/a"
 
 
 def sum_usd_metric(rows: list[Metrics], attr: str) -> str:
+    # Degrade gracefully (see sum_int_metric): one unpriced/unavailable session does
+    # not null the fleet cost; sum the priced rows, n/a only when all rows are n/a.
     total = 0.0
+    counted = 0
     for row in rows:
         value = getattr(row, attr)
         if not isinstance(value, str) or value == "n/a":
-            return "n/a"
+            continue
         try:
             total += float(value)
         except ValueError:
-            return "n/a"
-    return fmt_usd(total)
+            continue
+        counted += 1
+    return fmt_usd(total) if counted else "n/a"
 
 
 def print_all(rows: list[Metrics]) -> None:
@@ -894,6 +923,12 @@ def print_all(rows: list[Metrics]) -> None:
     print(f"  brain_calls_7d:              {sum(m.brain_calls_7d for m in rows)}")
     print(f"  brain_tokens_7d:             {sum_int_metric(rows, 'brain_tokens_7d')}")
     print(f"  cost_usd_7d:                 {brain_cost}")
+    na_cost_rows = sum(1 for m in rows if m.cost_usd_7d == "n/a")
+    if na_cost_rows and brain_cost != "n/a":
+        print(
+            f"    (cost_usd_7d is a partial total; {na_cost_rows} session(s) report n/a "
+            "cost and are excluded)"
+        )
     print(f"  cost_per_shipped_unit:       {brain_cost_per_shipped}")
     print(f"  cost_per_decision:           {brain_cost_per_decision}")
     print(f"  ingests_7d:                  {sum(m.ingests_7d for m in rows)}")

@@ -304,6 +304,181 @@ def test_loop_metrics_unpriced_usage_does_not_undercount_cost(metrics_project: P
     assert "1 brain-usage event(s) unpriced; cost metrics n/a" in result.stdout
 
 
+def test_loop_metrics_codex_all_unavailable_reports_na_not_zero(metrics_project: Path):
+    """A codex (non-claude) fleet session has renderer=None -> every brain-usage is
+    cost_source=unavailable with no token totals. Cost and tokens must read n/a, NOT
+    0 / $0.00 — the paid fleet is not free (T0066 / T0068 P1)."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": None,
+                "usage_source": "unavailable",
+                "cost_source": "unavailable",
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "cost_usd": None,
+                "attempt_status": "success",
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "brain_tokens_7d:                 n/a" in result.stdout
+    assert "cost_usd_7d:                     n/a" in result.stdout
+    assert "0.000000" not in result.stdout  # NOT reported as free
+    assert "unavailable; skipped from token/cost totals" in result.stdout
+
+
+def test_loop_metrics_brain_calls_without_usage_report_na_not_zero(metrics_project: Path):
+    """A real session can have brain-call events but ZERO brain-usage (calls predate
+    usage emission). 14 paid calls must not read $0.00 / 0 tokens — report n/a, since
+    cost is unknown, not free. 0 is reserved for genuinely no brain activity."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [{"event": "brain-call"}, {"event": "brain-call"}, {"event": "brain-call"}],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "brain_calls_7d:                  3" in result.stdout
+    assert "brain_tokens_7d:                 n/a" in result.stdout
+    assert "cost_usd_7d:                     n/a" in result.stdout
+    assert "0.000000" not in result.stdout
+
+
+def test_loop_metrics_retry_failed_attempt_not_double_counted(metrics_project: Path):
+    """A fail-then-succeed retry emits two brain-usage events (attempt_status failed +
+    success). Only the successful attempt's tokens/cost count, and brain_usage_events
+    must not exceed brain_calls (T0063 x T0066 / T0068 P1)."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    _write_events(
+        metrics_project,
+        [
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": "claude-fable-5",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "total_tokens": 40,
+                "cost_usd": 0.2,
+                "attempt": 1,
+                "attempt_status": "failed",
+            },
+            {
+                "event": "brain-usage",
+                "model": "claude-fable-5",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "total_tokens": 100,
+                "cost_usd": 0.5,
+                "attempt": 2,
+                "attempt_status": "success",
+            },
+        ],
+    )
+
+    result = _run_metrics(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "brain_calls_7d:                  1" in result.stdout
+    assert "brain_tokens_7d:                 100" in result.stdout  # not 140
+    assert "cost_usd_7d:                     0.500000" in result.stdout  # not 0.700000
+    # the failed attempt is excluded, so usage events do not exceed calls
+    assert "lack brain-usage" not in result.stdout
+
+
+def test_loop_metrics_fleet_one_unavailable_session_does_not_null_total(metrics_project: Path):
+    """One all-unavailable (codex) session reports cost n/a; the fleet aggregate must
+    still sum the priced sessions instead of nulling the whole total (T0068 P1c)."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    (metrics_project / ".loop" / "sessions" / "claudesess" / "engine").mkdir(parents=True)
+    (metrics_project / ".loop" / "sessions" / "codexsess" / "engine").mkdir(parents=True)
+    _write_snapshot(metrics_project, "claudesess", checkpoint_tokens=10)
+    _write_snapshot(metrics_project, "codexsess", checkpoint_tokens=10)
+    _write_events(
+        metrics_project,
+        [
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "usage_source": "stream-json",
+                "cost_source": "provider",
+                "total_tokens": 100,
+                "cost_usd": 0.5,
+                "attempt_status": "success",
+            },
+        ],
+        session="claudesess",
+    )
+    _write_events(
+        metrics_project,
+        [
+            {"event": "brain-call"},
+            {
+                "event": "brain-usage",
+                "model": None,
+                "usage_source": "unavailable",
+                "cost_source": "unavailable",
+                "total_tokens": None,
+                "cost_usd": None,
+                "attempt_status": "success",
+            },
+        ],
+        session="codexsess",
+    )
+
+    result = _run_metrics_all(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    # the codex row is n/a, but the fleet total must be the priced session's spend
+    assert "cost_usd_7d:                 0.500000" in result.stdout
+    assert "brain_tokens_7d:             100" in result.stdout
+    # a real partial total IS flagged as partial
+    assert "partial total" in result.stdout
+
+
+def test_loop_metrics_fleet_all_unavailable_is_na_without_partial_flag(metrics_project: Path):
+    """When EVERY session is n/a the fleet cost is n/a (no total) — the 'partial total'
+    flag must NOT print (it would be misleading; T0068 P1c)."""
+    (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
+    unavailable = [
+        {"event": "brain-call"},
+        {
+            "event": "brain-usage",
+            "model": None,
+            "usage_source": "unavailable",
+            "cost_source": "unavailable",
+            "total_tokens": None,
+            "cost_usd": None,
+            "attempt_status": "success",
+        },
+    ]
+    # the fixture's 'demo' session is also discovered by --all; make EVERY session
+    # all-unavailable so the fleet truly has no priced row.
+    _write_snapshot(metrics_project, "demo", checkpoint_tokens=10)
+    _write_events(metrics_project, unavailable, session="demo")
+    for sess in ("codexa", "codexb"):
+        (metrics_project / ".loop" / "sessions" / sess / "engine").mkdir(parents=True)
+        _write_snapshot(metrics_project, sess, checkpoint_tokens=10)
+        _write_events(metrics_project, unavailable, session=sess)
+
+    result = _run_metrics_all(metrics_project)
+
+    assert result.returncode == 0, result.stderr
+    assert "cost_usd_7d:                 n/a" in result.stdout
+    assert "partial total" not in result.stdout
+
+
 def test_loop_metrics_missing_events_jsonl_degrades_to_zero(metrics_project: Path):
     (metrics_project / "ops-wiki" / "log.md").write_text("", encoding="utf-8")
 
