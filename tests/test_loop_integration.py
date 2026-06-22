@@ -2383,6 +2383,51 @@ def test_surface_build_done_on_branch_advance_clears_marker(project, monkeypatch
     assert emitted[-1]["branch_head"] == "sha-b"
 
 
+def test_surface_build_usage_emitted_on_build_done(project, monkeypatch):
+    """A completed codex build emits build-usage with token totals + config-priced
+    cost — the codex spend brain-usage never captured (T0069 phase 3)."""
+    paths = SessionPaths(project, "demo")
+    paths.ensure()
+    events = EventLog(paths.events_path)
+    record_build_marker(
+        paths,
+        {
+            "window": "web",
+            "branch": "loop/demo/web",
+            "pre_build_sha": "sha-a",
+            "pid": 123,
+            "started_at": utc_now(),
+        },
+    )
+    worktree = loop_mod.actions_mod._lane_worktree(paths, "web")
+    build_dir = Path(worktree) / ".loop" / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "codex-build-1.log").write_text(
+        '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,'
+        '"output_tokens":50,"reasoning_output_tokens":10}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Substrate, "branch_head", lambda self, _w, _b: "sha-b")
+    monkeypatch.setattr(Substrate, "process_command", lambda self, pid, timeout=2: None)
+
+    surface_build_results(
+        Substrate(project, "demo"),
+        paths,
+        events,
+        EngineConfig(codex_pricing={"input": 2.0, "output": 8.0}),
+    )
+
+    usage = [e for e in _events(paths) if e["event"] == "build-usage"]
+    assert len(usage) == 1
+    u = usage[0]
+    assert u["window"] == "web" and u["branch"] == "loop/demo/web"
+    assert u["usage_source"] == "codex-json" and u["cost_source"] == "computed"
+    assert u["input_tokens"] == 1000 and u["output_tokens"] == 60  # 50 + 10 reasoning
+    assert u["cache_read_input_tokens"] == 200 and u["total_tokens"] == 1060
+    assert u["cost_usd"] == pytest.approx((800 * 2 + 200 * 2 + 60 * 8) / 1_000_000)
+
+
 def test_surface_build_failed_when_runner_exits_without_branch_advance(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()

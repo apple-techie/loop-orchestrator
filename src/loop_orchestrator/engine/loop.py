@@ -28,7 +28,7 @@ from ..verify import DEFAULT_GATE_TIMEOUT_S, DEFAULT_LENS_TIMEOUT_S
 from . import actions as actions_mod
 from . import decision as decision_mod
 from . import decisions, gate, wiki
-from .brain import Brain, BrainError, oneshot_argv, run_oneshot
+from .brain import Brain, BrainError, codex_cost, codex_usage, oneshot_argv, run_oneshot
 from .config import EngineConfig, HarnessPolicy, lane_config_harnesses
 from .decision import DecisionError
 from .events import EventLog, parse_ts
@@ -273,7 +273,45 @@ def _save_verify_markers_best_effort(
     return True
 
 
-def surface_build_results(substrate: Substrate, paths: SessionPaths, events: EventLog) -> None:
+def _emit_build_usage(
+    substrate: Substrate,
+    paths: SessionPaths,
+    events: EventLog,
+    window: object,
+    branch: object,
+    pricing: dict | None,
+) -> None:
+    """Parse the just-finished build's codex `--json` log for token usage and emit a
+    build-usage event (tokens + config-priced cost) — the codex spend that brain-usage
+    never captured (T0069). No-op for a non-codex build or a log without usage. One
+    build-usage per build: the marker is removed on the terminal event, so it can't
+    re-emit next cycle."""
+    if not isinstance(window, str) or not window:
+        return
+    worktree = actions_mod._lane_worktree(paths, window)
+    text = substrate.read_build_log(worktree)
+    usage = codex_usage(text) if text else None
+    if usage is None:
+        return
+    cost, source = codex_cost(usage, pricing)
+    events.append(
+        "build-usage",
+        window=window,
+        branch=branch,
+        usage_source="codex-json",
+        cost_source=source,
+        cost_usd=cost,
+        **usage,
+    )
+
+
+def surface_build_results(
+    substrate: Substrate,
+    paths: SessionPaths,
+    events: EventLog,
+    config: EngineConfig | None = None,
+) -> None:
+    pricing = config.codex_pricing if config is not None else None
     with file_lock(paths.lock_path):
         markers = actions_mod.load_build_markers(paths)
         if not markers:
@@ -318,6 +356,7 @@ def surface_build_results(substrate: Substrate, paths: SessionPaths, events: Eve
                         pre_build_sha=pre_build_sha,
                         branch_head=branch_head,
                     )
+                    _emit_build_usage(substrate, paths, events, window, branch, pricing)
                     changed = True
                     _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
                     continue
@@ -349,6 +388,7 @@ def surface_build_results(substrate: Substrate, paths: SessionPaths, events: Eve
                             pre_build_sha=pre_build_sha,
                             branch_head=fresh_head or branch_head,
                         )
+                    _emit_build_usage(substrate, paths, events, window, branch, pricing)
                     changed = True
                     _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
                     continue
@@ -364,6 +404,7 @@ def surface_build_results(substrate: Substrate, paths: SessionPaths, events: Eve
                         pre_build_sha=pre_build_sha,
                         branch_head=branch_head,
                     )
+                    _emit_build_usage(substrate, paths, events, window, branch, pricing)
                     changed = True
                     _save_build_markers_best_effort(paths, remaining + markers[idx + 1 :], events)
                     continue
@@ -1829,7 +1870,7 @@ def run_once(
 
     substrate = Substrate(root, session)
     surface_verify_results(substrate, paths, events)
-    surface_build_results(substrate, paths, events)
+    surface_build_results(substrate, paths, events, config)
 
     pending = decisions.get(paths)
     if pending is not None:

@@ -352,6 +352,7 @@ def test_build_argv_uses_codex_exec_with_worktree_cd(sub, tmp_path, monkeypatch)
     assert argv == [
         "/bin/codex",
         "exec",
+        "--json",
         "--dangerously-bypass-approvals-and-sandbox",
         "--cd",
         str(tmp_path),
@@ -473,3 +474,31 @@ def test_build_log_tail_strips_ansi(sub, tmp_path):
 
 def test_build_log_tail_missing_returns_empty(sub, tmp_path):
     assert sub.build_log_tail(tmp_path / "absent") == ""
+
+
+def test_build_log_tail_renders_codex_json_events(sub, tmp_path):
+    """codex `exec --json` logs are JSONL — the deck tail must show the agent's
+    text/commands, not raw JSON, and skip pure-noise events (T0069)."""
+    log_dir = tmp_path / "wt" / ".loop" / "build"
+    log_dir.mkdir(parents=True)
+    (log_dir / "codex-build-1.log").write_text(
+        '{"type":"turn.started"}\n'
+        '{"type":"item.completed","item":{"type":"command_execution",'
+        '"command":"pytest -q"}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Implemented T0070."}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":5}}\n',
+        encoding="utf-8",
+    )
+    tail = sub.build_log_tail(tmp_path / "wt", lines=3)
+    assert "pytest -q" in tail
+    assert "Implemented T0070." in tail
+    assert "[usage] input=100 output=5" in tail
+    assert "turn.started" not in tail  # pure-noise event skipped
+
+
+def test_read_build_log_returns_newest_raw_text(sub, tmp_path):
+    log_dir = tmp_path / "wt" / ".loop" / "build"
+    log_dir.mkdir(parents=True)
+    (log_dir / "codex-build-1.log").write_text('{"type":"turn.completed"}\n', encoding="utf-8")
+    assert sub.read_build_log(tmp_path / "wt") == '{"type":"turn.completed"}\n'
+    assert sub.read_build_log(tmp_path / "absent") is None

@@ -16,6 +16,7 @@ Repo rule (enforced in CI): ``subprocess`` is imported only here and in
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import select
@@ -31,6 +32,34 @@ from .paths import normalize_project_root
 # Strips ANSI/CSI escape sequences from headless build-log lines (codex exec
 # output carries color codes) so the deck renders a clean tail.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _codex_log_readable(line: str) -> str | None:
+    """Readable form of a build-log line for the deck. A codex `exec --json` line is
+    a JSONL event — surface the agent message / command / reasoning text or a usage
+    summary, and skip pure-noise events (None). Non-JSON (plain output) passes
+    through unchanged, so a non-codex / non-json build log is rendered as before."""
+    if not line:
+        return None
+    if not (line.startswith("{") and line.endswith("}")):
+        return line
+    try:
+        obj = json.loads(line)
+    except (json.JSONDecodeError, ValueError):
+        return line
+    if not isinstance(obj, dict):
+        return line
+    if obj.get("type") == "item.completed" and isinstance(obj.get("item"), dict):
+        item = obj["item"]
+        for key in ("text", "command", "message"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return " ".join(value.split())[:200]
+        return None
+    if obj.get("type") == "turn.completed" and isinstance(obj.get("usage"), dict):
+        usage = obj["usage"]
+        return f"[usage] input={usage.get('input_tokens')} output={usage.get('output_tokens')}"
+    return None
 
 # Canonical primitive name -> repo-relative fallback script.
 _REPO_RELATIVE = {
@@ -375,8 +404,12 @@ class Substrate:
         return ["codex"]
 
     def _build_argv(self, worktree: str | Path, brief: str) -> list[str]:
+        # --json: codex emits JSONL events (turn.completed usage + item.completed
+        # agent text) so the build's token cost is captured (T0069) AND the agent
+        # message is parseable; build_log_tail renders it back to readable text.
         return self._codex_argv() + [
             "exec",
+            "--json",
             "--dangerously-bypass-approvals-and-sandbox",
             "--cd",
             str(worktree),
@@ -403,26 +436,52 @@ class Substrate:
             return None
         return result if isinstance(result, dict) else None
 
-    def build_log_tail(self, worktree: str | Path, lines: int = 3) -> str:
-        """Last <lines> non-blank lines of the NEWEST codex-build-*.log under
-        <worktree>/.loop/build/ — the headless build's live output, for the deck's
-        headless-activity panel. Pure file read (glob + read_text), NO subprocess,
-        ANSI-stripped; '' when no log exists. Read-only — deck non-writer safe."""
+    def _newest_build_log(self, worktree: str | Path) -> Path | None:
+        """Path of the newest codex-build-*.log under <worktree>/.loop/build/, or
+        None. Builds are serialized per worktree, so the newest log is the current/
+        just-finished build."""
         log_dir = Path(worktree) / ".loop" / "build"
         try:
             logs = [p for p in log_dir.glob("codex-build-*.log") if p.is_file()]
         except OSError:
-            return ""
+            return None
         if not logs:
+            return None
+        try:
+            return max(logs, key=lambda p: p.stat().st_mtime)
+        except OSError:
+            return None
+
+    def read_build_log(self, worktree: str | Path) -> str | None:
+        """Raw text of the newest build log (for token-usage parsing); None when
+        absent/unreadable. Read-only."""
+        path = self._newest_build_log(worktree)
+        if path is None:
+            return None
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def build_log_tail(self, worktree: str | Path, lines: int = 3) -> str:
+        """Last <lines> readable lines of the NEWEST codex-build-*.log under
+        <worktree>/.loop/build/ — the headless build's live output, for the deck's
+        headless-activity panel. codex `exec --json` lines are rendered back to the
+        agent's text/commands (raw plain lines pass through); pure-noise JSONL events
+        are skipped. Pure file read, ANSI-stripped; '' when no log exists. Read-only."""
+        path = self._newest_build_log(worktree)
+        if path is None:
             return ""
         try:
-            newest = max(logs, key=lambda p: p.stat().st_mtime)
-            text = newest.read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ""
-        clean = (_ANSI_RE.sub("", line).strip() for line in text.splitlines())
-        non_blank = [line for line in clean if line]
-        return "\n".join(non_blank[-lines:])
+        readable: list[str] = []
+        for raw in text.splitlines():
+            line = _codex_log_readable(_ANSI_RE.sub("", raw).strip())
+            if line:
+                readable.append(line)
+        return "\n".join(readable[-lines:])
 
     # ── lanes ─────────────────────────────────────────────────────────────
 
