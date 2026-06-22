@@ -367,6 +367,7 @@ def test_cost_source_contract_in_sync():
         brain.COST_SOURCE_PROVIDER,
         brain.COST_SOURCE_UNPRICED,
         brain.COST_SOURCE_UNAVAILABLE,
+        brain.COST_SOURCE_COMPUTED,
     }
     script = SCRIPT.read_text(encoding="utf-8")
     referenced = set(re.findall(r'cost_source == "([^"]+)"', script))

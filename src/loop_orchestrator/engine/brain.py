@@ -278,6 +278,19 @@ def stream_argv(argv: list[str]) -> list[str] | None:
     return out
 
 
+def codex_stream_argv(argv: list[str]) -> list[str] | None:
+    """argv with `--json` appended (deduped) when this is a `codex exec` invocation,
+    so usage + the agent message stream as JSONL for CodexRenderer. None when it is
+    not codex. Recognises a direct `codex exec ...` (binary basename codex + the exec
+    subcommand); an adapter-wrapped codex must add --json itself."""
+    if not argv:
+        return None
+    is_codex = Path(argv[0]).name == "codex" and "exec" in argv
+    if not is_codex:
+        return None
+    return list(argv) if "--json" in argv else [*argv[:-1], "--json", argv[-1]]
+
+
 def _transcript_paths(transcript_dir: Path) -> tuple[Path, Path]:
     """Unique <ts>.prompt.md / <ts>.response.md pair under transcript_dir."""
     transcript_dir.mkdir(parents=True, exist_ok=True)
@@ -322,6 +335,8 @@ class StreamRenderer:
     lands in .result_text (the invocation's return value) and assistant text
     blocks accumulate in .assistant_text as the fallback.
     """
+
+    usage_source = "stream-json"
 
     def __init__(self):
         self._buf = ""
@@ -406,6 +421,83 @@ class StreamRenderer:
             self.cost_usd = cost
             return f"=== result: {subtype or '?'} ===\n"
         return ""  # hooks, thinking_tokens, tool results, rate limits: noise
+
+
+class CodexRenderer:
+    """Reassembles codex `exec --json` JSONL (schema live-probed): an
+    `item.completed`/`agent_message` carries the agent's text (the return value),
+    and `turn.completed` carries per-turn token usage. Same interface as
+    StreamRenderer so run_oneshot can drive either. Codex reports tokens but not
+    USD, so cost is computed locally from `pricing` (COST_SOURCE_COMPUTED) or left
+    unpriced; usage_source distinguishes it from claude on the brain-usage event."""
+
+    usage_source = "codex-json"
+
+    def __init__(self, pricing: dict | None = None):
+        self._buf = ""
+        self._pricing = pricing
+        self._messages: list[str] = []
+        self._inp = self._cached = self._out = 0
+        self.result_error: str | None = None
+        self.model: str | None = None
+        self.usage: dict[str, int] | None = None
+        self.cost_usd: float | None = None
+        self.cost_source: str = COST_SOURCE_UNAVAILABLE
+
+    @property
+    def result_text(self) -> str | None:
+        return "\n".join(self._messages) if self._messages else None
+
+    @property
+    def assistant_text(self) -> list[str]:
+        return list(self._messages)
+
+    def feed(self, text: str) -> str:
+        self._buf += text
+        rendered: list[str] = []
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            rendered.append(self._render(line))
+        return "".join(rendered)
+
+    def finish(self) -> str:
+        line, self._buf = self._buf, ""
+        return self._render(line)
+
+    def _render(self, line: str) -> str:
+        line = line.strip()
+        if not line:
+            return ""
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return line + "\n"  # not JSONL: pass through verbatim
+        if not isinstance(obj, dict):
+            return ""
+        kind = obj.get("type")
+        if kind == "turn.completed" and isinstance(obj.get("usage"), dict):
+            u = obj["usage"]
+            self._inp += _nonnegative_int(u.get("input_tokens")) or 0
+            self._cached += _nonnegative_int(u.get("cached_input_tokens")) or 0
+            self._out += (_nonnegative_int(u.get("output_tokens")) or 0) + (
+                _nonnegative_int(u.get("reasoning_output_tokens")) or 0
+            )
+            self.usage = {
+                "input_tokens": self._inp,
+                "output_tokens": self._out,
+                "cache_read_input_tokens": self._cached,
+                "total_tokens": self._inp + self._out,
+            }
+            self.cost_usd, self.cost_source = codex_cost(self.usage, self._pricing)
+            return ""
+        if kind == "item.completed":
+            item = obj.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str) and text:
+                    self._messages.append(text)
+                    return text.rstrip("\n") + "\n"
+        return ""
 
 
 def _pump(stdout, on_text) -> None:
@@ -517,7 +609,7 @@ def _emit_brain_usage(
             "brain-usage",
             harness=harness,
             model=renderer.model,
-            usage_source="stream-json",
+            usage_source=getattr(renderer, "usage_source", "stream-json"),
             cost_source=renderer.cost_source,
             cost_usd=renderer.cost_usd,
             **attempt_fields,
@@ -550,10 +642,13 @@ def run_oneshot(
     cwd: Path,
     max_retries: int = 0,
     stream: bool = False,
+    renderer_factory=StreamRenderer,
     **call_fields,
 ) -> str:
     """Spawn a one-shot harness and return its stdout (with stream=True: the
-    stream-json 'result' text, so decision parsing is unchanged).
+    renderer's extracted 'result' text, so decision parsing is unchanged).
+    renderer_factory builds the per-attempt renderer when stream=True — StreamRenderer
+    for claude stream-json, CodexRenderer for codex --json.
 
     Writes the prompt transcript up front and appends stdout to the response
     transcript as it arrives — live-tailable from t=0. Emits '<prefix>-call'
@@ -576,7 +671,7 @@ def run_oneshot(
     last_failure_kind = "exit"
     last_excerpt = ""
     for attempt in range(1, attempts + 1):
-        renderer = StreamRenderer() if stream else None
+        renderer = renderer_factory() if stream else None
         try:
             returncode, stdout = _run_attempt(argv, timeout_s, cwd, response_path, renderer)
         except subprocess.TimeoutExpired:
@@ -696,7 +791,15 @@ class Brain:
             )
         argv = self._argv(prompt)
         stream = False
-        if cfg.stream:
+        renderer_factory = StreamRenderer
+        codexed = codex_stream_argv(argv)
+        if codexed is not None:
+            # codex always streams --json: it is the only way to capture usage AND
+            # extract the agent message cleanly (raw JSONL would break decision parse).
+            argv, stream = codexed, True
+            pricing = self.config.codex_pricing
+            renderer_factory = lambda: CodexRenderer(pricing)  # noqa: E731
+        elif cfg.stream:
             streamed = stream_argv(argv)
             if streamed is None:
                 self.events.append("warning", kind="brain-stream-unsupported", harness=cfg.harness)
@@ -712,5 +815,6 @@ class Brain:
             cwd=self.paths.project_root,
             max_retries=cfg.max_retries,
             stream=stream,
+            renderer_factory=renderer_factory,
             harness=cfg.harness,
         )

@@ -14,9 +14,11 @@ from loop_orchestrator.engine.brain import (
     Brain,
     BrainBudgetError,
     BrainInvocationError,
+    CodexRenderer,
     StreamRenderer,
     classify_failure,
     codex_cost,
+    codex_stream_argv,
     codex_usage,
     oneshot_argv,
     run_oneshot,
@@ -679,3 +681,62 @@ def test_codex_cost_cached_defaults_to_input_rate():
     cost, source = codex_cost(usage, {"input": 2.0, "output": 8.0})  # no cached rate
     assert source == "computed"
     assert cost == pytest.approx(2.0)  # all 1M input @ $2 (cached billed at input rate)
+
+
+def test_codex_stream_argv_adds_json_for_codex_exec_only():
+    assert codex_stream_argv(["codex", "exec", "do it"]) == ["codex", "exec", "--json", "do it"]
+    assert codex_stream_argv(["/x/codex", "exec", "--cd", "/wt", "brief"]) == [
+        "/x/codex", "exec", "--cd", "/wt", "--json", "brief",
+    ]
+    assert codex_stream_argv(["codex", "exec", "--json", "p"]) == ["codex", "exec", "--json", "p"]
+    assert codex_stream_argv(["claude", "-p", "x"]) is None  # not codex
+    assert codex_stream_argv(["codex", "login"]) is None  # not the exec subcommand
+    assert codex_stream_argv([]) is None
+
+
+def test_codex_renderer_extracts_message_and_sums_usage():
+    r = CodexRenderer(pricing={"input": 1.0, "cached": 0.25, "output": 4.0})
+    rendered = r.feed(
+        '{"type":"turn.completed","usage":{"input_tokens":1000000,'
+        '"cached_input_tokens":200000,"output_tokens":100000,"reasoning_output_tokens":0}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"the decision"}}\n'
+    )
+    assert "the decision" in rendered
+    assert r.result_text == "the decision"
+    assert r.usage == {
+        "input_tokens": 1000000,
+        "output_tokens": 100000,
+        "cache_read_input_tokens": 200000,
+        "total_tokens": 1100000,
+    }
+    assert r.cost_source == "computed"
+    assert r.cost_usd == pytest.approx(0.8 + 0.05 + 0.4)
+
+
+def test_brain_invoke_codex_emits_usage_and_returns_message(tmp_path, env, monkeypatch):
+    paths, events = env
+    fake = _script(
+        tmp_path,
+        "codex",
+        "cat <<'J'\n"
+        '{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":200,'
+        '"output_tokens":50,"reasoning_output_tokens":10}}\n'
+        '{"type":"item.completed","item":{"type":"agent_message","text":"BRAIN-OK"}}\n'
+        "J\n",
+    )
+    monkeypatch.setenv("LOOP_ENGINE_BRAIN_CMD", f"{fake} exec")
+    cfg = EngineConfig(codex_pricing={"input": 2.0, "output": 8.0})
+    brain = Brain(cfg, None, paths, events)
+
+    assert brain.invoke("decide") == "BRAIN-OK"  # clean agent message, not raw JSONL
+
+    usage = [e for e in events.tail(20) if e["event"] == "brain-usage"]
+    assert len(usage) == 1
+    u = usage[0]
+    assert u["usage_source"] == "codex-json"
+    assert u["cost_source"] == "computed"
+    assert u["attempt_status"] == "success"
+    assert u["input_tokens"] == 1000 and u["output_tokens"] == 60  # 50 + 10 reasoning
+    assert u["cache_read_input_tokens"] == 200 and u["total_tokens"] == 1060
+    # 800 non-cached input @2 + 200 cached @2 (default) + 60 output @8
+    assert u["cost_usd"] == pytest.approx((800 * 2 + 200 * 2 + 60 * 8) / 1_000_000)
