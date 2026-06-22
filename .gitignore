@@ -17,3 +17,11 @@ dist/
 
 # ops-wiki lint scratchpad (T0005)
 ops-wiki/.lint-scratchpad.md
+
+# Active task backlog (T0068 P2): per-session operational state the loop auto-
+# creates/edits, NOT source — without this the loop's auto-add re-tracks active
+# task files and leaks them into source commits (the d06155b chore only `git rm
+# --cached`'d the symptom). The completed-task record under tasks/archive/ and
+# tasks/README.md stay tracked (this anchored pattern matches only direct
+# children of tasks/, not tasks/archive/).
+/tasks/T*.md

@@ -92,6 +92,15 @@ def _usage_fields(usage: object) -> dict[str, int] | None:
     return out
 
 
+# cost_source values stamped on brain-usage events — the contract scripts/
+# loop-metrics.sh reads to aggregate cost/tokens. Single source of truth; the two
+# files are in separate languages, so test_cost_source_contract_in_sync guards
+# loop-metrics.sh against drift from these names.
+COST_SOURCE_PROVIDER = "provider"  # real cost captured from the harness
+COST_SOURCE_UNPRICED = "unpriced"  # usage present but no price for the model
+COST_SOURCE_UNAVAILABLE = "unavailable"  # no usage/renderer (e.g. codex): cost unknown
+
+
 def _model_usage_cost(obj: dict) -> tuple[float | None, str | None]:
     model_usage = obj.get("modelUsage")
     if not isinstance(model_usage, dict):
@@ -103,10 +112,10 @@ def _model_usage_cost(obj: dict) -> tuple[float | None, str | None]:
             continue
         cost = _nonnegative_float(value.get("costUSD"))
         if cost is None:
-            return None, "unpriced"
+            return None, COST_SOURCE_UNPRICED
         total += cost
         seen = True
-    return (total, "provider") if seen else (None, None)
+    return (total, COST_SOURCE_PROVIDER) if seen else (None, None)
 
 
 def _result_cost(obj: dict, usage: dict[str, int] | None) -> tuple[float | None, str]:
@@ -115,21 +124,21 @@ def _result_cost(obj: dict, usage: dict[str, int] | None) -> tuple[float | None,
     usage_tokens = usage.get("total_tokens", 0) if usage is not None else 0
     if isinstance(model_usage, dict) and model_usage:
         model_cost, source = _model_usage_cost(obj)
-        if source == "unpriced":
-            return None, "unpriced"
+        if source == COST_SOURCE_UNPRICED:
+            return None, COST_SOURCE_UNPRICED
         if cost is not None:
             if cost == 0 and usage_tokens > 0:
-                return None, "unpriced"
-            return cost, "provider"
+                return None, COST_SOURCE_UNPRICED
+            return cost, COST_SOURCE_PROVIDER
         if model_cost is not None:
             if model_cost == 0 and usage_tokens > 0:
-                return None, "unpriced"
-            return model_cost, "provider"
+                return None, COST_SOURCE_UNPRICED
+            return model_cost, COST_SOURCE_PROVIDER
     if cost is not None:
         if cost == 0 and usage_tokens > 0:
-            return None, "unpriced"
-        return cost, "provider"
-    return None, "unpriced" if usage is not None else "unavailable"
+            return None, COST_SOURCE_UNPRICED
+        return cost, COST_SOURCE_PROVIDER
+    return None, COST_SOURCE_UNPRICED if usage is not None else COST_SOURCE_UNAVAILABLE
 
 
 def _model_from_usage(obj: dict) -> str | None:
@@ -261,7 +270,7 @@ class StreamRenderer:
         self.model: str | None = None
         self.usage: dict[str, int] | None = None
         self.cost_usd: float | None = None
-        self.cost_source: str = "unavailable"
+        self.cost_source: str = COST_SOURCE_UNAVAILABLE
 
     def feed(self, text: str) -> str:
         self._buf += text
@@ -459,7 +468,7 @@ def _emit_brain_usage(
         harness=harness,
         model=renderer.model if renderer is not None else None,
         usage_source="unavailable",
-        cost_source="unavailable",
+        cost_source=COST_SOURCE_UNAVAILABLE,
         input_tokens=None,
         output_tokens=None,
         cache_creation_input_tokens=None,

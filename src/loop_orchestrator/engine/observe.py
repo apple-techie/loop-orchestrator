@@ -143,8 +143,14 @@ class Observer:
         self.paths = paths
 
     def snapshot(self) -> EngineSnapshot:
-        expected_lanes = self.substrate.lanes()
-        statuses = self.substrate.lane_status_all(timeout=adaptive_timeout(len(expected_lanes)))
+        # The adaptive-timeout lane count comes from the PRIOR snapshot, not a fresh
+        # substrate.lanes() subprocess every poll (~10s) — that spawn (T0060) defeated
+        # loop.py's deliberate call-profile gate and cost ~6 extra spawns/min/loop.
+        # Only the cold start (no prior snapshot) pays the spawn; the count is stable
+        # cycle-to-cycle, and lane_status_all below returns the authoritative lanes.
+        prior = load_last_snapshot(self.paths.snapshot_path)
+        lane_count = len(prior.lanes) if prior is not None else len(self.substrate.lanes())
+        statuses = self.substrate.lane_status_all(timeout=adaptive_timeout(lane_count))
         digest = self.substrate.digest()
         state = digest.get("state")
         loops = state.get("loops") if isinstance(state, dict) else None

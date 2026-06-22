@@ -29,8 +29,10 @@ class StubSubstrate:
         self.prompt: str | None = "x" * 400
         self.fanout_fails = False  # F7: simulate a slow/failed all-lanes fan-out
         self.lane_status_timeout: float | None = None
+        self.lanes_call_count = 0
 
     def lanes(self):
+        self.lanes_call_count += 1
         return [
             LaneInfo(
                 window=name,
@@ -141,6 +143,24 @@ def test_snapshot_passes_adaptive_timeout_to_lane_status_all(tmp_path):
     Observer(stub, paths).snapshot()
 
     assert stub.lane_status_timeout == adaptive_timeout(2)
+
+
+def test_snapshot_reuses_prior_lane_count_without_per_poll_spawn(tmp_path):
+    """The adaptive-timeout lane count comes from the prior snapshot, so steady-state
+    polling does NOT spawn substrate.lanes() every cycle (T0060 regression / T0068 P2).
+    Cold start (no prior) pays one spawn; later cycles reuse the persisted count."""
+    paths = SessionPaths(tmp_path, "demo")
+    paths.ensure()
+    stub = StubSubstrate()
+    obs = Observer(stub, paths)
+
+    obs.snapshot()  # cold start: one lanes() spawn to seed the count
+    assert stub.lanes_call_count == 1
+    assert stub.lane_status_timeout == adaptive_timeout(2)
+
+    obs.snapshot()  # steady state: lane count read from snapshot.json, no new spawn
+    assert stub.lanes_call_count == 1
+    assert stub.lane_status_timeout == adaptive_timeout(2)  # still reflects the 2 lanes
 
 
 def test_from_dict_roundtrips_via_to_dict(tmp_path):

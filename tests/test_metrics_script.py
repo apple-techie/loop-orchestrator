@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -353,6 +354,28 @@ def test_loop_metrics_brain_calls_without_usage_report_na_not_zero(metrics_proje
     assert "brain_tokens_7d:                 n/a" in result.stdout
     assert "cost_usd_7d:                     n/a" in result.stdout
     assert "0.000000" not in result.stdout
+
+
+def test_cost_source_contract_in_sync():
+    """brain.py owns the cost_source string contract; loop-metrics.sh consumes it in
+    another language with no shared constant. Guard against silent drift: every
+    cost_source literal the aggregator branches on must be one brain.py defines, and
+    the two it keys on must stay defined (T0068 P2)."""
+    from loop_orchestrator.engine import brain
+
+    known = {
+        brain.COST_SOURCE_PROVIDER,
+        brain.COST_SOURCE_UNPRICED,
+        brain.COST_SOURCE_UNAVAILABLE,
+    }
+    script = SCRIPT.read_text(encoding="utf-8")
+    referenced = set(re.findall(r'cost_source == "([^"]+)"', script))
+    assert referenced, "expected loop-metrics.sh to branch on cost_source"
+    assert not (referenced - known), (
+        f"loop-metrics.sh references cost_source value(s) brain.py does not define: "
+        f"{referenced - known}"
+    )
+    assert {brain.COST_SOURCE_UNAVAILABLE, brain.COST_SOURCE_UNPRICED} <= referenced
 
 
 def test_loop_metrics_retry_failed_attempt_not_double_counted(metrics_project: Path):
