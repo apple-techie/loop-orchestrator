@@ -92,6 +92,12 @@ lanes:
 #     max_calls_per_hour: 12
 #     extra_args: []
 #     stream: false                # claude stream-json into the live transcript (deck 'b')
+#   codex_pricing:                 # USD per 1M tokens — turns codex brain + build cost
+#     input: 5.0                   # from n/a into real USD (T0069). empty = unpriced.
+#     cached: 0.5                  # cached input rate (defaults to `input` if omitted)
+#     output: 30.0                 # output incl. reasoning. example = GPT-5.5 canonical.
+#     long_context_threshold: 272000  # prompts over this bill input 2x / output 1.5x;
+#                                      # <=0 disables the long-context surcharge.
 #   ingest:
 #     mode: lane                   # lane (nudge the docs lane) | headless
 #     lane: docs

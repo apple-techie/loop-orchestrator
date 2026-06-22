@@ -190,8 +190,10 @@ def codex_cost(usage: dict[str, int] | None, pricing: dict | None) -> tuple[floa
     """USD cost for a codex usage dict from a per-1M-token price table
     {input, cached, output} (USD per million tokens). Non-cached input is billed at
     `input`, cached input at `cached` (defaults to the input rate when absent), and
-    output (incl. reasoning) at `output`. Empty/partial pricing -> (None, 'unpriced')
-    — tokens are real but no rates configured; priced -> (cost, 'computed')."""
+    output (incl. reasoning) at `output`. A prompt over the long-context threshold
+    bills input 2x / output 1.5x (OpenAI's >272K tier; configurable, see below).
+    Empty/partial pricing -> (None, 'unpriced') — tokens are real but no rates
+    configured; priced -> (cost, 'computed')."""
     if usage is None:
         return None, COST_SOURCE_UNAVAILABLE
     if not isinstance(pricing, dict) or not pricing:
@@ -203,8 +205,17 @@ def codex_cost(usage: dict[str, int] | None, pricing: dict | None) -> tuple[floa
     rate_cached = _nonnegative_float(pricing.get("cached"))
     if rate_cached is None:
         rate_cached = rate_in
+    input_tokens = usage.get("input_tokens", 0)
+    # OpenAI long-context tier: a prompt over the threshold (gpt-5.5: 272K input
+    # tokens) bills input 2x and output 1.5x for the full session. Threshold is
+    # configurable (pricing["long_context_threshold"]); <=0 disables the surcharge.
+    threshold = pricing.get("long_context_threshold", 272_000)
+    if isinstance(threshold, (int, float)) and threshold > 0 and input_tokens > threshold:
+        rate_in *= 2.0
+        rate_cached *= 2.0
+        rate_out *= 1.5
     cached = usage.get("cache_read_input_tokens", 0)
-    non_cached_input = max(0, usage.get("input_tokens", 0) - cached)
+    non_cached_input = max(0, input_tokens - cached)
     cost = (
         non_cached_input * rate_in + cached * rate_cached + usage.get("output_tokens", 0) * rate_out
     ) / 1_000_000

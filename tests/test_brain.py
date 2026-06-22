@@ -660,27 +660,70 @@ def test_codex_cost_unpriced_or_unavailable_without_rates():
 
 def test_codex_cost_computed_bills_cached_separately():
     usage = {
-        "input_tokens": 1_000_000,  # includes 200k cached
-        "output_tokens": 100_000,
-        "cache_read_input_tokens": 200_000,
-        "total_tokens": 1_100_000,
+        "input_tokens": 100_000,  # under the long-context threshold; includes 20k cached
+        "output_tokens": 10_000,
+        "cache_read_input_tokens": 20_000,
+        "total_tokens": 110_000,
     }
     cost, source = codex_cost(usage, {"input": 1.0, "cached": 0.25, "output": 4.0})
     assert source == "computed"
-    # 800k non-cached input @1 + 200k cached @0.25 + 100k output @4 = 1.25
-    assert cost == pytest.approx(0.8 + 0.05 + 0.4)
+    # 80k non-cached input @1 + 20k cached @0.25 + 10k output @4
+    assert cost == pytest.approx((80_000 * 1.0 + 20_000 * 0.25 + 10_000 * 4.0) / 1_000_000)
 
 
 def test_codex_cost_cached_defaults_to_input_rate():
     usage = {
-        "input_tokens": 1_000_000,
+        "input_tokens": 100_000,
         "output_tokens": 0,
-        "cache_read_input_tokens": 200_000,
-        "total_tokens": 1_000_000,
+        "cache_read_input_tokens": 20_000,
+        "total_tokens": 100_000,
     }
     cost, source = codex_cost(usage, {"input": 2.0, "output": 8.0})  # no cached rate
     assert source == "computed"
-    assert cost == pytest.approx(2.0)  # all 1M input @ $2 (cached billed at input rate)
+    assert cost == pytest.approx(0.2)  # all 100k input @ $2 (cached billed at input rate)
+
+
+def test_codex_cost_long_context_surcharge_over_threshold():
+    """A prompt over the 272K input threshold bills input 2x / output 1.5x for the
+    whole session (OpenAI long-context tier)."""
+    usage = {
+        "input_tokens": 300_000,  # > 272K -> surcharge
+        "output_tokens": 100_000,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 400_000,
+    }
+    cost, source = codex_cost(usage, {"input": 5.0, "cached": 0.5, "output": 30.0})
+    assert source == "computed"
+    # 300k input @ (5*2) + 100k output @ (30*1.5)
+    assert cost == pytest.approx((300_000 * 10.0 + 100_000 * 45.0) / 1_000_000)
+
+
+def test_codex_cost_no_surcharge_just_under_threshold():
+    usage = {
+        "input_tokens": 272_000,  # exactly at threshold -> NOT over -> base rates
+        "output_tokens": 10_000,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 282_000,
+    }
+    cost, _ = codex_cost(usage, {"input": 5.0, "output": 30.0})
+    assert cost == pytest.approx((272_000 * 5.0 + 10_000 * 30.0) / 1_000_000)
+
+
+def test_codex_cost_long_context_threshold_configurable_and_disablable():
+    usage = {
+        "input_tokens": 300_000,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 300_000,
+    }
+    # disabled (<=0) -> base rate even over 272K
+    cost_off, _ = codex_cost(usage, {"input": 5.0, "output": 30.0, "long_context_threshold": 0})
+    assert cost_off == pytest.approx(300_000 * 5.0 / 1_000_000)
+    # lower custom threshold -> surcharge kicks in earlier
+    cost_low, _ = codex_cost(
+        usage, {"input": 5.0, "output": 30.0, "long_context_threshold": 100_000}
+    )
+    assert cost_low == pytest.approx(300_000 * 10.0 / 1_000_000)
 
 
 def test_codex_stream_argv_adds_json_for_codex_exec_only():
@@ -697,20 +740,20 @@ def test_codex_stream_argv_adds_json_for_codex_exec_only():
 def test_codex_renderer_extracts_message_and_sums_usage():
     r = CodexRenderer(pricing={"input": 1.0, "cached": 0.25, "output": 4.0})
     rendered = r.feed(
-        '{"type":"turn.completed","usage":{"input_tokens":1000000,'
-        '"cached_input_tokens":200000,"output_tokens":100000,"reasoning_output_tokens":0}}\n'
+        '{"type":"turn.completed","usage":{"input_tokens":100000,'
+        '"cached_input_tokens":20000,"output_tokens":10000,"reasoning_output_tokens":0}}\n'
         '{"type":"item.completed","item":{"type":"agent_message","text":"the decision"}}\n'
     )
     assert "the decision" in rendered
     assert r.result_text == "the decision"
     assert r.usage == {
-        "input_tokens": 1000000,
-        "output_tokens": 100000,
-        "cache_read_input_tokens": 200000,
-        "total_tokens": 1100000,
+        "input_tokens": 100000,
+        "output_tokens": 10000,
+        "cache_read_input_tokens": 20000,
+        "total_tokens": 110000,
     }
-    assert r.cost_source == "computed"
-    assert r.cost_usd == pytest.approx(0.8 + 0.05 + 0.4)
+    assert r.cost_source == "computed"  # under the long-context threshold -> base rates
+    assert r.cost_usd == pytest.approx((80_000 * 1.0 + 20_000 * 0.25 + 10_000 * 4.0) / 1_000_000)
 
 
 def test_brain_invoke_codex_emits_usage_and_returns_message(tmp_path, env, monkeypatch):
