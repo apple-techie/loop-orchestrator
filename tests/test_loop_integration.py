@@ -1895,6 +1895,20 @@ def test_drive_escalate_surfaced_key_semantics(project):
     assert len([e for e in _events(paths) if e["event"] == "drive-escalate-surfaced"]) == 1
 
 
+def test_event_matches_branch_rejects_untagged_when_branch_known():
+    """When a window's branch is known, only an event tagged with that EXACT branch
+    counts — an untagged or other-branch event must not, else a recycled window's old
+    untagged events mis-count toward the new branch's fix-round cap (T0068 P3)."""
+    assert loop_mod._event_matches_branch({"branch": "loop/x"}, "loop/x") is True
+    assert loop_mod._event_matches_branch({"branch": "loop/y"}, "loop/x") is False
+    assert loop_mod._event_matches_branch({}, "loop/x") is False  # untagged -> no match
+    assert loop_mod._event_matches_branch({"branch": ""}, "loop/x") is False
+    assert loop_mod._event_matches_branch({"branch": 123}, "loop/x") is False  # non-str
+    # no branch to disambiguate against -> legacy lenient (count everything)
+    assert loop_mod._event_matches_branch({}, None) is True
+    assert loop_mod._event_matches_branch({"branch": "loop/x"}, None) is True
+
+
 def test_prompt_verify_drive_suppresses_passed_outcome_when_branch_stale(project, monkeypatch):
     paths = SessionPaths(project, "demo")
     paths.ensure()

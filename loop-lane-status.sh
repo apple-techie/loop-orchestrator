@@ -82,11 +82,29 @@ with_timeout() {
     ' "$seconds" "$@"
     return $?
   fi
-  "$@" &
+  # Pure-bash last resort (no gtimeout AND no perl — rare; perl is near-universal).
+  # Run in its OWN process group via setsid when present so the kill reaches the
+  # whole tree (a child subprocess otherwise outlives the timeout), and escalate
+  # TERM->KILL like the perl branch (the old single TERM let a TERM-ignoring command
+  # run to completion). Without job control (this script never sets -m) setsid does
+  # not fork, so cmd_pid IS the command and stays waitable; -cmd_pid targets its
+  # group and can never be this script's pgid (cmd_pid is a fresh child pid). The
+  # `||` single-pid fallbacks keep it correct if the group signal is unsupported.
+  local runner=""
+  command -v setsid >/dev/null 2>&1 && runner="setsid"
+  $runner "$@" &
   local cmd_pid=$!
   (
     sleep "$seconds"
-    kill "$cmd_pid" 2>/dev/null || true
+    if [ -n "$runner" ]; then
+      kill -TERM -"$cmd_pid" 2>/dev/null || kill -TERM "$cmd_pid" 2>/dev/null || true
+      sleep 0.1
+      kill -KILL -"$cmd_pid" 2>/dev/null || kill -KILL "$cmd_pid" 2>/dev/null || true
+    else
+      kill -TERM "$cmd_pid" 2>/dev/null || true
+      sleep 0.1
+      kill -KILL "$cmd_pid" 2>/dev/null || true
+    fi
   ) &
   local timer_pid=$!
   wait "$cmd_pid"

@@ -661,10 +661,14 @@ def _branch_by_window(paths: SessionPaths) -> dict[str, str]:
 
 
 def _event_matches_branch(event: dict, branch: str | None) -> bool:
+    # When the window's current branch is known, an event counts only if it is tagged
+    # with that EXACT branch. An untagged (missing/empty/non-str) or other-branch event
+    # must NOT match — otherwise a recycled window's stale events bleed into the new
+    # branch's fix-round count (T0068 P3). branch=None (nothing to disambiguate against)
+    # stays lenient: count everything.
     if branch is None:
         return True
-    event_branch = event.get("branch")
-    return not isinstance(event_branch, str) or not event_branch or event_branch == branch
+    return event.get("branch") == branch
 
 
 def _finding_count(event: dict) -> int | None:
